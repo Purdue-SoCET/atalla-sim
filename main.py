@@ -1,6 +1,6 @@
 from scoreboard import Scoreboard
 from pipeline import *
-from instruction import decode_instruction
+from instruction import *
 
 #Initialize
 scoreboard = Scoreboard()
@@ -13,9 +13,21 @@ instruction_list = [
     "jal R6, 12",
     "sw.i R5, 16(R1)"
 ]
+word_list = []
+word_list.append(bytes.fromhex('20000093')[::-1]) # addi.i x1, x0, 512
+word_list.append(bytes.fromhex('1a400193')[::-1]) # addi.i x3, x0, 420
+word_list.append(bytes.fromhex('0000a103')[::-1]) # lw x2, 0(x1)
+word_list.append(bytes.fromhex('0030a223')[::-1]) # sw x3, 4(x1)
+word_list.append(bytes.fromhex('10800447')[::-1]) # ld.m m1, x0, (8)x1
+word_list.append(bytes.fromhex('31110077')[::-1]) # gemm m3, m1, m1, m1
+word_list.append(bytes.fromhex('30801457')[::-1]) # st.m m3, x0, (40)x1
+word_list.append(bytes.fromhex('FFFFFFFF')[::-1]) # HALT
+print(len(word_list))
 
 #DECODE LOGIC - to implement from assembler
-decoded_instructions = [decode_instruction(instr) for instr in instruction_list]
+# decoded_instructions = [decode_instruction(instr) for instr in instruction_list]
+decoded_instructions = [decode_word(instr) for instr in word_list]
+
 
 fetch = FetchStage(decoded_instructions)
 dispatch = DispatchStage(scoreboard)
