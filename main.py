@@ -37,14 +37,27 @@ write_back = WriteBackStage(scoreboard)
 
 global_tick = 0
 
+to_write_back = None
+to_execute = None
+to_issue = None
+to_dispatch = None
+fetched_instr = None
+
 while global_tick < 15:
     print(f"\n--- Tick {global_tick} ---")
     
+    # fetched_instr = fetch.process(global_tick)
+    # dispatched_instr = dispatch.process(fetched_instr, global_tick)
+    # issued_instr = issue.process(dispatched_instr, global_tick)
+    # executed_instr = execute.process(issued_instr, global_tick)
+    # write_back.process(executed_instr, global_tick)
+
+    write_back.process(to_write_back, global_tick)
+    to_write_back = execute.process(to_execute, global_tick)
+    to_execute = issue.process(to_issue, global_tick)
+    to_issue = dispatch.process(fetched_instr, global_tick)
     fetched_instr = fetch.process(global_tick)
-    dispatched_instr = dispatch.process(fetched_instr, global_tick)
-    issued_instr = issue.process(dispatched_instr, global_tick)
-    executed_instr = execute.process(issued_instr, global_tick)
-    write_back.process(executed_instr, global_tick)
+
     
     scoreboard.print_scoreboard(global_tick)
     

@@ -54,6 +54,7 @@ class IssueStage(PipelineStage):
         else: return None
         if self.scoreboard.allocate_fu(fu, instruction, tick):
             print(f"[Tick {tick}] Issuing: {instruction.opcode} to {fu} FU")
+            self.scoreboard.update_stage(instruction, 'S', tick)
             return instruction
         return None
 
