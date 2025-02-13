@@ -55,7 +55,10 @@ class IssueStage(PipelineStage):
         if self.scoreboard.allocate_fu(fu, instruction, tick):
             print(f"[Tick {tick}] Issuing: {instruction.opcode} to {fu} FU")
             self.scoreboard.update_stage(instruction, 'S', tick)
+            instruction.fu = fu
             return instruction
+        else:
+            print("~~~~Failed to issue to", fu)
         return None
 
 class ExecuteStage(PipelineStage):
@@ -64,9 +67,12 @@ class ExecuteStage(PipelineStage):
         self.scoreboard = scoreboard
 
     def process(self, instruction, tick):
-        if instruction and instruction.execute():
+        if instruction is None: return None
+        if instruction.execute():
             print(f"[Tick {tick}] Executing: {instruction.opcode}")
             self.scoreboard.update_stage(instruction, 'X', tick)
+            if instruction.remaining_cycles == 0:
+                self.scoreboard.release_fu(instruction.fu)
             return instruction
         return None
 
@@ -77,6 +83,6 @@ class WriteBackStage(PipelineStage):
 
     def process(self, instruction, tick):
         if instruction:
+            # TODO: writeback logic
             print(f"[Tick {tick}] Writing back: {instruction.opcode}")
             self.scoreboard.update_stage(instruction, 'W', tick)
-            self.scoreboard.release_fu("ALU")

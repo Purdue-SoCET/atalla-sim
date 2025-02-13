@@ -56,6 +56,7 @@ class Scoreboard:
         print("FU Status Table:")
         for f, s in self.fu_status.items():
             print(f, s)
+        print("Available FUs", self.functional_units)
         print("Register Status Table:")
         for r, s in self.reg_status.items():
             print(r, s)

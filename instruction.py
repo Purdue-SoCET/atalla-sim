@@ -5,6 +5,7 @@ from opcode import *
 class Instruction:
     def __init__(self, opcode, dest=None, src1=None, src2=None, latency=1):
         self.opcode = opcode
+        self.fu = None
         self.rd = dest
         self.rs1 = src1
         self.rs2 = src2
@@ -21,8 +22,8 @@ class Instruction:
         return (self.remaining_cycles == 0)  #execution done
 
     def __repr__(self):
-        st = "- "
-        if self.opcode is Opcode.HALT: return st + "HALT"
+        st = ""
+        if self.opcode is Opcode.HALT: return (st + "HALT").ljust(24, ' ')
         if self.aluop: 
             if self.opcode is Opcode.BTYPE:
                 st += str(self.branch_cond)[9:].lower()
@@ -48,7 +49,7 @@ class Instruction:
                 st += f", {self.imm}(x{self.rs1})"
         if self.opcode is Opcode.BTYPE: st = st[0:5] + ' ' + st[6:]
         if self.opcode is Opcode.SW: st = st[0:6] + st[7:]
-        return st
+        return st.ljust(24, " ")
 
 def decode_instruction(instr_str):
     #decode logic)
