@@ -23,13 +23,13 @@ class Scoreboard:
             self.fu_status[fu] = {
                 'busy': True,
                 'op': instruction.opcode,
-                'R': instruction.dest,
-                'R1': instruction.src1,
-                'R2': instruction.src2,
-                'T1': self.reg_status.get(instruction.src1, 0),
-                'T2': self.reg_status.get(instruction.src2, 0)
+                'R': instruction.rd,
+                'R1': instruction.rs1,
+                'R2': instruction.rs2,
+                'T1': self.reg_status.get(instruction.rs1, 0),
+                'T2': self.reg_status.get(instruction.rs2, 0)
             }
-            self.reg_status[instruction.dest] = fu
+            self.reg_status[instruction.rd] = fu
             self.functional_units[fu] -= 1
             return True
         return False  #No FU available
@@ -53,6 +53,13 @@ class Scoreboard:
 
     def print_scoreboard(self, tick):
         print(f"\n[Tick {tick}] Scoreboard State:")
-        print("FU Status Table:", self.fu_status)
-        print("Register Status Table:", self.reg_status)
-        print("Instruction Status Table:", self.instr_status)
+        print("FU Status Table:")
+        for f, s in self.fu_status.items():
+            print(f, s)
+        print("Register Status Table:")
+        for r, s in self.reg_status.items():
+            print(r, s)
+        print("Instruction Status Table:")
+        for i in self.instr_status:
+            print(i)
+

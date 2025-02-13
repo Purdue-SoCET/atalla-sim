@@ -8,6 +8,9 @@ class Instruction:
         self.rd = dest
         self.rs1 = src1
         self.rs2 = src2
+        self.ra = None
+        self.rb = None
+        self.rc = None
         self.imm = None
         self.latency = latency
         self.remaining_cycles = latency
@@ -17,18 +20,46 @@ class Instruction:
             self.remaining_cycles -= 1
         return (self.remaining_cycles == 0)  #execution done
 
+    def __repr__(self):
+        st = "- "
+        if self.opcode is Opcode.HALT: return st + "HALT"
+        if self.aluop: 
+            if self.opcode is Opcode.BTYPE:
+                st += str(self.branch_cond)[9:].lower()
+            else:
+                if self.opcode in {Opcode.SW, Opcode.LW, Opcode.LUI, 
+                                    Opcode.LDM, Opcode.STM, Opcode.GEMM}:
+                    st += str(self.opcode)[7:].ljust(4, ' ').lower()
+                else:
+                    st += (str(self.aluop).lower()[6:] + 'i'*self.use_imm).ljust(4, ' ')
+        var = ", x"
+        if self.opcode in {Opcode.STM, Opcode.LDM, Opcode.GEMM}: 
+            var = ", m"
+        if self.rd is not None:     st += var[1:] + str(self.rd)
+        if self.rs1 is not None and self.opcode not in {Opcode.SW, Opcode.LW}: st += ", x" + str(self.rs1) 
+        if self.rs2 is not None:    st += var + str(self.rs2) 
+        if self.ra is not None:     st += var + str(self.ra) 
+        if self.rb is not None:     st += var + str(self.rb)
+        if self.rc is not None:     st += var + str(self.rc) 
+        if self.imm is not None:
+            if self.opcode not in {Opcode.SW, Opcode.LW, Opcode.LDM, Opcode.STM}:
+                st += var[:-1] + str(self.imm)
+            else:
+                st += f", {self.imm}(x{self.rs1})"
+        if self.opcode is Opcode.BTYPE: st = st[0:5] + ' ' + st[6:]
+        if self.opcode is Opcode.SW: st = st[0:6] + st[7:]
+        return st
+
 def decode_instruction(instr_str):
     #decode logic)
     print(instr_str)
 
 def decode_word(instruction: bytes):
     instruction = instruction[::-1]
-    print(instruction.hex())
+    # print(instruction.hex())
     assert len(instruction) == 4, "instructions should be four bytes"
     bits = tobits(instruction)
-
-    print(bits)
-
+    # print(bits)
     def bit_range(a, b = None):
         if b is None: b = a
         return bits[a: b + 1]
@@ -94,3 +125,4 @@ def decode_word(instruction: bytes):
         instr.aluop = AluOp.ADD
         return instr
     assert False, f"malformed instruction: f{bits}"
+
