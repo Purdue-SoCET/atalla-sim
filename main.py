@@ -22,7 +22,6 @@ word_list.append(bytes.fromhex('10800447')[::-1]) # ld.m m1, x0, (8)x1
 word_list.append(bytes.fromhex('31110077')[::-1]) # gemm m3, m1, m1, m1
 word_list.append(bytes.fromhex('30801457')[::-1]) # st.m m3, x0, (40)x1
 word_list.append(bytes.fromhex('FFFFFFFF')[::-1]) # HALT
-print(len(word_list))
 
 #DECODE LOGIC - to implement from assembler
 # decoded_instructions = [decode_instruction(instr) for instr in instruction_list]

@@ -57,8 +57,6 @@ class IssueStage(PipelineStage):
             self.scoreboard.update_stage(instruction, 'S', tick)
             instruction.fu = fu
             return instruction
-        else:
-            print("~~~~Failed to issue to", fu)
         return None
 
 class ExecuteStage(PipelineStage):
