@@ -31,8 +31,8 @@ class DispatchStage(PipelineStage):
     def process(self, instruction, tick):
         if instruction:
             print(f"[Tick {tick}] Dispatching: {instruction.opcode}")
-            self.scoreboard.update_stage(instruction, 'D', tick)
             self.scoreboard.add_instruction(instruction)
+            self.scoreboard.update_stage(instruction, 'D', tick)
             return instruction
         return None
 
