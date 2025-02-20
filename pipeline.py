@@ -6,7 +6,6 @@ class PipelineStage:
         self.current_instruction = None
 
     def process(self):
-        
         pass
 
 class FetchStage(PipelineStage):
@@ -46,14 +45,14 @@ class IssueStage(PipelineStage):
         #placeholder (add issue queue logic)
 
         # TODO: Check RAW hazard
-        fu = None
+        fu_name = None
         ins_to_fu = {Opcode.GEMM: "GEMM", Opcode.LDM: "MATLOAD", Opcode.STM: "MATLOAD", 
                      Opcode.LW: "SCALARLD", Opcode.SW: "SCALARLD", Opcode.BTYPE: "BRANCH"}
-        if instruction.opcode in ins_to_fu.keys(): fu = ins_to_fu[instruction.opcode]
-        elif instruction.opcode in opcodes.values(): fu = "ALU"
+        if instruction.opcode in ins_to_fu.keys(): fu_name = ins_to_fu[instruction.opcode]
+        elif instruction.opcode in opcodes.values(): fu_name = "ALU"
         else: return None
-        if self.scoreboard.allocate_fu(fu, instruction, tick):
-            print(f"[Tick {tick}] Issuing: {instruction.opcode} to {fu} FU")
+        if fu := self.scoreboard.allocate_fu(fu_name, instruction, tick):
+            print(f"[Tick {tick}] Issuing: {instruction.opcode} to {fu_name} FU")
             self.scoreboard.update_stage(instruction, 'S', tick)
             instruction.fu = fu
             return instruction

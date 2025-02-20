@@ -1,18 +1,15 @@
+from funit import *
+
 class Scoreboard:
     def __init__(self):
-        self.fu_status = { # FU Status Table
-            "ALU": {'busy': False, 'op': None, 'R': None, 'R1': None, 'R2': None, 'T1': None, 'T2': None},
-            "BRANCH": {'busy': False, 'op': None, 'R': None, 'R1': None, 'R2': None, 'T1': None, 'T2': None},
-            "SCALARLD": {'busy': False, 'op': None, 'R': None, 'R1': None, 'R2': None, 'T1': None, 'T2': None},
-            "MATLOAD": {'busy': False, 'op': None, 'R': None, 'R1': None, 'R2': None, 'T1': None, 'T2': None},
-            "GEMM": {'busy': False, 'op': None, 'R': None, 'R1': None, 'R2': None, 'T1': None, 'T2': None}
-        }  
         self.reg_status = {}  # Register Status Table
         self.instr_status = []  # Instruction Status Table
-        self.functional_units = {"ALU": 1, "BRANCH": 1, "SCALARLD": 1, "MATLOAD": 1, "GEMM": 1}  # Available FUs
+        self.functional_units = {"ALU": ALU(), "BRANCH": BranchUnit(), 
+        "SCALARLD": ScalarLD(), "MATLOAD": MatrixLD(), "GEMM": GEMM(4, np.float16)}  # Available FUs
 
-    def allocate_fu(self, fu, instruction, tick):
-        if self.functional_units.get(fu, 0) > 0:
+    def allocate_fu(self, fu_name, instruction, tick):
+        fu = self.functional_units[fu_name]
+        if fu is not None and fu.busy == False:
             #Check RAW hazard
            
 
@@ -20,26 +17,20 @@ class Scoreboard:
            
            
             #Allocate FU
-            self.fu_status[fu] = {
-                'busy': True,
-                'op': instruction.opcode,
-                'R': instruction.rd,
-                'R1': instruction.rs1,
-                'R2': instruction.rs2,
-                'T1': self.reg_status.get(instruction.rs1, 0),
-                'T2': self.reg_status.get(instruction.rs2, 0)
-            }
+            # fu.reset()
             self.reg_status[instruction.rd] = fu
-            self.functional_units[fu] -= 1
-            return True
-        return False  #No FU available
+            fu.intake(instruction)
+            # self.functional_units[fu] -= 1
+            return fu
+        return None  #No FU available
 
     def release_fu(self, fu):
         # if fu in self.fu_status:
             
             
-            self.functional_units[fu] += 1  # Free FU
-            self.fu_status[fu] = {'busy': False, 'op': None, 'R': None, 'R1': None, 'R2': None, 'T1': None, 'T2': None}
+            # self.functional_units[fu] += 1  # Free FU
+            del self.reg_status[fu.rd]
+            fu.reset()
 
     def add_instruction(self, instruction):
         #Track an instruction in the scoreboard
@@ -54,12 +45,11 @@ class Scoreboard:
     def print_scoreboard(self, tick):
         print(f"\n[Tick {tick}] Scoreboard State:")
         print("FU Status Table:")
-        for f, s in self.fu_status.items():
-            print(f, s)
-        print("Available FUs", self.functional_units)
+        for f, s in self.functional_units.items():
+            print(f.ljust(8, " "), s)
         print("Register Status Table:")
         for r, s in self.reg_status.items():
-            print(r, s)
+            print(r, s.name)
         print("Instruction Status Table:")
         for i in self.instr_status:
             print(i)
