@@ -1,5 +1,5 @@
 from helpers import *
-from opcode import *
+from opcode import Opcode, opcodes, AluOp, BranchOp, rfunct, ifunct, bfunct# type: ignore
 #add decoding logic for instruction
 
 class Instruction:

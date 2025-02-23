@@ -11,10 +11,15 @@ class Scoreboard:
         fu = self.functional_units[fu_name]
         if fu is not None and fu.busy == False:
             #Check RAW hazard
-           
+            if ((self.reg_status.get(instruction.rs1, 0) and self.reg_status[instruction.rs1] != fu) or
+                (self.reg_status.get(instruction.rs2, 0) and self.reg_status[instruction.rs2] != fu)):
+                    print(f"[Tick {tick}] RAW Hazard: Cannot issue {instruction.opcode}")
+                    return False
 
             #Check WAW hazard
-           
+            if instruction.rd in self.reg_status:
+                print(f"[Tick {tick}] WAW Hazard: Cannot issue {instruction.opcode}")
+                return False
            
             #Allocate FU
             # fu.reset()

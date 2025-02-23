@@ -130,4 +130,4 @@ opcodes = {
     0b1000111: Opcode.LDM,
     0b1010111: Opcode.STM,
     0b1110111: Opcode.GEMM,
-}
+} # type: ignore

@@ -1,4 +1,6 @@
-from opcode import *
+from opcode import Opcode, opcodes # type: ignore
+from instruction import *
+from funit import *
 
 class PipelineStage:
     def __init__(self, name):
