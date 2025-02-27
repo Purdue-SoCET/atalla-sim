@@ -38,9 +38,9 @@ class Cache:
         self.TAG_BITS = ADDR_BITS - self.INDEX_BITS - self.BLKOFF_BITS - self.BYTEOFF_BITS; #Currently: 26 bits
         # print(self.FRAMES)
         # print(self.NUM_SETS)
-        # print(self.INDEX_BITS)
-        # print(self.BLKOFF_BITS)
-        # print(self.BYTEOFF_BITS)
+        print(self.INDEX_BITS)
+        print(self.BLKOFF_BITS)
+        print(self.BYTEOFF_BITS)
         # print(self.TAG_BITS)
         self.cache = [[CacheFrame() for _ in range(A)] for _ in range(self.NUM_SETS)]
         self.dram = None
@@ -51,7 +51,7 @@ class Cache:
         # print(address)
         tag    = frombits(address[ADDR_BITS - self.TAG_BITS : ADDR_BITS])
         idx    = frombits(address[self.BYTEOFF_BITS + self.BLKOFF_BITS : ADDR_BITS - self.TAG_BITS])
-        blkoff = frombits(address[self.BYTEOFF_BITS + self.BLKOFF_BITS - 1])
+        blkoff = frombits(address[self.BYTEOFF_BITS : self.BYTEOFF_BITS + self.BLKOFF_BITS])
         bytoff = frombits(address[0 : self.BYTEOFF_BITS])
         # print("~~~~~~~~", blkoff)
         return tag, idx, blkoff, bytoff
@@ -127,8 +127,9 @@ if __name__ == "__main__":
     dcache.dram = dram
     num_test = dcache.FRAMES * 4
 
-    test_block_offest = True
-    n = 4 if test_block_offest else 8
+    # test_block_offest = True
+    # n = 4 if test_block_offest else 8
+    n = 4
 
     print("Write test")
     for i in range(num_test):
