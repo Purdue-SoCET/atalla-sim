@@ -9,6 +9,7 @@ def tobits(data, bit_len = 8):
     return bits
 
 def frombits(data, signed = False):
+    if type(data) == int: return data
     if data[-1] and signed: 
         return -1 * np.int32(frombits([int(not n) for n in data])) - 1
     else: 
