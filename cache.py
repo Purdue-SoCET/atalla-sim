@@ -74,9 +74,12 @@ class Cache:
         print("Tag bits       : ", self.TAG_BITS)
         self.cache = [[[CacheFrame() for _ in range(A)] for _ in range(self.NUM_SETS_PER_BANK)] for _ in range(self.NUM_BANKS)]
         self.bank_latencies = self.NUM_BANKS * [0]
+        self.bank_current_mshr = self.NUM_BANKS * [None]
         self.dram = dram
         self.mshr = []
-        self.data_out = {}
+        self.replay = None
+
+        self.nums_out = 0
 
     def extract_info(self, address):
         address = tobits([address], bit_len=ADDR_BITS)
@@ -88,47 +91,46 @@ class Cache:
         return tag, idx, blk_off, bank
 
     def main_loop(self, tick):
-        status_str = f"--- Tick {tick}   MSHR: {len(self.mshr)}/{K}"
-        for b_i, bank in enumerate(self.cache):
-            status_str += f"  B{b_i}: +{self.bank_latencies[b_i]}".ljust(4, ' ')
-        print(status_str)
-
-        for b_i, banks in enumerate(self.cache):
+        # Decrement bank timers for DRAM due to miss; if any are done, perform LRU eject and output replay
+        self.replay = None
+        for b_i in range(self.NUM_BANKS):
             if self.bank_latencies[b_i]:
                 self.bank_latencies[b_i] -= 1
-        if len(self.mshr) == 0:
-            return None
+            elif self.bank_current_mshr[b_i]:
+                mshr_done = self.bank_current_mshr[b_i]
+                for word_idx in range(BLOCK_SIZE):
+                    dram_word_addr  = mshr_done.bank << 2
+                    dram_word_addr += word_idx       << (2 + self.BANK_BITS)
+                    dram_word_addr += mshr_done.idx  << (2 + self.BANK_BITS + self.BLKOFF_BITS)
+                    dram_word_addr += mshr_done.tag  << (ADDR_BITS - self.TAG_BITS)
+                    data_from_dram = self.dram[dram_word_addr]
+                    self.write(dram_word_addr, data_from_dram, tick)
+                self.replay = mshr_done.address
+                self.nums_out += 1
+                self.bank_current_mshr[b_i] = None
+
+        if len(self.mshr) == 0: return
         entry = self.mshr[0]
-        if self.bank_latencies[entry.bank] != 0:
-            return None
-        for frame in self.cache[entry.bank][entry.idx]:
-            if frame.valid and entry.tag == frame.tag:
-                data_out = deepcopy(frame.data[entry.blk_off])
-                frame.lru = tick
-                Cache.print_message("~ Hit      :", entry.address, entry.tag, entry.idx, entry.blk_off, entry.bank)
-                self.mshr.pop(0)
-                self.data_out[entry.address] = data_out
-                return
-        else:
-            Cache.print_message("~ Miss     :", entry.address, entry.tag, entry.idx, entry.blk_off, entry.bank)
-            self.mshr.pop(0)
+        
+        # If bank for first MSHR element is free, pop element and begin DRAM retrieval timer
+        if self.bank_current_mshr[entry.bank] is None:
             self.bank_latencies[entry.bank] = 20
-            data_out = deepcopy(self.dram[entry.address])
-            for word_idx in range(BLOCK_SIZE):
-                dram_word_addr  = entry.bank << 2
-                dram_word_addr += word_idx   << (2 + self.BANK_BITS)
-                dram_word_addr += entry.idx  << (2 + self.BANK_BITS + self.BLKOFF_BITS)
-                dram_word_addr += entry.tag  << (ADDR_BITS - self.TAG_BITS)
-                data_from_dram = self.dram[dram_word_addr]
-                self.write(dram_word_addr, data_from_dram, tick)
-            self.data_out[entry.address] = data_out
-            
+            self.bank_current_mshr[entry.bank] = self.mshr.pop(0)
+
 
     def request_read(self, address, tick):
+        tag, idx, blk_off, bank = self.extract_info(address)
+        for frame in self.cache[bank][idx]:
+            if frame.valid and tag == frame.tag:
+                data_out = deepcopy(frame.data[blk_off])
+                frame.lru = tick
+                Cache.print_message("~ Hit      :", address, tag, idx, blk_off, bank)
+                return data_out
         if len(self.mshr) == K:
-            return False
+            return "Full"
+        Cache.print_message("~ Miss     :", address, tag, idx, blk_off, bank)
         self.mshr.append(MSHREntry(address, self, 0))
-        return True
+        return "Miss"
 
     def read(self, address, tick):
         tag, idx, blk_off, bank = self.extract_info(address)
@@ -236,14 +238,23 @@ if __name__ == "__main__":
         print("Non-blocking Read test")
         i_in  = num_test - 1
         i_out = num_test - 1
-        while i_out >= 0:
-            if i_in >= 0:
-                if dcache.request_read(i_in * n, tick):
-                    i_in -= 1
-            data = dcache.main_loop(tick)
-            if i_out * n in dcache.data_out.keys():
-                assert i_out == frombits(dcache.data_out[i_out * n]), f"Incorrect read at address {hex(i_out * n)}"
-                # print("Expected:", i_out, "   out: ", frombits(dcache.data_out[i_out * n]))
+        while i_out >= 0 and tick < 600:
+            status_str = f"--- Tick {tick}   MSHR: {len(dcache.mshr)}/{K}"
+            for b_i, bank in enumerate(dcache.cache):
+                status_str += f"  B{b_i}: +{dcache.bank_latencies[b_i]}".ljust(4, ' ')
+            print(status_str)
+            
+            if i_in >= 0: # Reads still left to request
+                result = dcache.request_read(i_in * n, tick)
+                if result is not "Full":
+                    if result is not "Miss":
+                        assert frombits(result) == i_in # Read hit
+                        i_out -= 1
+                    i_in -= 1 # Read requested, but miss
+
+            dcache.main_loop(tick)
+            if dcache.replay is not None:
+                assert frombits(dcache.dram[dcache.replay]) == frombits(dcache.request_read(dcache.replay, tick)), f"Incorrect read at address {hex(i_out * n)}"
                 i_out -= 1
             tick += 1
 
