@@ -28,24 +28,27 @@ class CacheFrame:
             data_str = str(frombits(self.data[word_idx])).ljust(4, ' ') + data_str
         return valid_str + f" Tag: {self.tag}   Data: {data_str}   Addr: {hex(self.address)}   Tick: {self.lru_tick}"
 
-class MSHREntry:
-    def __init__(self, address, cache, rw_mode : int, data = None):
+class MSHRMiss:
+    def __init__(self, address, blk_off, rw_mode, uuid):
         self.valid = True
-        self.uuid = 0
-        self.write_status = BLOCK_SIZE * [0]
-        self.write_block = [[0 for _ in range(WORD_SIZE)] for _ in range(BLOCK_SIZE)]
-        self.add_miss(address, cache, rw_mode, data)
-
-    def add_miss(self, address, cache, rw_mode : int, data = None):
         self.address = address
-        tag, idx, blk_off, bank = cache.extract_info(address)
-        # self.write_status[blk_off] = rw_mode
-        # if rw_mode:
-        #     self.write_block[blk_off] = data
+        self.rw_mode = rw_mode
         self.blk_off = blk_off
-        self.bank = bank
-        self.idx = idx
+        self.uuid = uuid
+
+class MSHREntry:
+    def __init__(self, address, cache, rw_mode, uuid):
+        self.address = address
+        self.misses = []
+        self.add_miss(address, cache, rw_mode, uuid)
+
+    def add_miss(self, address, cache, rw_mode, uuid):
+        tag, idx, blk_off, bank = cache.extract_info(address)
         self.tag = tag
+        self.idx = idx
+        self.bank = bank
+        self.misses.append(MSHRMiss(address, blk_off, rw_mode, uuid))
+
 
 class Cache:
     def __init__(self, dram = None):
@@ -78,7 +81,7 @@ class Cache:
         self.bank_current_mshr = self.NUM_BANKS * [None]
         self.dram = dram
         self.mshr = []
-        self.replay = None
+        self.replays = []
     
 
     def extract_info(self, address):
@@ -92,29 +95,36 @@ class Cache:
 
     def main_loop(self, tick):
         # Decrement bank timers for DRAM due to miss; if any are done, perform LRU eject and output replay
-        self.replay = None
+        self.replays = []
         for b_i in range(self.NUM_BANKS):
             mshr_done = self.bank_current_mshr[b_i]
             if self.bank_latencies[b_i]:
                 self.bank_latencies[b_i] -= 1
             elif mshr_done is not None: # MSHR latency reached 0
-                for word_idx in range(BLOCK_SIZE):
-                    dram_word_addr  = mshr_done.bank << 2
-                    dram_word_addr += word_idx       << (2 + self.BANK_BITS)
-                    dram_word_addr += mshr_done.idx  << (2 + self.BANK_BITS + self.BLKOFF_BITS)
-                    dram_word_addr += mshr_done.tag  << (ADDR_BITS - self.TAG_BITS)
-                    # if dram_word_addr in self.dram.keys():
-                    #     data_from_dram = self.dram[dram_word_addr]
-                    #     self.write(dram_word_addr, data_from_dram, tick)
-                    # else:
-                    #     self.write(dram_word_addr, WORD_SIZE * [0], tick)
-                    if dram_word_addr not in self.dram.keys():
-                        self.dram[dram_word_addr] = WORD_SIZE * [0]
-                    data_from_dram = self.dram[dram_word_addr]
-                    self.write(dram_word_addr, data_from_dram, tick)
-
-
-                self.replay = mshr_done.address
+                if mshr_done.address in self.dram.keys(): # If data can be found in DRAM
+                    for word_idx in range(BLOCK_SIZE):
+                        dram_word_addr  = mshr_done.bank << 2
+                        dram_word_addr += word_idx       << (2 + self.BANK_BITS)
+                        dram_word_addr += mshr_done.idx  << (2 + self.BANK_BITS + self.BLKOFF_BITS)
+                        dram_word_addr += mshr_done.tag  << (ADDR_BITS - self.TAG_BITS)
+                        data_from_dram = self.dram[dram_word_addr]
+                        self.write(dram_word_addr, data_from_dram, tick)
+                else: # Else, eject old, and create fresh block
+                    lru = 0
+                    min_age = tick + 1
+                    for i, frame in enumerate(self.cache[mshr_done.bank][mshr_done.idx]):
+                        if frame.lru_tick < min_age : 
+                            min_age = frame.lru_tick
+                            lru = i
+                    lru_frame = self.cache[mshr_done.bank][mshr_done.idx][lru]
+                    for word_idx in range(BLOCK_SIZE):
+                        dram_word_addr  = mshr_done.bank << 2
+                        dram_word_addr += word_idx       << (2 + self.BANK_BITS)
+                        dram_word_addr += mshr_done.idx  << (2 + self.BANK_BITS + self.BLKOFF_BITS)
+                        dram_word_addr += lru_frame.tag  << (ADDR_BITS - self.TAG_BITS)
+                        self.dram[dram_word_addr] = deepcopy(lru_frame.data[word_idx])
+                    self.cache[mshr_done.bank][mshr_done.idx][lru] = CacheFrame(tick = tick)
+                self.replays.extend(mshr_done.misses)
                 self.bank_current_mshr[b_i] = None
 
         if len(self.mshr) == 0: return
@@ -129,7 +139,7 @@ class Cache:
     def request(self, address, is_write, data_in, tick):
         tag, idx, blk_off, bank = self.extract_info(address)
         for frame in self.cache[bank][idx]:
-            if (not is_write and frame.valid and tag == frame.tag) or (is_write and (not frame.valid or (frame.valid and tag == frame.tag))):
+            if (not is_write and frame.valid and tag == frame.tag) or (is_write and ((not frame.valid and not frame.dirty) or (frame.valid and tag == frame.tag))):
                 frame.lru = tick
                 Cache.print_message("~ Hit      :", address, tag, idx, blk_off, bank)
                 if is_write:
@@ -138,10 +148,24 @@ class Cache:
                 else:
                     data_out = deepcopy(frame.data[blk_off])
                     return data_out
+        
+        # Chenk MSHR buffer entries, including those currently being 'serviced' by each bank
+        for entry in self.bank_current_mshr:
+            if entry is None: continue
+            if (tag, idx, bank) == (entry.tag, entry.idx, entry.bank):
+                entry.add_miss(address, self, is_write, tick)
+                return "Miss"
+
+        if self.mshr is not None:
+            for entry in self.mshr:
+                if (tag, idx, bank) == (entry.tag, entry.idx, entry.bank):
+                    entry.add_miss(address, self, is_write, tick)
+                    return "Miss"
+
         if len(self.mshr) == K:
             return "Full"
         Cache.print_message("~ Miss     :", address, tag, idx, blk_off, bank)
-        self.mshr.append(MSHREntry(address, self, 0))
+        self.mshr.append(MSHREntry(address, self, is_write, uuid = tick))
         return "Miss"
 
     def read(self, address, tick):
@@ -179,6 +203,7 @@ class Cache:
                 frame.valid = True
                 frame.dirty = True
                 Cache.print_message("~ Write    :", address, tag, idx, blk_off, bank)
+                # print("Data", frombits(data))
                 return
             if frame.lru_tick < min_age : 
                 min_age = frame.lru_tick
@@ -229,7 +254,7 @@ if __name__ == "__main__":
         tag, idx, blk_off, bank = dcache.extract_info(i)
         print(f"Addr:  {hex(i)} Tag: {int(tag)} Idx: {int(idx)} Blk_off: {blk_off} Bank {int(bank)}")
 
-    num_test = dcache.NUM_TOTAL_WORDS // 1 + 5
+    num_test = dcache.NUM_TOTAL_WORDS * 2
 
     test_block_offest = True
     n = 4 if test_block_offest else 8
@@ -258,16 +283,19 @@ if __name__ == "__main__":
                         read_result =  dcache.request(i_in * n, is_write = False, data_in = None, tick = tick)
                         assert frombits(read_result) == i_in, f"Incorrect read at address {hex(i_in * n)}: Expected {i_in}, {frombits(read_result)}"
                         i_out += 1
+
                     i_in += 1 # Write requested, but miss
 
-            if dcache.replay is not None:
-                print("Replay:", hex(dcache.replay))
-                request = dcache.request(dcache.replay, is_write = True, data_in = dcache.replay // n, tick = tick)
-                # print(request)
-                # print(dcache)
-                in_cache = frombits(request)
-                assert (dcache.replay // n) == in_cache, f"Incorrect write at address {dcache.replay}: Expected {dcache.replay // n}, {in_cache}"
-                i_out += 1
+
+            if len(dcache.replays):
+                for miss in dcache.replays:
+                    print("Replay:", hex(miss.address), "UUID:", miss.uuid)
+                    request = dcache.request(miss.address, is_write = True, data_in = miss.address // n, tick = tick)
+                    # print(request)
+                    # print(dcache)
+                    in_cache = frombits(request)
+                    assert (miss.address // n) == in_cache, f"Incorrect write at address {miss.address}: Expected {miss.address // n}, {in_cache}"
+                    i_out += 1
             
             dcache.main_loop(tick)
             tick += 1
@@ -291,7 +319,7 @@ if __name__ == "__main__":
         for i in range(num_test - 1, -1, -1):
             assert i == frombits(dcache.read(i * n, tick)), f"Incorrect read at address {hex(i * n)}"
             tick += 1
-    elif False:
+    else:
         print("Non-blocking Read test")
         i_in  = num_test - 1
         i_out = num_test - 1
@@ -309,20 +337,24 @@ if __name__ == "__main__":
                         i_out -= 1
                     i_in -= 1 # Read requested, but miss
 
-            if dcache.replay is not None:
-                # print("Replay:", hex(dcache.replay))
-                in_cache = frombits(dcache.request(dcache.replay, is_write = False, data_in = None, tick = tick))
-                assert (dcache.replay // n) == in_cache, f"Incorrect read at address {hex(i_out * n)}: Expected {i_out}, {in_cache}"
-                i_out -= 1
+            if len(dcache.replays):
+                for miss in dcache.replays:
+                    print("Replay:", hex(miss.address), "UUID:", miss.uuid)
+                    request = dcache.request(miss.address, is_write = False, data_in = None, tick = tick)
+                    # print(request)
+                    # print(dcache)
+                    in_cache = frombits(request)
+                    assert (miss.address // n) == in_cache, f"Incorrect read at address {miss.address}: Expected {miss.address // n}, {in_cache}"
+                    i_out -= 1
 
             dcache.main_loop(tick)
             tick += 1
 
 
 
-    # print("Cache after read test")
-    # print(dcache)
+    print("Cache after read test")
+    print(dcache)
 
-    # print("DRAM after read test")
-    # for addr, data in sorted(dram.items()):
-    #     print(hex(addr).ljust(5, ' '), frombits(data))
+    print("DRAM after read test")
+    for addr, data in sorted(dram.items()):
+        print(hex(addr).ljust(5, ' '), frombits(data))
