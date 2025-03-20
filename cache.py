@@ -108,7 +108,7 @@ class Cache:
                         dram_word_addr += mshr_done.idx  << (2 + self.BANK_BITS + self.BLKOFF_BITS)
                         dram_word_addr += mshr_done.tag  << (ADDR_BITS - self.TAG_BITS)
                         data_from_dram = self.dram[dram_word_addr]
-                        self.write(dram_word_addr, data_from_dram, tick)
+                        self.instant_write(dram_word_addr, data_from_dram, tick)
                 else: # Else, eject old, and create fresh block
                     lru = 0
                     min_age = tick + 1
@@ -143,7 +143,7 @@ class Cache:
                 frame.lru = tick
                 Cache.print_message("~ Hit      :", address, tag, idx, blk_off, bank)
                 if is_write:
-                    dcache.write(address, data_in, tick)
+                    dcache.instant_write(address, data_in, tick)
                     return data_in
                 else:
                     data_out = deepcopy(frame.data[blk_off])
@@ -168,7 +168,7 @@ class Cache:
         self.mshr.append(MSHREntry(address, self, is_write, uuid = tick))
         return "Miss"
 
-    def read(self, address, tick):
+    def instant_read(self, address, tick):
         tag, idx, blk_off, bank = self.extract_info(address)
         data = None
         for frame in self.cache[bank][idx]:
@@ -186,10 +186,10 @@ class Cache:
                 dram_word_addr += idx      << (2 + self.BANK_BITS + self.BLKOFF_BITS)
                 dram_word_addr += tag      << (ADDR_BITS - self.TAG_BITS)
                 data_from_dram = self.dram[dram_word_addr]
-                self.write(dram_word_addr, data_from_dram, tick)
+                self.instant_write(dram_word_addr, data_from_dram, tick)
             return data
 
-    def write(self, address, data, tick): 
+    def instant_write(self, address, data, tick): 
         tag, idx, blk_off, bank = self.extract_info(address)
         cache_set = self.cache[bank][idx]
         lru = 0
@@ -259,11 +259,12 @@ if __name__ == "__main__":
     test_block_offest = True
     n = 4 if test_block_offest else 8
 
-    if False:
+    def instant_write_test(dcache, num_test, tick):
         print("Write test")
         for i in range(num_test):
             dcache.write(i * n, tobits([i], bit_len=WORD_SIZE), tick)
             tick += 1
+        return tick
 
     def non_block_write_test(dcache, num_test, tick):
         print("Non-blocking Write test")
@@ -300,10 +301,9 @@ if __name__ == "__main__":
             dcache.main_loop(tick)
             tick += 1
         return tick
-    
-    tick = non_block_write_test(dcache, num_test, tick)
-    # tick = non_block_write_test(dcache, num_test, tick)
 
+    # tick = instant_write_test(dcache, num_test, tick)
+    tick = non_block_write_test(dcache, num_test, tick)
 
     tick_after_writing = tick
     
@@ -314,12 +314,14 @@ if __name__ == "__main__":
     for addr, data in sorted(dram.items()):
         print(hex(addr).ljust(5, ' '), frombits(data))
 
-    if False:
+    def instant_read_test(dcache, num_test, tick):
         print("Read test")
         for i in range(num_test - 1, -1, -1):
-            assert i == frombits(dcache.read(i * n, tick)), f"Incorrect read at address {hex(i * n)}"
+            assert i == frombits(dcache.instant_read(i * n, tick)), f"Incorrect read at address {hex(i * n)}"
             tick += 1
-    else:
+        return tick
+    
+    def non_blocking_read_test(dcache, num_test, tick, tick_after_writing):
         print("Non-blocking Read test")
         i_in  = num_test - 1
         i_out = num_test - 1
@@ -350,7 +352,8 @@ if __name__ == "__main__":
             dcache.main_loop(tick)
             tick += 1
 
-
+    # tick_after_reading = instant_read_test(dcache, num_test, tick)
+    tick_after_reading = non_blocking_read_test(dcache, num_test, tick, tick_after_writing)
 
     print("Cache after read test")
     print(dcache)
