@@ -12,7 +12,7 @@ A           = 2      # Associativity
 BANKS       = 4      # Number of banks
 K           = 8      # MSHR size
 
-DRAM_LATENCY = 300
+DRAM_LATENCY = 20
 
 class CacheFrame:
     def __init__(self, tag = 0, data = None, address = None, tick = -1):
@@ -31,25 +31,26 @@ class CacheFrame:
         return valid_str + f" Tag: {self.tag}   Data: {data_str}   Addr: {hex(self.address)}   Tick: {self.lru_tick}"
 
 class MSHRMiss:
-    def __init__(self, address, blk_off, rw_mode, uuid):
+    def __init__(self, address, blk_off, is_write, data_in, uuid):
         self.valid = True
         self.address = address
-        self.rw_mode = rw_mode
         self.blk_off = blk_off
+        self.is_write = is_write
+        self.data_in = data_in
         self.uuid = uuid
 
 class MSHREntry:
-    def __init__(self, address, cache, rw_mode, uuid):
+    def __init__(self, address, cache, is_write, data_in, uuid):
         self.address = address
         self.misses = []
-        self.add_miss(address, cache, rw_mode, uuid)
+        self.add_miss(address, cache, is_write, data_in, uuid)
 
-    def add_miss(self, address, cache, rw_mode, uuid):
+    def add_miss(self, address, cache, is_write, data_in, uuid):
         tag, idx, blk_off, bank = cache.extract_info(address)
         self.tag = tag
         self.idx = idx
         self.bank = bank
-        self.misses.append(MSHRMiss(address, blk_off, rw_mode, uuid))
+        self.misses.append(MSHRMiss(address, blk_off, is_write, data_in, uuid))
 
 
 class Cache:
@@ -84,6 +85,7 @@ class Cache:
         self.dram = dram
         self.mshr = []
         self.replays = []
+        self.blocking = False
     
 
     def extract_info(self, address):
@@ -97,7 +99,6 @@ class Cache:
 
     def main_loop(self, tick):
         # Decrement bank timers for DRAM due to miss; if any are done, perform LRU eject and output replay
-        self.replays = []
         for b_i in range(self.NUM_BANKS):
             mshr_done = self.bank_current_mshr[b_i]
             if self.bank_latencies[b_i]:
@@ -126,6 +127,7 @@ class Cache:
                         dram_word_addr += lru_frame.tag  << (ADDR_BITS - self.TAG_BITS)
                         self.dram[dram_word_addr] = deepcopy(lru_frame.data[word_idx])
                     self.cache[mshr_done.bank][mshr_done.idx][lru] = CacheFrame(tick = tick)
+                print(f"DRAM waiting finished with {len(mshr_done.misses)} misses")
                 self.replays.extend(mshr_done.misses)
                 self.bank_current_mshr[b_i] = None
 
@@ -137,8 +139,18 @@ class Cache:
             self.bank_latencies[entry.bank] = DRAM_LATENCY
             self.bank_current_mshr[entry.bank] = self.mshr.pop(0)
 
+    def request_replay(self, uuid, tick):
+        for i, to_replay in enumerate(self.replays):
+            if uuid == to_replay.uuid:
+                instr = self.replays.pop(i)
+                return self.request(instr.address, instr.is_write, instr.data_in, tick)
 
     def request(self, address, is_write, data_in, tick):
+        if self.blocking:
+            if self.replays: return "Stall"
+            for mshr in self.bank_current_mshr:
+                if mshr: return "Stall"
+        
         tag, idx, blk_off, bank = self.extract_info(address)
         for frame in self.cache[bank][idx]:
             if (not is_write and frame.valid and tag == frame.tag) or (is_write and ((not frame.valid and not frame.dirty) or (frame.valid and tag == frame.tag))):
@@ -151,23 +163,24 @@ class Cache:
                     data_out = deepcopy(frame.data[blk_off])
                     return data_out
         
+
         # Chenk MSHR buffer entries, including those currently being 'serviced' by each bank
         for entry in self.bank_current_mshr:
             if entry is None: continue
             if (tag, idx, bank) == (entry.tag, entry.idx, entry.bank):
-                entry.add_miss(address, self, is_write, tick)
+                entry.add_miss(address, self, is_write, data_in, tick)
                 return "Miss"
 
         if self.mshr is not None:
             for entry in self.mshr:
                 if (tag, idx, bank) == (entry.tag, entry.idx, entry.bank):
-                    entry.add_miss(address, self, is_write, tick)
+                    entry.add_miss(address, self, is_write, data_in, tick)
                     return "Miss"
-
+        
         if len(self.mshr) == K:
-            return "Full"
+            return "Stall"
         Cache.print_message("~ Miss     :", address, tag, idx, blk_off, bank)
-        self.mshr.append(MSHREntry(address, self, is_write, uuid = tick))
+        self.mshr.append(MSHREntry(address, self, is_write, data_in, uuid = tick))
         return "Miss"
 
     def instant_read(self, address, tick):
@@ -250,6 +263,7 @@ if __name__ == "__main__":
     tick = 0
     dram = {}
     dcache = Cache(dram = dram)
+    dcache.blocking = True
 
     # Addressing test
     for i in range(0, dcache.NUM_TOTAL_WORDS, 4):
@@ -272,7 +286,7 @@ if __name__ == "__main__":
         print("Non-blocking Write test")
         i_in  = 0
         i_out = 0
-        while i_out < num_test and tick < 5000:
+        while i_out < num_test and tick < 500:
             status_str = f"--- Tick {tick}   MSHR: {len(dcache.mshr)}/{K}"
             for b_i, bank in enumerate(dcache.cache):
                 status_str += f"  B{b_i}: +{dcache.bank_latencies[b_i]}".ljust(4, ' ')
@@ -281,7 +295,7 @@ if __name__ == "__main__":
             if i_in < num_test: # Writes still left to request
                 write_result = dcache.request(i_in * n, is_write = True, 
                                         data_in = tobits([i_in], bit_len=WORD_SIZE), tick = tick)
-                if write_result != "Full":
+                if write_result != "Stall":
                     if write_result != "Miss":
                         read_result =  dcache.request(i_in * n, is_write = False, data_in = None, tick = tick)
                         assert frombits(read_result) == i_in, f"Incorrect read at address {hex(i_in * n)}: Expected {i_in}, {frombits(read_result)}"
@@ -293,19 +307,57 @@ if __name__ == "__main__":
             if len(dcache.replays):
                 for miss in dcache.replays:
                     print("Replay:", hex(miss.address), "UUID:", miss.uuid)
-                    request = dcache.request(miss.address, is_write = True, data_in = miss.address // n, tick = tick)
+                    request = dcache.request_replay(miss.uuid, tick = tick)
                     # print(request)
                     # print(dcache)
                     in_cache = frombits(request)
-                    assert (miss.address // n) == in_cache, f"Incorrect write at address {miss.address}: Expected {miss.address // n}, {in_cache}"
+                    assert frombits(miss.data_in) == in_cache, f"Incorrect write at address {miss.address}: Expected {miss.address // n}, {in_cache}"
                     i_out += 1
             
             dcache.main_loop(tick)
             tick += 1
         return tick
 
+    def blocking_write_test(dcache, num_test, tick):
+        print("Blocking Write test")
+        i_in  = 0
+        i_out = 0
+        while i_out < num_test and tick < 500:
+            status_str = f"--- Tick {tick}   MSHR: {len(dcache.mshr)}/{K}"
+            for b_i, bank in enumerate(dcache.cache):
+                status_str += f"  B{b_i}: +{dcache.bank_latencies[b_i]}".ljust(4, ' ')
+            print(status_str)
+            
+            # Prioritize replaying of old miss, rather than taking new requests
+            if len(dcache.replays):
+                for miss in dcache.replays:
+                    print("Replay:", hex(miss.address), "UUID:", miss.uuid)
+                    request = dcache.request_replay(miss.uuid, tick)
+                    assert request != "Stall", f"Write replay at address {hex(miss.address)} encountered stall"
+                    in_cache = frombits(request)
+                    assert (miss.address // n) == in_cache, f"Incorrect write at address {miss.address}: Expected {miss.address // n}, {in_cache}"
+                    i_out += 1
+            else:
+                if i_in < num_test: # Writes still left to request
+                    write_result = dcache.request(i_in * n, is_write = True, 
+                                            data_in = tobits([i_in], bit_len=WORD_SIZE), tick = tick)
+                    if write_result != "Stall":
+                        if write_result != "Miss":
+                            read_result =  dcache.request(i_in * n, is_write = False, data_in = None, tick = tick)
+                            assert frombits(read_result) == i_in, f"Incorrect read at address {hex(i_in * n)}: Expected {i_in}, {frombits(read_result)}"
+                            i_out += 1
+
+                        i_in += 1 # Write requested, but miss
+
+
+            dcache.main_loop(tick)
+            tick += 1
+        return tick
+
     # tick = instant_write_test(dcache, num_test, tick)
-    tick = non_block_write_test(dcache, num_test, tick)
+    # tick = non_block_write_test(dcache, num_test, tick)
+    tick = blocking_write_test(dcache, num_test, tick)
+
 
     tick_after_writing = tick
     
@@ -335,7 +387,7 @@ if __name__ == "__main__":
             
             if i_in >= 0: # Reads still left to request
                 result = dcache.request(i_in * n, is_write = False, data_in = None, tick = tick)
-                if result != "Full":
+                if result != "Stall":
                     if result != "Miss":
                         assert frombits(result) == i_in # Read hit
                         i_out -= 1
@@ -344,18 +396,52 @@ if __name__ == "__main__":
             if len(dcache.replays):
                 for miss in dcache.replays:
                     print("Replay:", hex(miss.address), "UUID:", miss.uuid)
-                    request = dcache.request(miss.address, is_write = False, data_in = None, tick = tick)
+                    request = dcache.request_replay(miss.uuid, tick = tick)
                     # print(request)
                     # print(dcache)
                     in_cache = frombits(request)
-                    assert (miss.address // n) == in_cache, f"Incorrect read at address {miss.address}: Expected {miss.address // n}, {in_cache}"
+                    assert (miss.address // n) == in_cache, f"Incorrect read at address {miss.address}: Expected {frombits(miss.data_in)}, {in_cache}"
                     i_out -= 1
 
             dcache.main_loop(tick)
             tick += 1
 
+    def blocking_read_test(dcache, num_test, tick, tick_after_writing):
+        print("Non-blocking Read test")
+        i_in  = num_test - 1
+        i_out = num_test - 1
+        while i_out >= 0 and tick - tick_after_writing < 5000:
+            status_str = f"--- Tick {tick}   MSHR: {len(dcache.mshr)}/{K}"
+            for b_i, bank in enumerate(dcache.cache):
+                status_str += f"  B{b_i}: +{dcache.bank_latencies[b_i]}".ljust(4, ' ')
+            print(status_str)
+            
+            if len(dcache.replays):
+                for miss in dcache.replays:
+                    print("Replay:", hex(miss.address), "UUID:", miss.uuid)
+                    request = dcache.request_replay(miss.uuid, tick = tick)
+                    assert request != "Stall", f"Read replay at address {hex(miss.address)} encountered stall"
+                    # print(request)
+                    # print(dcache)
+                    in_cache = frombits(request)
+                    assert (miss.address // n) == in_cache, f"Incorrect read at address {miss.address}: Expected {miss.address // n}, {in_cache}"
+                    i_out -= 1
+            else:
+                if i_in >= 0: # Reads still left to request
+                    result = dcache.request(i_in * n, is_write = False, data_in = None, tick = tick)
+                    if result != "Stall":
+                        if result != "Miss":
+                            assert frombits(result) == i_in # Read hit
+                            i_out -= 1
+                        i_in -= 1 # Read requested, but miss
+
+            dcache.main_loop(tick)
+            tick += 1
+
     # tick_after_reading = instant_read_test(dcache, num_test, tick)
-    tick_after_reading = non_blocking_read_test(dcache, num_test, tick, tick_after_writing)
+    # tick_after_reading = non_blocking_read_test(dcache, num_test, tick, tick_after_writing)
+    tick_after_reading = blocking_read_test(dcache, num_test, tick, tick_after_writing)
+
 
     print("Cache after read test")
     print(dcache)

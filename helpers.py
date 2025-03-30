@@ -10,6 +10,8 @@ def tobits(data, bit_len = 8):
 
 def frombits(data, signed = False):
     if type(data) == int: return data
+    if data == None: raise TypeError("Data cannot be NoneType")
+    if type(data) == str: raise TypeError(f'Data must be a list of int, not a str "{data}"')
     if data == []: return 0
     if data[-1] and signed: 
         return -1 * np.int32(frombits([int(not n) for n in data])) - 1
