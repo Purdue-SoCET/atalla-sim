@@ -12,6 +12,8 @@ A           = 2      # Associativity
 BANKS       = 4      # Number of banks
 K           = 8      # MSHR size
 
+DRAM_LATENCY = 300
+
 class CacheFrame:
     def __init__(self, tag = 0, data = None, address = None, tick = -1):
         self.valid = False
@@ -132,7 +134,7 @@ class Cache:
         
         # If bank for first MSHR element is free, pop element and begin DRAM retrieval timer
         if self.bank_current_mshr[entry.bank] is None:
-            self.bank_latencies[entry.bank] = 20
+            self.bank_latencies[entry.bank] = DRAM_LATENCY
             self.bank_current_mshr[entry.bank] = self.mshr.pop(0)
 
 
@@ -270,7 +272,7 @@ if __name__ == "__main__":
         print("Non-blocking Write test")
         i_in  = 0
         i_out = 0
-        while i_out < num_test and tick < 1000:
+        while i_out < num_test and tick < 5000:
             status_str = f"--- Tick {tick}   MSHR: {len(dcache.mshr)}/{K}"
             for b_i, bank in enumerate(dcache.cache):
                 status_str += f"  B{b_i}: +{dcache.bank_latencies[b_i]}".ljust(4, ' ')
@@ -325,7 +327,7 @@ if __name__ == "__main__":
         print("Non-blocking Read test")
         i_in  = num_test - 1
         i_out = num_test - 1
-        while i_out >= 0 and tick - tick_after_writing < 1000:
+        while i_out >= 0 and tick - tick_after_writing < 5000:
             status_str = f"--- Tick {tick}   MSHR: {len(dcache.mshr)}/{K}"
             for b_i, bank in enumerate(dcache.cache):
                 status_str += f"  B{b_i}: +{dcache.bank_latencies[b_i]}".ljust(4, ' ')
