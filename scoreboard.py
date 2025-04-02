@@ -11,10 +11,16 @@ class Scoreboard:
         fu = self.functional_units[fu_name]
         if fu is not None and fu.busy == False:
             #Check RAW hazard
-           
+            if instruction.rd is not None:
+                if ((self.reg_status.get(instruction.rs1, 0) and self.reg_status[instruction.rs1] != fu) or
+                    (self.reg_status.get(instruction.rs2, 0) and self.reg_status[instruction.rs2] != fu)):
+                        print(f"[Tick {tick}] RAW Hazard: Cannot issue {instruction.opcode}")
+                        return False
 
             #Check WAW hazard
-           
+            if instruction.rd in self.reg_status:
+                print(f"[Tick {tick}] WAW Hazard: Cannot issue {instruction.opcode}")
+                return False
            
             #Allocate FU
             # fu.reset()
@@ -26,10 +32,8 @@ class Scoreboard:
 
     def release_fu(self, fu):
         # if fu in self.fu_status:
-            
-            
-            # self.functional_units[fu] += 1  # Free FU
-            del self.reg_status[fu.rd]
+            if fu.rd in self.reg_status:
+                del self.reg_status[fu.rd]
             fu.reset()
 
     def add_instruction(self, instruction):
@@ -41,6 +45,11 @@ class Scoreboard:
             if ins['instr'] == instruction:
                 ins[stage] = tick
                 break
+
+    def flush_speculative(self):
+        flushed = [ins for ins in self.instr_status if ins['instr'].speculative]
+        self.instr_status = [ins for ins in self.instr_status if not ins['instr'].speculative]
+        print(f"Flushed {len(flushed)} speculative instructions from scoreboard.")
 
     def print_scoreboard(self, tick):
         print(f"\n[Tick {tick}] Scoreboard State:")

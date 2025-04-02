@@ -1,5 +1,6 @@
 import numpy as np
 from instruction import *
+from opcode import branch_funct  # type: ignore
 
 class FunctionalUnit():
     def __init__(self, name = None):
@@ -96,3 +97,20 @@ class MatrixLD(FunctionalUnit):
 class BranchUnit(FunctionalUnit):
     def __init__(self):
         super().__init__(name = "Branch")
+    
+    def compute_branch(self, scalar_regs):
+        op1 = scalar_regs[self.instruction.rs1]
+        op2 = scalar_regs[self.instruction.rs2]
+        diff = op1 - op2
+        # Retrieve branch operator from the instruction (a value from bfunct)
+        branch_op = self.instruction.branch_cond  
+        condition_func = branch_funct[branch_op]
+        taken = condition_func(diff)
+        # Compute branch target
+        branch_target = self.instruction.pc + self.instruction.imm
+        # Store the computed results in the instruction for later use
+        self.instruction.taken = taken
+        self.instruction.branch_target = branch_target
+        return taken
+    def compute_branch_target(instruction):
+        return instruction.pc + instruction.imm

@@ -1,5 +1,5 @@
 from helpers import *
-from opcode import *
+from opcode import Opcode, opcodes, AluOp, BranchOp, rfunct, ifunct, bfunct# type: ignore
 #add decoding logic for instruction
 
 class Instruction:
@@ -15,6 +15,12 @@ class Instruction:
         self.imm = None
         self.latency = latency
         self.remaining_cycles = latency
+        self.speculative = False
+        self.taken = None
+        self.branch_target = None
+        self.predicted_taken = None
+        self.predicted_target = None
+        self.pc = None
 
     def execute(self):
         if self.remaining_cycles > 0:
