@@ -26,7 +26,7 @@ class MAC():
         self.output_down = dtype(0)
 
     def compute(self):
-        self.PE_total = self.weight * self.input_from_left + self.total_from_above
+        self.PE_total = (self.weight * self.input_from_left) + self.total_from_above
         self.output_down = self.PE_total
         self.output_right = self.input_from_left
     
@@ -47,19 +47,20 @@ class SystolicArray():
     
     def load_input_FIFOs(self, input):
         for i, fifo in enumerate(self.input_FIFOs):
-            fifo.data[2 * self.size - i : self.size - i] = input[i, ::-1]
+            for j in range(self.size):
+                fifo.data[2 * self.size - i -j - 1] = input[i, self.size - j - 1]
 
     def load_partial_sum_FIFOs(self, PS):
-        PS = PS.T
         for i, fifo in enumerate(self.partial_sum_FIFOs):
-            fifo.data[2 * self.size - i: self.size - i] = PS[:, i]
+            for j in range(self.size):
+                fifo.data[2 * self.size - i -j - 1] = PS[i, self.size - j - 1]
         
 
     def read_output_FIFOs(self):
         out = np.zeros(shape = (self.size, self.size), dtype = self.dtype)
         for i, fifo in enumerate(self.output_FIFOs):
             out[:, i] = fifo.data[self.size - i : 2 * self.size - i]
-        return out.T[:, ::-1]
+        return out.T
 
 
     def cycle(self):
@@ -90,58 +91,55 @@ class SystolicArray():
             for j in range(self.size):
                 self.MACs[i][j].compute()
 
+# For correctness verification
+def custom_matmul(A, B, dtype):
+    size = A.shape[0]
+    out = np.zeros(shape = (size, size), dtype = dtype)
+    for i in range(size):
+        for j in range(size):
+            for k in range(size):
+                out[i, j] += (A[i, k] * B[k, j]).astype(dtype)
+    return out
 
-               
 
 if __name__ == "__main__":
     N = 4
     dt = np.float16
+    
+    num_test = 5000
+
     sys = SystolicArray(size = N, dtype = dt)
-    W = np.array([[3.1415926, -0.5, 55.555, 12.345], 
-                         [2.3, 4.555, -6.734, -0.94], 
-                         [-00.0089, -3.0002, 21.11, 4.44], 
-                         [-0.21718, -3.21, 1.212, 9]],
-                        dtype = dt)
-    I = np.array([[1, 5, 9, 3], 
-                   [2, 6, 0, 4], 
-                   [3, 7, 1, 5], 
-                   [4, 8, 2, 6]], dtype = dt)
-    PS = np.array([[1, 5, 9, 3], 
-                   [2, 6, 0, 4], 
-                   [3, 7, 1, 5], 
-                   [4, 8, 2, 6]], dtype = dt)
-    
-    # W = np.zeros(shape = (N, N), dtype = dt)
-    # I = np.zeros(shape = (N, N), dtype = dt)
-    PS = np.zeros(shape = (N, N), dtype = dt)
-
+    W =  np.random.rand(N, N).astype(dt)
     sys.load_weights(W)
-    sys.load_input_FIFOs(I)
-    sys.load_partial_sum_FIFOs(PS)
 
-    for fifo in sys.input_FIFOs:
-        print(*[str(n) for n in fifo.data], sep = " ")
+    tick = 0
+    initial_wait = (3 * N - 1) + 1
+    num_read = 0
+    num_sent = 0
+    inputs   = [np.random.rand(N, N).astype(dt) for _ in range(num_test)]
+    partials = [np.random.rand(N, N).astype(dt) for _ in range(num_test)]
 
-    # The number of ticks it should take for 1 standalone GEMM
-    num_ticks = sys.size * 3 - 1
+    while (num_read < num_test):
+        if tick % N == 0:
+            if num_sent < num_test:
+                # print(f"tick {tick}: loading input, ps")
+                sys.load_input_FIFOs(inputs[num_sent])
+                sys.load_partial_sum_FIFOs(partials[num_sent])
+                num_sent += 1
+        
+        if (tick - initial_wait >= 0) and ((tick - initial_wait) % N == 0):
+            out = sys.read_output_FIFOs()
+            expected = custom_matmul(W, inputs[num_read], dt) + partials[num_read]
+            num_read += 1
+            
+            assert np.allclose(out, expected, rtol = 1e-2)
+        
+        # print("~~~INPUT FIFO")
+        # for f in sys.input_FIFOs:
+        #     s = ""
+        #     for n in f.data: s += str(n).ljust(8, " ")
+        #     print(s)
 
-    for tick in range(num_ticks + 1):
-        print(tick)
-        for i in range(N):
-            s = ""
-            for j in range(N):
-                s += str(sys.MACs[i][j].input_from_left).ljust(5, " ")
-            print(s)
-        print()
         sys.cycle()
-    
-    out = sys.read_output_FIFOs()
-    expected = np.matmul(W, I) + PS
-    # print(out)
-    if not np.allclose(out, expected):
-        print("Out")
-        print(out)
-        print("Expected")
-        print(expected)
-    else:
-        print("correct")
+        tick += 1
+
