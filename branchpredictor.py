@@ -88,7 +88,6 @@ class Tournament:
         self.global_history = ((self.global_history << 1) & ((1 << self.ghr_bits) - 1)) | (1 if actual_taken else 0)
 
     def print_debug_info(self, pc):
-        """Optional: Print the internal state for a given PC for debugging."""
         g_index = self.index_global(pc)
         l_index = self.index_local(pc)
         print(f"PC=0x{pc:X}")

@@ -23,8 +23,7 @@ class FetchStage(PipelineStage):
             self.current_instruction = self.instruction_queue[self.pc]
             self.current_instruction.pc = self.pc
             print(f"[Tick {tick}] Fetching: {self.current_instruction.opcode}")
-            if self.current_instruction.opcode in {Opcode.BTYPE, Opcode.JAL, Opcode.JALR}:
-                predicted_taken, used, predicted_target = self.branch_predictor.predict(self.pc)
+            if self.current_instruction.opcode == Opcode.BTYPE:
                 predicted_taken, used, predicted_target = self.branch_predictor.predict(self.pc)
                 self.current_instruction.predicted_taken = predicted_taken
                 self.current_instruction.predicted_target = predicted_target
@@ -39,6 +38,16 @@ class FetchStage(PipelineStage):
                         self.pc = BranchUnit.compute_branch_target(self.current_instruction)
                 else:
                     self.pc += 1  # Next sequential instruction.
+            elif self.current_instruction.opcode in {Opcode.JAL, Opcode.JALR}:
+                self.current_instruction.predicted_taken = True
+                if self.current_instruction.opcode == Opcode.JAL:
+                    target = BranchUnit.compute_jump_target(self.current_instruction)
+                else:
+                    target = self.current_instruction.pc + self.current_instruction.imm
+                self.current_instruction.predicted_target = target
+                self.current_instruction.speculative = True
+                print(f"[Tick {tick}] Jump instruction: {self.current_instruction.opcode} target={target}")
+                self.pc = target
             else:
                 self.pc += 1
 
@@ -76,39 +85,54 @@ class IssueStage(PipelineStage):
                      Opcode.LW: "SCALARLD", Opcode.SW: "SCALARLD", Opcode.BTYPE: "BRANCH"}
         if instruction.opcode in ins_to_fu.keys(): fu_name = ins_to_fu[instruction.opcode]
         elif instruction.opcode in opcodes.values(): fu_name = "ALU"
-        else: return None
-        if fu := self.scoreboard.allocate_fu(fu_name, instruction, tick):
+        else: return instruction
+        fu = self.scoreboard.allocate_fu(fu_name, instruction, tick)
+        if fu:
             print(f"[Tick {tick}] Issuing: {instruction.opcode} to {fu_name} FU")
             self.scoreboard.update_stage(instruction, 'S', tick)
             instruction.fu = fu
             return instruction
-        return None
+        else:
+            print(f"[Tick {tick}] Stalling: {instruction.opcode} waiting for {fu_name} FU")
+            return instruction
 
 class ExecuteStage(PipelineStage):
-    def __init__(self, scoreboard):
+    def __init__(self, scoreboard, scalar_regs):
         super().__init__("Execute")
         self.scoreboard = scoreboard
+        self.scalar_regs = scalar_regs
 
     def process(self, instruction, tick):
         if instruction is None: return None
-        if instruction.execute():
-            print(f"[Tick {tick}] Executing: {instruction.opcode}")
-            self.scoreboard.update_stage(instruction, 'X', tick)
-            if instruction.remaining_cycles == 0 and instruction.fu is not None:
+        if instruction.opcode == Opcode.HALT:
+            finished = True
+        else:
+            finished = instruction.execute()
+        self.scoreboard.update_stage(instruction, 'X', tick)
+        if finished:
+            print(f"[Tick {tick}] Executing complete: {instruction.opcode}")
+            if instruction.opcode in {Opcode.ITYPE, Opcode.RTYPE} and instruction.opcode not in {Opcode.LW, Opcode.SW, Opcode.LDM, Opcode.STM}:
+                if instruction.fu is not None:
+                    result = instruction.fu.compute(self.scalar_regs)
+                    instruction.result = result
+                    print(f"[Tick {tick}] Computed result: {result}")
+            if instruction.fu is not None:
                 self.scoreboard.release_fu(instruction.fu)
             return instruction
-        return None
+        else:
+            print(f"[Tick {tick}] Executing (stalled): {instruction.opcode}, remaining_cycles={instruction.remaining_cycles}")
+            return instruction
 
 class WriteBackStage(PipelineStage):
-    def __init__(self, scoreboard, branch_predictor):
+    def __init__(self, scoreboard, branch_predictor, scalar_regs):
         super().__init__("WriteBack")
         self.scoreboard = scoreboard
         self.branch_predictor = branch_predictor
         self.flush_callback = None
+        self.scalar_regs = scalar_regs
 
     def process(self, instruction, tick):
         if instruction:
-            # TODO: writeback logic
             print(f"[Tick {tick}] Writing back: {instruction.opcode}")
             self.scoreboard.update_stage(instruction, 'W', tick)
             if instruction.opcode in {Opcode.BTYPE, Opcode.JAL, Opcode.JALR}:
@@ -121,6 +145,15 @@ class WriteBackStage(PipelineStage):
                     print(f"[Tick {tick}] Branch misprediction detected, flushing speculative instructions.")
                     if self.flush_callback:
                         self.flush_callback()
+                else:
                     self.scoreboard.flush_speculative()
+            elif instruction.opcode in {Opcode.ITYPE, Opcode.RTYPE} and instruction.opcode not in {Opcode.LW, Opcode.SW, Opcode.LDM, Opcode.STM}:
+                if instruction.fu is not None:
+                    result = instruction.result
+                    if instruction.rd is not None:
+                        self.scalar_regs[instruction.rd] = result
+                    print(f"[Tick {tick}] ALU result: {result} written to x{instruction.rd}")
+            # if instruction.fu is not None:
+            #     self.scoreboard.release_fu(instruction.fu)
             return instruction
         return None

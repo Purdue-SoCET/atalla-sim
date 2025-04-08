@@ -1,6 +1,6 @@
 import numpy as np
 from instruction import *
-from opcode import branch_funct  # type: ignore
+from opcode import branch_funct, alu_funct, Opcode  # type: ignore
 
 class FunctionalUnit():
     def __init__(self, name = None):
@@ -16,7 +16,7 @@ class FunctionalUnit():
 
     def intake(self, instruction):
         self.instruction = instruction
-        self.busy = self.instruction.remaining_cycles == 0
+        self.busy = True
         self.opcode = instruction.opcode
         self.rd = instruction.rd
         self.rs1 = instruction.rs1
@@ -57,11 +57,13 @@ class ALU(FunctionalUnit):
 
     def intake(self, instruction):
         super().intake(instruction)
-        # op1 = self.scalar_regs[i.rs1]
-        # op2 =  i.imm if i.use_imm else self.scalar_regs[i.rs2]
-        # out = alu_funct[i.aluop](op1,op2)
-        # return out
-        
+
+    def compute(self, reg_file):
+        a = reg_file[self.instruction.rs1]
+        b = self.instruction.imm if getattr(self.instruction, 'use_imm', False) else reg_file[self.instruction.rs2]
+        op = self.instruction.aluop  # This should be an AluOp value.
+        self.result = alu_funct[op](a, b)
+        return self.result
 
 class GEMM(FunctionalUnit):
     def __init__(self, dim : int, dtype : np.dtype):
@@ -99,18 +101,33 @@ class BranchUnit(FunctionalUnit):
         super().__init__(name = "Branch")
     
     def compute_branch(self, scalar_regs):
-        op1 = scalar_regs[self.instruction.rs1]
-        op2 = scalar_regs[self.instruction.rs2]
-        diff = op1 - op2
-        # Retrieve branch operator from the instruction (a value from bfunct)
-        branch_op = self.instruction.branch_cond  
-        condition_func = branch_funct[branch_op]
-        taken = condition_func(diff)
-        # Compute branch target
-        branch_target = self.instruction.pc + self.instruction.imm
+        if self.instruction.opcode == Opcode.JAL:
+            # For JAL, the target is PC + imm and return address is PC + 4.
+            taken = True
+            branch_target = self.instruction.pc + self.instruction.imm
+            self.instruction.return_addr = self.instruction.pc + 4
+        elif self.instruction.opcode == Opcode.JALR:
+            # For JALR, the target is (rs1 + imm) rounded down to an even address.
+            taken = True
+            branch_target = (scalar_regs[self.instruction.rs1] + self.instruction.imm) & ~1
+            self.instruction.return_addr = self.instruction.pc + 4
+        else:
+            op1 = scalar_regs[self.instruction.rs1]
+            op2 = scalar_regs[self.instruction.rs2]
+            diff = op1 - op2
+            # Retrieve branch operator from the instruction (a value from bfunct)
+            branch_op = self.instruction.branch_cond  
+            condition_func = branch_funct[branch_op]
+            taken = condition_func(diff)
+            # Compute branch target
+            branch_target = self.instruction.pc + self.instruction.imm
         # Store the computed results in the instruction for later use
         self.instruction.taken = taken
         self.instruction.branch_target = branch_target
         return taken
+    @staticmethod
     def compute_branch_target(instruction):
+        return instruction.pc + instruction.imm
+    @staticmethod
+    def compute_jump_target(instruction):
         return instruction.pc + instruction.imm

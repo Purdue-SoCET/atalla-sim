@@ -15,4 +15,14 @@ def frombits(data, signed = False):
         s = sum(b << i for i,b in enumerate(data))
         if signed: return np.int32(s) 
         else: return np.uint32(s)
-   
+
+def load_instructions(filename):
+    word_list = []
+    with open(filename, "rb") as f:
+        data = f.read()
+    if len(data) % 4 != 0:
+        raise ValueError("File length is not a multiple of 4 bytes.")
+    for i in range(0, len(data), 4):
+        word = data[i:i+4]
+        word_list.append(word[::-1])
+    return word_list
