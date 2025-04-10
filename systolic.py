@@ -1,145 +1,186 @@
 import numpy as np
-
-class FIFO():
-    def __init__(self, size, dtype : np.dtype):
-        self.size = size
-        self.dtype = dtype
-        self.data = [dtype(0) for _ in range(size)]
-    
-    def read(self):
-        temp = self.data[-1]
-        self.write(self.dtype(0))
-        return temp
-    
-    def write(self, num):
-        self.data.insert(0, self.dtype(num))
-        self.data = self.data[:-1]
-
-class MAC():
-    def __init__(self, dtype : np.dtype, latency : int):
-        self.weight = dtype(0)
-        self.PE_total = dtype(0)
-        self.latency = latency
-        self.input_from_left = dtype(0)
-        self.total_from_above = dtype(0)
-        self.output_right = dtype(0)
-        self.output_down = dtype(0)
-
-    def compute(self):
-        self.PE_total = (self.weight * self.input_from_left) + self.total_from_above
-        self.output_down = self.PE_total
-        self.output_right = self.input_from_left
+# import matplotlib.pyplot as plt
     
 class SystolicArray():
-    def __init__(self, size : int, dtype : np.dtype):
+    def __init__(self, size : int, PE_latency : int, dtype : np.dtype):
         self.size = size
+        self.PE_latency = PE_latency
         self.dtype = dtype
-        self.MACs = [[MAC(dtype, 3) for _ in range(size)] for _ in range(size)]
-        self.partial_sum_FIFOs = [FIFO(size = 2 * size, dtype = dtype) for _ in range(size)]
-        self.input_FIFOs =       [FIFO(size = 2 * size, dtype = dtype) for _ in range(size)]
-        self.output_FIFOs =      [FIFO(size = 2 * size, dtype = dtype) for _ in range(size)]
+        self.weight            = np.zeros(shape=(size, size), dtype=dtype)
+        self.PE_total          = np.zeros(shape=(size, size), dtype=dtype)
+        self.input_from_left   = np.zeros(shape=(size, size), dtype=dtype)
+        self.total_from_above  = np.zeros(shape=(size, size), dtype=dtype)
+        self.output_right      = np.zeros(shape=(size, size), dtype=dtype)
+        self.output_down       = np.zeros(shape=(size, size), dtype=dtype)
+        self.partial_sum_FIFOs = np.zeros(shape=(2 * size, size), dtype=dtype)
+        self.input_FIFOs       = np.zeros(shape=(size, 2 * size), dtype=dtype)
+        self.output_FIFOs      = np.zeros(shape=(2 * size, size), dtype=dtype)
 
     def load_weights(self, weight):
-        weight = weight.T
-        for i, row in enumerate(weight):
-            for j, num in enumerate(row):
-                self.MACs[i][j].weight = num
+        self.weight = weight.T
     
     def load_input_FIFOs(self, input):
-        for i, fifo in enumerate(self.input_FIFOs):
-            for j in range(self.size):
-                fifo.data[2 * self.size - i -j - 1] = input[i, self.size - j - 1]
+        for i in range(self.size):
+            self.input_FIFOs[i, self.size - i: 2 * self.size - i] = input[i, :]
 
     def load_partial_sum_FIFOs(self, PS):
-        for i, fifo in enumerate(self.partial_sum_FIFOs):
-            for j in range(self.size):
-                fifo.data[2 * self.size - i -j - 1] = PS[i, self.size - j - 1]
+        for i in range(self.size):
+            self.partial_sum_FIFOs[self.size - i : 2 * self.size - i, i] = PS[i, :]
         
-
     def read_output_FIFOs(self):
         out = np.zeros(shape = (self.size, self.size), dtype = self.dtype)
-        for i, fifo in enumerate(self.output_FIFOs):
-            out[:, i] = fifo.data[self.size - i : 2 * self.size - i]
-        return out.T
+        for i in range(self.size):
+            out[i, :] = self.output_FIFOs[self.size - i : 2 * self.size - i, i]
+        return out
 
 
     def cycle(self):
         # Write to output FIFOs
-        for j in range(self.size):
-            self.output_FIFOs[j].write(self.MACs[-1][j].output_down)
-
-        # Read partial sum into top row
-        for j in range(self.size):
-            self.MACs[0][j].total_from_above = self.partial_sum_FIFOs[j].read()
+        self.output_FIFOs = np.roll(self.output_FIFOs, 1, axis = 0)
+        self.output_FIFOs[0, :] = self.output_down[-1, :]
 
         # Move outputs down
-        for i in range(1, self.size):
-            for j in range(self.size):
-                self.MACs[i][j].total_from_above = self.MACs[i-1][j].output_down
+        self.total_from_above = np.roll(self.output_down, 1, axis = 0)
 
-        # Move inputs left
-        for i in range(self.size):
-            for j in range(1, self.size):
-                self.MACs[i][j].input_from_left = self.MACs[i][j-1].output_right
+        # Read partial sum into top row
+        self.total_from_above[0,:] = self.partial_sum_FIFOs[-1, :]
+        self.partial_sum_FIFOs = np.roll(self.partial_sum_FIFOs, 1, axis = 0)
+        self.partial_sum_FIFOs[0, :] = self.dtype(0)
+
+        # Move inputs right
+        self.input_from_left = np.roll(self.output_right, 1, axis = 1)
 
         # Write new input into left column
-        for i in range(self.size):
-            self.MACs[i][0].input_from_left = self.input_FIFOs[i].read()
+        self.input_from_left[:, 0] = self.input_FIFOs[:, -1]
+        self.input_FIFOs = np.roll(self.input_FIFOs, 1, axis = 1)
+        self.input_FIFOs[:, 0] = self.dtype(0)
         
         #Perform MAC computations
-        for i in range(self.size):
-            for j in range(self.size):
-                self.MACs[i][j].compute()
-
-# For correctness verification
-def custom_matmul(A, B, dtype):
-    size = A.shape[0]
-    out = np.zeros(shape = (size, size), dtype = dtype)
-    for i in range(size):
-        for j in range(size):
-            for k in range(size):
-                out[i, j] += (A[i, k] * B[k, j]).astype(dtype)
-    return out
+        self.PE_total = (self.weight * self.input_from_left).astype(self.dtype) + self.total_from_above
+        self.output_down = self.PE_total
+        self.output_right = self.input_from_left
 
 
 if __name__ == "__main__":
-    N = 4
-    dt = np.float16
-    
-    num_test = 5000
+    def weight_stationary_test(N, num_test, PE_latency):
+        dt = np.float16
 
-    sys = SystolicArray(size = N, dtype = dt)
-    W =  np.random.rand(N, N).astype(dt)
-    sys.load_weights(W)
+        sys = SystolicArray(size = N, PE_latency= PE_latency, dtype = dt)
+        W =  np.random.rand(N, N).astype(dt) - 0.5
+        sys.load_weights(W)
 
-    tick = 0
-    initial_wait = (3 * N - 1) + 1
-    num_read = 0
-    num_sent = 0
-    inputs   = [np.random.rand(N, N).astype(dt) for _ in range(num_test)]
-    partials = [np.random.rand(N, N).astype(dt) for _ in range(num_test)]
+        tick = 0
+        initial_wait = (3 * N - 1) + 1
+        num_read = 0
+        num_sent = 0
+        inputs   = [np.random.rand(N, N).astype(dt) - 0.5 for _ in range(num_test)]
+        partials = [np.random.rand(N, N).astype(dt) - 0.5 for _ in range(num_test)]
 
-    while (num_read < num_test):
-        if tick % N == 0:
-            if num_sent < num_test:
-                # print(f"tick {tick}: loading input, ps")
-                sys.load_input_FIFOs(inputs[num_sent])
-                sys.load_partial_sum_FIFOs(partials[num_sent])
-                num_sent += 1
-        
-        if (tick - initial_wait >= 0) and ((tick - initial_wait) % N == 0):
-            out = sys.read_output_FIFOs()
-            expected = custom_matmul(W, inputs[num_read], dt) + partials[num_read]
-            num_read += 1
+        while (num_read < num_test):
+            if tick % N == 0:
+                if num_sent < num_test:
+                    sys.load_input_FIFOs(inputs[num_sent])
+                    sys.load_partial_sum_FIFOs(partials[num_sent])
+                    num_sent += 1
             
-            assert np.allclose(out, expected, rtol = 1e-2)
-        
-        # print("~~~INPUT FIFO")
-        # for f in sys.input_FIFOs:
-        #     s = ""
-        #     for n in f.data: s += str(n).ljust(8, " ")
-        #     print(s)
+            if (tick - initial_wait >= 0) and ((tick - initial_wait) % N == 0):
+                out = sys.read_output_FIFOs()
+                expected = np.matmul(W, inputs[num_read]).astype(dt) + partials[num_read]
+                num_read += 1
+                print(f"Num read: {num_read}")
+                if not np.allclose(out, expected, atol = N * 1e-3):
+                    print(out)
+                    print(expected)
+                    assert False
 
-        sys.cycle()
-        tick += 1
+            sys.cycle()
+            tick += 1
+
+    def tiled_matmul_test(Big_N, N, PE_latency, dt):
+        assert Big_N >= N
+        Big_W = np.random.rand(Big_N, Big_N).astype(dt) - 0.5
+        Big_I = np.random.rand(Big_N, Big_N).astype(dt) - 0.5
+        partials = np.zeros(shape = (Big_N, Big_N), dtype = dt)
+
+        tiles = int(np.ceil(Big_N / N))
+        sys = SystolicArray(size = N, PE_latency = PE_latency, dtype = dt)
+
+        tick = 0
+        initial_wait = (3 * N - 1) + 1
+        num_read = 0
+        num_sent = 0
+
+        # print("Big W")
+        # print(Big_W)
+        # print("Big I")
+        # print(Big_I)
+
+        weight_row = 0
+        while weight_row < tiles:
+            term_idx = 0
+            while term_idx < tiles:
+                W = Big_W[N * weight_row : N * (weight_row+1), N * term_idx : N * (term_idx + 1)]
+                sys.load_weights(W)
+                tick += N
+                for _ in range(N): sys.cycle()
+                # print("New W")
+                # print(W)
+                input_col = 0
+                partial_out_col = 0
+                this_mul_wait = 0
+                while partial_out_col < tiles:
+                    if (this_mul_wait - initial_wait >= 0) and ((this_mul_wait - initial_wait) % N == 0):
+                        out = sys.read_output_FIFOs()
+                        # print("Partial: ")
+                        # print(out)
+                        partials[N * weight_row : N * (weight_row+1), N * partial_out_col : N * (partial_out_col+1)] += out
+                        partial_out_col += 1
+                    if (this_mul_wait % N == 0) and input_col < tiles:
+                        I = Big_I[N * term_idx : N * (term_idx+1), N * input_col : N * (input_col+1)]
+                        sys.load_input_FIFOs(I)
+                        # print("New I")
+                        # print(I)
+                        input_col += 1
+                    
+                        #  += out
+                    sys.cycle()
+                    this_mul_wait += 1
+                    tick += sys.PE_latency
+                term_idx += 1
+            weight_row += 1
+            print(f"Output row {weight_row}/{tiles} done")
+        # expected = custom_matmul(Big_W, Big_I, dt)
+        expected = np.matmul(Big_W, Big_I).astype(dt)
+        if not np.allclose(partials, expected, atol = 1e-3 * Big_N):
+            diff = partials-expected
+            print(diff)
+            max_diff = np.max(np.abs(diff))
+            print(f"Max diff: {max_diff}")
+            indices = np.where(diff == max_diff)
+            print(f"{partials[indices]} - {expected[indices]}")
+            assert False
+
+        return(tick)
+
+    weight_stationary_test(128, 100, 18)
+
+    dt = np.float16
+    latency = 18
+    Big_N = 128
+    dims = [4, 8, 16, 32, 64, 128]
+    results = {}
+    for N in dims:
+        results[N] = tiled_matmul_test(Big_N, N, latency, dt)
+
+    print(results)
+    # plt.plot(results.keys(), results.values(), 'o-')
+    # plt.title(f"Tiled GEMM for {Big_N}x{Big_N} Matrix")
+    # plt.xlabel("Systolic Array Dimension")
+    # plt.ylabel("Compute Time")
+    # plt.xscale('log', base = 2)
+    # plt.yscale('log', base = 2)
+    # # plt.savefig('results.png')
+    # plt.grid()
+    # plt.show()
+    
 
