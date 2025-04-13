@@ -6,27 +6,22 @@ WORD_SIZE = 32
 BYTES_PER_WORD = WORD_SIZE//8
 ADDR_BITS   = 32    # Address bits
 
-CS          = 1024*2 # Cache size in bits
-BLOCK_SIZE  = 4      # Block size in words
-A           = 2      # Associativity
-BANKS       = 4      # Number of banks
-K           = 8      # MSHR size
-
 DRAM_LATENCY = 20
 
 class CacheFrame:
-    def __init__(self, tag = 0, data = None, address = None, tick = -1):
+    def __init__(self, block_size = 4, tag = 0, data = None, address = None, tick = -1):
+        self.block_size = block_size
         self.valid = False
         self.dirty = False
         self.tag = 0
         self.address = 0
-        self.data = [[0 for _ in range(WORD_SIZE)] for _ in range(BLOCK_SIZE)]
+        self.data = [[0 for _ in range(WORD_SIZE)] for _ in range(block_size)]
         self.lru_tick = -1
     
     def __repr__(self):
         valid_str = "." if self.valid else " "
         data_str = ""
-        for word_idx in range(BLOCK_SIZE):
+        for word_idx in range(self.block_size):
             data_str = str(frombits(self.data[word_idx])).ljust(4, ' ') + data_str
         return valid_str + f" Tag: {self.tag}   Data: {data_str}   Addr: {hex(self.address)}   Tick: {self.lru_tick}"
 
@@ -54,32 +49,36 @@ class MSHREntry:
 
 
 class Cache:
-    def __init__(self, dram = None):
-        self.NUM_TOTAL_WORDS = (CS // 8) // BYTES_PER_WORD
-        self.NUM_TOTAL_FRAMES = self.NUM_TOTAL_WORDS // BLOCK_SIZE
-        self.NUM_BANKS = BANKS
+    def __init__(self, size, block_size, assoc, banks, mshr_k, dram = None):
+        self.CS          = size       # Cache size in bits
+        self.BLOCK_SIZE  = block_size # Block size in words
+        self.A           = assoc      # Associativity
+        self.NUM_BANKS   = banks      # Number of banks
+        self.K           = mshr_k     # MSHR size
+        self.NUM_TOTAL_WORDS = (self.CS // 8) // BYTES_PER_WORD
+        self.NUM_TOTAL_FRAMES = self.NUM_TOTAL_WORDS // self.BLOCK_SIZE
         self.NUM_FRAMES_PER_BANK = self.NUM_TOTAL_FRAMES // self.NUM_BANKS
-        self.NUM_SETS_PER_BANK = self.NUM_FRAMES_PER_BANK // A
+        self.NUM_SETS_PER_BANK = self.NUM_FRAMES_PER_BANK // self.A
         self.NUM_FRAMES_PER_SET = self.NUM_FRAMES_PER_BANK // self.NUM_SETS_PER_BANK
-        print("Banks:", BANKS)
-        print("-> Sets:", self.NUM_SETS_PER_BANK)
-        print("   -> Frames:", self.NUM_FRAMES_PER_SET)     
-        print("      -> Words:", BLOCK_SIZE)
-        print("         -> Bits:", WORD_SIZE)
+        # print("Banks:", self.NUM_BANKS)
+        # print("-> Sets:", self.NUM_SETS_PER_BANK)
+        # print("   -> Frames:", self.NUM_FRAMES_PER_SET)     
+        # print("      -> Words:", self.BLOCK_SIZE)
+        # print("         -> Bits:", WORD_SIZE)
         
         
         # self.FRAMES = CS//(BS * WORD_SIZE)
         # self.NUM_SETS = self.FRAMES // A
         self.INDEX_BITS = int(np.log2(self.NUM_SETS_PER_BANK))
-        self.BLKOFF_BITS = int(np.log2(BLOCK_SIZE))
+        self.BLKOFF_BITS = int(np.log2(self.BLOCK_SIZE))
         self.BANK_BITS = int(np.log2(self.NUM_BANKS))
         self.TAG_BITS = ADDR_BITS - self.INDEX_BITS - self.BLKOFF_BITS - self.BANK_BITS - 2
 
-        print("Index bits     : ", self.INDEX_BITS)
-        print("Block off. bits: ", self.BLKOFF_BITS)
-        print("Bank idx. bits : ", self.BANK_BITS)
-        print("Tag bits       : ", self.TAG_BITS)
-        self.cache = [[[CacheFrame() for _ in range(A)] for _ in range(self.NUM_SETS_PER_BANK)] for _ in range(self.NUM_BANKS)]
+        # print("Index bits     : ", self.INDEX_BITS)
+        # print("Block off. bits: ", self.BLKOFF_BITS)
+        # print("Bank idx. bits : ", self.BANK_BITS)
+        # print("Tag bits       : ", self.TAG_BITS)
+        self.cache = [[[CacheFrame(block_size=self.BLOCK_SIZE) for _ in range(self.A)] for _ in range(self.NUM_SETS_PER_BANK)] for _ in range(self.NUM_BANKS)]
         self.bank_latencies = self.NUM_BANKS * [0]
         self.bank_current_mshr = self.NUM_BANKS * [None]
         self.dram = dram
@@ -90,7 +89,6 @@ class Cache:
 
     def extract_info(self, address):
         address = tobits([address], bit_len=ADDR_BITS)
-        # print(address)
         bank    = frombits(address[2 : 2 + self.BANK_BITS])
         blk_off = frombits(address[2 + self.BANK_BITS : 2 + self.BANK_BITS + self.BLKOFF_BITS])
         idx     = frombits(address[2 + self.BANK_BITS + self.BLKOFF_BITS: ADDR_BITS - self.TAG_BITS])
@@ -105,7 +103,7 @@ class Cache:
                 self.bank_latencies[b_i] -= 1
             elif mshr_done is not None: # MSHR latency reached 0
                 if mshr_done.address in self.dram.keys(): # If data can be found in DRAM
-                    for word_idx in range(BLOCK_SIZE):
+                    for word_idx in range(self.BLOCK_SIZE):
                         dram_word_addr  = mshr_done.bank << 2
                         dram_word_addr += word_idx       << (2 + self.BANK_BITS)
                         dram_word_addr += mshr_done.idx  << (2 + self.BANK_BITS + self.BLKOFF_BITS)
@@ -120,7 +118,7 @@ class Cache:
                             min_age = frame.lru_tick
                             lru = i
                     lru_frame = self.cache[mshr_done.bank][mshr_done.idx][lru]
-                    for word_idx in range(BLOCK_SIZE):
+                    for word_idx in range(self.BLOCK_SIZE):
                         dram_word_addr  = mshr_done.bank << 2
                         dram_word_addr += word_idx       << (2 + self.BANK_BITS)
                         dram_word_addr += mshr_done.idx  << (2 + self.BANK_BITS + self.BLKOFF_BITS)
@@ -164,7 +162,7 @@ class Cache:
                     return data_out
         
 
-        # Chenk MSHR buffer entries, including those currently being 'serviced' by each bank
+        # Check MSHR buffer entries, including those currently being 'serviced' by each bank
         for entry in self.bank_current_mshr:
             if entry is None: continue
             if (tag, idx, bank) == (entry.tag, entry.idx, entry.bank):
@@ -177,7 +175,7 @@ class Cache:
                     entry.add_miss(address, self, is_write, data_in, tick)
                     return "Miss"
         
-        if len(self.mshr) == K:
+        if len(self.mshr) == self.K:
             return "Stall"
         Cache.print_message("~ Miss     :", address, tag, idx, blk_off, bank)
         self.mshr.append(MSHREntry(address, self, is_write, data_in, uuid = tick))
@@ -227,7 +225,7 @@ class Cache:
         lru_frame = cache_set[lru]
         if lru_frame.dirty:  # Write back
             Cache.print_message("~ Write LRU:", address, tag, idx, blk_off, bank)
-            for word_idx in range(BLOCK_SIZE):
+            for word_idx in range(self.BLOCK_SIZE):
                 dram_word_addr  = bank          << 2
                 dram_word_addr += word_idx      << (2 + self.BANK_BITS)
                 dram_word_addr += idx           << (2 + self.BANK_BITS + self.BLKOFF_BITS)
@@ -246,7 +244,8 @@ class Cache:
 
     @staticmethod
     def print_message(message, address, tag, idx, blkoffset, bank):
-        print(f"{message} at addr. "+ str(hex(address)).ljust(5, ' ') + f" -> tag {tag} set {idx} word {blkoffset} bank {bank}")
+        if __debug__:
+            print(f"{message} at addr. "+ str(hex(address)).ljust(5, ' ') + f" -> tag {tag} set {idx} word {blkoffset} bank {bank}")
 
     def __repr__(self):
         str_out = ""
@@ -260,21 +259,6 @@ class Cache:
         return str_out
 
 if __name__ == "__main__":
-    tick = 0
-    dram = {}
-    dcache = Cache(dram = dram)
-    dcache.blocking = True
-
-    # Addressing test
-    for i in range(0, dcache.NUM_TOTAL_WORDS, 4):
-        tag, idx, blk_off, bank = dcache.extract_info(i)
-        print(f"Addr:  {hex(i)} Tag: {int(tag)} Idx: {int(idx)} Blk_off: {blk_off} Bank {int(bank)}")
-
-    num_test = dcache.NUM_TOTAL_WORDS * 2
-
-    test_block_offest = True
-    n = 4 if test_block_offest else 8
-
     def instant_write_test(dcache, num_test, tick):
         print("Write test")
         for i in range(num_test):
@@ -282,12 +266,19 @@ if __name__ == "__main__":
             tick += 1
         return tick
 
+    def instant_read_test(dcache, num_test, tick):
+        print("Read test")
+        for i in range(num_test - 1, -1, -1):
+            assert i == frombits(dcache.instant_read(i * n, tick)), f"Incorrect read at address {hex(i * n)}"
+            tick += 1
+        return tick
+
     def non_block_write_test(dcache, num_test, tick):
         print("Non-blocking Write test")
         i_in  = 0
         i_out = 0
-        while i_out < num_test and tick < 500:
-            status_str = f"--- Tick {tick}   MSHR: {len(dcache.mshr)}/{K}"
+        while i_out < num_test and tick < 5000:
+            status_str = f"--- Tick {tick}   MSHR: {len(dcache.mshr)}/{dcache.K}"
             for b_i, bank in enumerate(dcache.cache):
                 status_str += f"  B{b_i}: +{dcache.bank_latencies[b_i]}".ljust(4, ' ')
             print(status_str)
@@ -322,8 +313,8 @@ if __name__ == "__main__":
         print("Blocking Write test")
         i_in  = 0
         i_out = 0
-        while i_out < num_test and tick < 500:
-            status_str = f"--- Tick {tick}   MSHR: {len(dcache.mshr)}/{K}"
+        while i_out < num_test and tick < 5000:
+            status_str = f"--- Tick {tick}   MSHR: {len(dcache.mshr)}/{dcache.K}"
             for b_i, bank in enumerate(dcache.cache):
                 status_str += f"  B{b_i}: +{dcache.bank_latencies[b_i]}".ljust(4, ' ')
             print(status_str)
@@ -353,34 +344,13 @@ if __name__ == "__main__":
             dcache.main_loop(tick)
             tick += 1
         return tick
-
-    # tick = instant_write_test(dcache, num_test, tick)
-    # tick = non_block_write_test(dcache, num_test, tick)
-    tick = blocking_write_test(dcache, num_test, tick)
-
-
-    tick_after_writing = tick
-    
-    print("Cache after write test")
-    print(dcache)
-
-    print("DRAM after write test")
-    for addr, data in sorted(dram.items()):
-        print(hex(addr).ljust(5, ' '), frombits(data))
-
-    def instant_read_test(dcache, num_test, tick):
-        print("Read test")
-        for i in range(num_test - 1, -1, -1):
-            assert i == frombits(dcache.instant_read(i * n, tick)), f"Incorrect read at address {hex(i * n)}"
-            tick += 1
-        return tick
     
     def non_blocking_read_test(dcache, num_test, tick, tick_after_writing):
         print("Non-blocking Read test")
         i_in  = num_test - 1
         i_out = num_test - 1
         while i_out >= 0 and tick - tick_after_writing < 5000:
-            status_str = f"--- Tick {tick}   MSHR: {len(dcache.mshr)}/{K}"
+            status_str = f"--- Tick {tick}   MSHR: {len(dcache.mshr)}/{dcache.K}"
             for b_i, bank in enumerate(dcache.cache):
                 status_str += f"  B{b_i}: +{dcache.bank_latencies[b_i]}".ljust(4, ' ')
             print(status_str)
@@ -411,7 +381,7 @@ if __name__ == "__main__":
         i_in  = num_test - 1
         i_out = num_test - 1
         while i_out >= 0 and tick - tick_after_writing < 5000:
-            status_str = f"--- Tick {tick}   MSHR: {len(dcache.mshr)}/{K}"
+            status_str = f"--- Tick {tick}   MSHR: {len(dcache.mshr)}/{dcache.K}"
             for b_i, bank in enumerate(dcache.cache):
                 status_str += f"  B{b_i}: +{dcache.bank_latencies[b_i]}".ljust(4, ' ')
             print(status_str)
@@ -438,10 +408,39 @@ if __name__ == "__main__":
             dcache.main_loop(tick)
             tick += 1
 
-    # tick_after_reading = instant_read_test(dcache, num_test, tick)
-    # tick_after_reading = non_blocking_read_test(dcache, num_test, tick, tick_after_writing)
-    tick_after_reading = blocking_read_test(dcache, num_test, tick, tick_after_writing)
+    tick = 0
+    dram = {}
+    dcache = Cache(size=2048, block_size=4, assoc=2, banks=4, mshr_k=8, dram=dram)
+    dcache.blocking = False
 
+    # Addressing test
+    for i in range(0, dcache.NUM_TOTAL_WORDS, 4):
+        tag, idx, blk_off, bank = dcache.extract_info(i)
+        print(f"Addr:  {hex(i)} Tag: {int(tag)} Idx: {int(idx)} Blk_off: {blk_off} Bank {int(bank)}")
+
+    num_test = dcache.NUM_TOTAL_WORDS * 2
+
+    test_block_offest = True
+    n = 4 if test_block_offest else 8
+
+    # tick = instant_write_test(dcache, num_test, tick)
+    
+    if not dcache.blocking: tick = non_block_write_test(dcache, num_test, tick)
+    else:                   tick = blocking_write_test(dcache, num_test, tick)
+
+    tick_after_writing = tick
+    
+    print("Cache after write test")
+    print(dcache)
+
+    print("DRAM after write test")
+    for addr, data in sorted(dram.items()):
+        print(hex(addr).ljust(5, ' '), frombits(data))
+
+
+    # tick_after_reading = instant_read_test(dcache, num_test, tick)
+    if not dcache.blocking: tick_after_reading = non_blocking_read_test(dcache, num_test, tick, tick_after_writing)
+    else:                   tick_after_reading = blocking_read_test(dcache, num_test, tick, tick_after_writing)
 
     print("Cache after read test")
     print(dcache)
