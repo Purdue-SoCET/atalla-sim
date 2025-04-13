@@ -162,7 +162,7 @@ class Cache:
                     return data_out
         
 
-        # Chenk MSHR buffer entries, including those currently being 'serviced' by each bank
+        # Check MSHR buffer entries, including those currently being 'serviced' by each bank
         for entry in self.bank_current_mshr:
             if entry is None: continue
             if (tag, idx, bank) == (entry.tag, entry.idx, entry.bank):
