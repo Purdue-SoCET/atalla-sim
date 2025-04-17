@@ -6,6 +6,7 @@ from instruction import *
 from funit import *
 from branchpredictor import Tournament
 from helpers import load_instructions
+from mem import Memory
 
 class Simulator:
     def __init__(self, decoded_instruction):
@@ -13,7 +14,8 @@ class Simulator:
         self.scoreboard = Scoreboard()
 
         self.branch_predictor = Tournament(num_entries=1024, ghr_bits=10)
-
+        self.memory = Memory(4096)
+        
         dim = 4
         num_m_regs = 16
         dtype = np.float16
@@ -25,7 +27,7 @@ class Simulator:
         self.fetch = FetchStage(decoded_instructions, self.branch_predictor)
         self.dispatch = DispatchStage(self.scoreboard)
         self.issue = IssueStage(self.scoreboard)
-        self.execute = ExecuteStage(self.scoreboard, self.scalar_regs)
+        self.execute = ExecuteStage(self.scoreboard, self.scalar_regs, self.memory)
         self.write_back = WriteBackStage(self.scoreboard, self.branch_predictor, self.scalar_regs)
         self.write_back.flush_callback = self.flush_pipeline
 
@@ -164,3 +166,4 @@ if __name__ == "__main__":
     sim = Simulator(decoded_instructions)
     sim.run()
     sim.dump_registers()
+    Memory.dump(sim.memory)
