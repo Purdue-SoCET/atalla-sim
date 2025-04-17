@@ -91,6 +91,18 @@ class GEMM(FunctionalUnit):
 class ScalarLD(FunctionalUnit):
     def __init__(self):
         super().__init__(name = "ScalarLD")
+    
+    def compute(self, scalar_regs, memory):
+        base = scalar_regs[self.instruction.rs1]
+        addr = base + self.instruction.imm
+        if self.instruction.opcode == Opcode.LW:
+            val = memory.load_word(addr)
+            self.instruction.result = val
+            return val
+        elif self.instruction.opcode == Opcode.SW:
+            val = scalar_regs[self.instruction.rs2]
+            memory.store_word(addr, val)
+            return None
 
 class MatrixLD(FunctionalUnit):
     def __init__(self):

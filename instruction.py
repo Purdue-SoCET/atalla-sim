@@ -3,7 +3,7 @@ from opcode import Opcode, opcodes, AluOp, BranchOp, rfunct, ifunct, bfunct# typ
 #add decoding logic for instruction
 
 class Instruction:
-    def __init__(self, opcode, dest=None, src1=None, src2=None, latency=2):
+    def __init__(self, opcode, dest=None, src1=None, src2=None, latency=1):
         self.opcode = opcode
         self.fu = None
         self.rd = dest

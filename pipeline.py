@@ -97,10 +97,11 @@ class IssueStage(PipelineStage):
             return instruction
 
 class ExecuteStage(PipelineStage):
-    def __init__(self, scoreboard, scalar_regs):
+    def __init__(self, scoreboard, scalar_regs, memory):
         super().__init__("Execute")
         self.scoreboard = scoreboard
         self.scalar_regs = scalar_regs
+        self.memory = memory
 
     def process(self, instruction, tick):
         if instruction is None: return None
@@ -116,6 +117,9 @@ class ExecuteStage(PipelineStage):
                     result = instruction.fu.compute(self.scalar_regs)
                     instruction.result = result
                     print(f"[Tick {tick}] Computed result: {result}")
+            if isinstance(instruction.fu, ScalarLD):
+                result = instruction.fu.compute(self.scalar_regs, self.memory)
+                instruction.result = result
             if instruction.fu is not None:
                 self.scoreboard.release_fu(instruction.fu)
             return instruction
