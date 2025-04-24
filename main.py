@@ -6,9 +6,10 @@ from instruction import *
 from funit import *
 from branchpredictor import Tournament
 from helpers import load_instructions
+from cache import *
 
 class Simulator:
-    def __init__(self, decoded_instruction):
+    def __init__(self, decoded_instructions):
         self.tick = 0
         self.scoreboard = Scoreboard()
 
@@ -21,6 +22,11 @@ class Simulator:
         self.scalar_regs = np.zeros(32, dtype=np.int32)
         self.matrix_regs = np.zeros((num_m_regs, dim, dim),  dtype=dtype)
         self.GEMM_unit = GEMM(dim, dtype)
+
+        self.dram = {}
+        self.scoreboard.functional_units["SCALARLD"].dcache = Cache(size=2048, block_size=4, assoc=2, banks=4, mshr_k=8, dram=self.dram)
+        self.scoreboard.functional_units["SCALARLD"].dcache.blocking = True
+        self.scoreboard.functional_units["SCALARLD"].dcache.DRAM_LATENCY = 2
 
         self.fetch = FetchStage(decoded_instructions, self.branch_predictor)
         self.dispatch = DispatchStage(self.scoreboard)
@@ -51,7 +57,7 @@ class Simulator:
             self.fetched_instr = None
 
     def run(self):
-        while self.tick < 15:
+        while self.tick < 35:
             print(f"\n--- Tick {self.tick} ---")
 
             # wb_instr = self.write_back.process(self.to_write_back, self.tick) if self.to_write_back else None
@@ -95,6 +101,8 @@ class Simulator:
             self.writeback_queue = new_wb  # clear WB queue
             
             # Execute Phase: process all instructions in execute queue.
+            self.scoreboard.functional_units["SCALARLD"].dcache.main_loop(self.tick)
+
             new_exec = []
             for instr in self.execute_queue:
                 result = self.execute.process(instr, self.tick)
@@ -117,7 +125,7 @@ class Simulator:
                     self.to_issue = issued_instr  # remains stalled
             
             # Dispatch stage.
-            if self.to_issue is None and self.fetched_instr is not None:
+            if self.to_issue is None:
                 disp_instr = self.dispatch.process(self.fetched_instr, self.tick)
                 if disp_instr is not None:
                     self.to_issue = disp_instr
@@ -126,8 +134,9 @@ class Simulator:
             
             # Fetch stage.
             # Only fetch a new instruction if the fetch register is empty.
-            if self.fetched_instr is None:
-                self.fetched_instr = self.fetch.process(self.tick)
+            # if self.fetched_instr is None:
+            self.fetched_instr = self.fetch.process(self.tick)
+            self.fetch.icache.main_loop(self.tick)
 
             self.scoreboard.print_scoreboard(self.tick)
             
@@ -160,7 +169,8 @@ if __name__ == "__main__":
         word_list.append(bytes.fromhex('FFFFFFFF')[::-1]) # HALT
 
     # decoded_instructions = [decode_instruction(instr) for instr in instruction_list]
-    decoded_instructions = [decode_word(instr) for instr in word_list]
-    sim = Simulator(decoded_instructions)
+    # decoded_instructions = [decode_word(instr) for instr in word_list]
+    # sim = Simulator(decoded_instructions)
+    sim = Simulator(word_list)
     sim.run()
     sim.dump_registers()

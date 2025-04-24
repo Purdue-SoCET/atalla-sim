@@ -2,6 +2,7 @@ from opcode import Opcode, opcodes # type: ignore
 from instruction import *
 from funit import *
 from branchpredictor import *
+from cache import *
 
 class PipelineStage:
     def __init__(self, name):
@@ -16,11 +17,32 @@ class FetchStage(PipelineStage):
         super().__init__("Fetch")
         self.pc = 0
         self.instruction_queue = instruction_queue
+        self.i_mem = {}
+        for addr, inst in enumerate(instruction_queue):
+            self.i_mem[addr] = np.frombuffer(inst, dtype=np.uint32)
+        self.icache = Cache(size=2048, block_size=4, assoc=2, banks=4, mshr_k=8, dram=self.i_mem)
+        self.icache.DRAM_LATENCY = 2
         self.branch_predictor = branch_predictor
 
     def process(self, tick):
         if self.pc < len(self.instruction_queue):
-            self.current_instruction = self.instruction_queue[self.pc]
+            # self.current_instruction = self.instruction_queue[self.pc]
+            stalling = False
+            for bank_busy in self.icache.bank_current_mshr:
+                if bank_busy: stalling = True
+            if stalling:
+                self.current_instruction = None
+                print("Icache stall")
+                return self.current_instruction
+            else:
+                request_result = self.icache.request(address = self.pc, is_write = False, data_in = None, tick=tick)
+                not_hit = isinstance(request_result, str)
+            if not_hit:
+                self.current_instruction = None
+                print("Instruction miss at", hex(self.pc), request_result)
+                return self.current_instruction
+            else:
+                self.current_instruction = decode_word(request_result.tobytes())
             self.current_instruction.pc = self.pc
             print(f"[Tick {tick}] Fetching: {self.current_instruction.opcode}")
             if self.current_instruction.opcode == Opcode.BTYPE:
@@ -106,14 +128,18 @@ class ExecuteStage(PipelineStage):
         if instruction is None: return None
         if instruction.opcode == Opcode.HALT:
             finished = True
+        elif instruction.opcode in {Opcode.LW, Opcode.SW}:
+            request_result = self.scoreboard.functional_units["SCALARLD"].compute(self.scalar_regs, tick)
+            finished = not isinstance(request_result, str)
         else:
             finished = instruction.execute()
         self.scoreboard.update_stage(instruction, 'X', tick)
         if finished:
+            instruction.remaining_cycles = 0
             print(f"[Tick {tick}] Executing complete: {instruction.opcode}")
             if instruction.opcode in {Opcode.ITYPE, Opcode.RTYPE} and instruction.opcode not in {Opcode.LW, Opcode.SW, Opcode.LDM, Opcode.STM}:
                 if instruction.fu is not None:
-                    result = instruction.fu.compute(self.scalar_regs)
+                    result = instruction.fu.compute(self.scalar_regs, tick)
                     instruction.result = result
                     print(f"[Tick {tick}] Computed result: {result}")
             if instruction.fu is not None:
