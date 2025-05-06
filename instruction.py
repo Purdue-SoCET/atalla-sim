@@ -3,7 +3,7 @@ from opcode import Opcode, opcodes, AluOp, BranchOp, rfunct, ifunct, bfunct# typ
 #add decoding logic for instruction
 
 class Instruction:
-    def __init__(self, opcode, dest=None, src1=None, src2=None, latency=2):
+    def __init__(self, opcode, dest=None, src1=None, src2=None, latency=1):
         self.opcode = opcode
         self.fu = None
         self.rd = dest
@@ -12,6 +12,7 @@ class Instruction:
         self.ra = None
         self.rb = None
         self.rc = None
+        self.use_imm = False
         self.imm = None
         self.latency = latency
         self.remaining_cycles = latency
@@ -34,8 +35,8 @@ class Instruction:
             if self.opcode is Opcode.BTYPE:
                 st += str(self.branch_cond)[9:].lower()
             else:
-                if self.opcode in {Opcode.SW, Opcode.LW, Opcode.LUI, 
-                                    Opcode.LDM, Opcode.STM, Opcode.GEMM}:
+                if self.opcode in {Opcode.SW, Opcode.LW, Opcode.LUI, Opcode.LDM, 
+                                   Opcode.STM, Opcode.GEMM, Opcode.JAL, Opcode.JALR}:
                     st += str(self.opcode)[7:].ljust(4, ' ').lower()
                 else:
                     st += (str(self.aluop).lower()[6:] + 'i'*self.use_imm).ljust(4, ' ')
@@ -109,7 +110,15 @@ def decode_word(instruction: bytes):
     if opcode is Opcode.JAL:
         instr.aluop = AluOp.NOP
         instr.rd = frombits(bit_range(7,11))
-        instr.imm = frombits([0] + bit_range(21,30) + [bits[20]] + bit_range(12,19) + [bits[31]])
+        instr.use_imm = True
+        instr.imm = frombits([0] + bit_range(21,30) + [bits[20]] + bit_range(12,19) + [bits[31]], signed=True)
+        return instr
+    if opcode is Opcode.JALR:
+        instr.aluop = AluOp.NOP
+        instr.rd = frombits(bit_range(7,11))
+        instr.rs1 = frombits(bit_range(15,19))
+        instr.use_imm = True
+        instr.imm = frombits(bit_range(20,31), signed = True)
         return instr
     if opcode is Opcode.LUI:
         instr.aluop = AluOp.NOP

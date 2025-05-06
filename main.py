@@ -9,7 +9,7 @@ from helpers import load_instructions
 from cache import *
 
 class Simulator:
-    def __init__(self, decoded_instructions):
+    def __init__(self, word_list):
         self.tick = 0
         self.scoreboard = Scoreboard()
 
@@ -24,11 +24,29 @@ class Simulator:
         self.GEMM_unit = GEMM(dim, dtype)
 
         self.dram = {}
+        self.i_mem = {}
+        
+        in_data = False
+        for addr, inst in enumerate(word_list):
+            result = np.frombuffer(inst, dtype=np.uint32)
+            if result == np.uint32(0): 
+                in_data = True
+            if in_data: 
+                self.dram[addr << 2] = result
+            else:
+                self.i_mem[addr << 2] = result
+        print("\nInstrucion memory")
+        for a, i in self.i_mem.items():
+            print(a >> 2, decode_word(i.tobytes()))
+        print("\nData memory")
+        for a, i in self.dram.items():
+            print(a >> 2, i)
+
         self.scoreboard.functional_units["SCALARLD"].dcache = Cache(size=2048, block_size=4, assoc=2, banks=4, mshr_k=8, dram=self.dram)
         self.scoreboard.functional_units["SCALARLD"].dcache.blocking = True
         self.scoreboard.functional_units["SCALARLD"].dcache.DRAM_LATENCY = 2
 
-        self.fetch = FetchStage(decoded_instructions, self.branch_predictor)
+        self.fetch = FetchStage(self.branch_predictor, self.i_mem)
         self.dispatch = DispatchStage(self.scoreboard)
         self.issue = IssueStage(self.scoreboard)
         self.execute = ExecuteStage(self.scoreboard, self.scalar_regs)
@@ -57,7 +75,7 @@ class Simulator:
             self.fetched_instr = None
 
     def run(self):
-        while self.tick < 35:
+        while self.tick < 500:
             print(f"\n--- Tick {self.tick} ---")
 
             # wb_instr = self.write_back.process(self.to_write_back, self.tick) if self.to_write_back else None
@@ -97,7 +115,8 @@ class Simulator:
             # WriteBack Phase: process all instructions in writeback queue.
             new_wb = []
             for instr in self.writeback_queue:
-                self.write_back.process(instr, self.tick)
+                result = self.write_back.process(instr, self.tick)
+                if result == "HALT": return
             self.writeback_queue = new_wb  # clear WB queue
             
             # Execute Phase: process all instructions in execute queue.
@@ -134,9 +153,13 @@ class Simulator:
             
             # Fetch stage.
             # Only fetch a new instruction if the fetch register is empty.
-            # if self.fetched_instr is None:
-            self.fetched_instr = self.fetch.process(self.tick)
+            # print(">>>>>> pc:", hex(self.fetch.pc))
+            
+            if self.fetched_instr is None:
+                self.fetched_instr = self.fetch.process(self.tick)               
             self.fetch.icache.main_loop(self.tick)
+
+            # print("Fetched instr:", self.fetched_instr)
 
             self.scoreboard.print_scoreboard(self.tick)
             
@@ -153,16 +176,21 @@ class Simulator:
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
-        binary_file = sys.argv[1]
-        word_list = load_instructions(binary_file)
+        hex_file = sys.argv[1]
+        # word_list = load_instructions(binary_file)
+        word_list = []
+        with open(hex_file) as f:
+            data = f.readlines()
+        for i in data:
+            word_list.append(bytes.fromhex(i)[::-1])
     else:
         word_list = []
         word_list.append(bytes.fromhex('20000093')[::-1]) # addi.i x1, x0, 512
         word_list.append(bytes.fromhex('1a400193')[::-1]) # addi.i x3, x0, 420
         word_list.append(bytes.fromhex('0000a103')[::-1]) # lw x2, 0(x1)
         word_list.append(bytes.fromhex('0030a223')[::-1]) # sw x3, 4(x1)
-        word_list.append(bytes.fromhex('01010263')[::-1])  # beq x1, x2, 16   (example encoding)
-        word_list.append(bytes.fromhex('F0E1C263')[::-1])  # bne x1, x3, -16  (example encoding)
+        word_list.append(bytes.fromhex('00208863')[::-1])  # beq x1, x2, 16   (example encoding)
+        word_list.append(bytes.fromhex('fe3098e3')[::-1])  # bne x1, x3, -16  (example encoding)
         word_list.append(bytes.fromhex('10800447')[::-1]) # ld.m m1, x0, (8)x1
         word_list.append(bytes.fromhex('31110077')[::-1]) # gemm m3, m1, m1, m1
         word_list.append(bytes.fromhex('30801457')[::-1]) # st.m m3, x0, (40)x1
@@ -173,4 +201,4 @@ if __name__ == "__main__":
     # sim = Simulator(decoded_instructions)
     sim = Simulator(word_list)
     sim.run()
-    sim.dump_registers()
+    # sim.dump_registers()

@@ -80,6 +80,6 @@ class Scoreboard:
         for r, s in self.matrix_status.items():
             print(r, s.name)
         print("Instruction Status Table:")
-        for i in self.instr_status:
+        for i in self.instr_status[:-20:-1][::-1]:
             print(i)
 

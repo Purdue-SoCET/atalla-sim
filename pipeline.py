@@ -13,68 +13,71 @@ class PipelineStage:
         pass
 
 class FetchStage(PipelineStage):
-    def __init__(self, instruction_queue, branch_predictor):
+    def __init__(self, branch_predictor, i_mem):
         super().__init__("Fetch")
         self.pc = 0
-        self.instruction_queue = instruction_queue
-        self.i_mem = {}
-        for addr, inst in enumerate(instruction_queue):
-            self.i_mem[addr] = np.frombuffer(inst, dtype=np.uint32)
+        self.i_mem = i_mem
         self.icache = Cache(size=2048, block_size=4, assoc=2, banks=4, mshr_k=8, dram=self.i_mem)
         self.icache.DRAM_LATENCY = 2
         self.branch_predictor = branch_predictor
 
     def process(self, tick):
-        if self.pc < len(self.instruction_queue):
-            # self.current_instruction = self.instruction_queue[self.pc]
-            stalling = False
-            for bank_busy in self.icache.bank_current_mshr:
-                if bank_busy: stalling = True
-            if stalling:
-                self.current_instruction = None
-                print("Icache stall")
-                return self.current_instruction
-            else:
-                request_result = self.icache.request(address = self.pc, is_write = False, data_in = None, tick=tick)
-                not_hit = isinstance(request_result, str)
-            if not_hit:
-                self.current_instruction = None
-                print("Instruction miss at", hex(self.pc), request_result)
-                return self.current_instruction
-            else:
-                self.current_instruction = decode_word(request_result.tobytes())
-            self.current_instruction.pc = self.pc
-            print(f"[Tick {tick}] Fetching: {self.current_instruction.opcode}")
-            if self.current_instruction.opcode == Opcode.BTYPE:
-                predicted_taken, used, predicted_target = self.branch_predictor.predict(self.pc)
-                self.current_instruction.predicted_taken = predicted_taken
-                self.current_instruction.predicted_target = predicted_target
-                print(f"[Tick {tick}] Branch prediction: predicted_taken={predicted_taken}, target={predicted_target}, using {used} predictor.")
-                if predicted_taken:
-                    print(f"[Tick {tick}] Branch predicted taken; target = {predicted_target}")
-                    self.current_instruction.speculative = True
-                    if predicted_target is not None:
-                        self.pc = predicted_target
-                    else:
-                        # Otherwise, compute target using your branch instruction logic.
-                        self.pc = BranchUnit.compute_branch_target(self.current_instruction)
-                else:
-                    self.pc += 1  # Next sequential instruction.
-            elif self.current_instruction.opcode in {Opcode.JAL, Opcode.JALR}:
-                self.current_instruction.predicted_taken = True
-                if self.current_instruction.opcode == Opcode.JAL:
-                    target = BranchUnit.compute_jump_target(self.current_instruction)
-                else:
-                    target = self.current_instruction.pc + self.current_instruction.imm
-                self.current_instruction.predicted_target = target
-                self.current_instruction.speculative = True
-                print(f"[Tick {tick}] Jump instruction: {self.current_instruction.opcode} target={target}")
-                self.pc = target
-            else:
-                self.pc += 1
-
+        if self.pc > max(self.i_mem.keys()):
+            return None
+        # self.current_instruction = self.instruction_queue[self.pc]
+        stalling = False
+        for bank_busy in self.icache.bank_current_mshr:
+            if bank_busy: stalling = True
+        if stalling:
+            self.current_instruction = None
+            print("Icache stall")
             return self.current_instruction
-        return None
+        else:
+            request_result = self.icache.request(address = self.pc, is_write = False, data_in = None, tick=tick)
+            not_hit = isinstance(request_result, str)
+        if not_hit:
+            self.current_instruction = None
+            # print("Instruction miss at", hex(self.pc), request_result)
+            return self.current_instruction
+        else:
+            self.current_instruction = decode_word(request_result.tobytes())
+        self.current_instruction.pc = self.pc
+        print(f"[Tick {tick}] Fetching: {self.current_instruction.opcode}")
+        if self.current_instruction.opcode == Opcode.BTYPE:
+            predicted_taken, used, predicted_target = self.branch_predictor.predict(self.pc)
+            self.current_instruction.predicted_taken = predicted_taken
+            self.current_instruction.predicted_target = predicted_target
+            print(f"[Tick {tick}] Branch prediction: predicted_taken={predicted_taken}, target={predicted_target}, using {used} predictor.")
+            if predicted_taken:
+                print(f"[Tick {tick}] Branch predicted taken; target = {predicted_target}")
+                self.current_instruction.speculative = True
+                if predicted_target is not None:
+                    # self.pc = predicted_target
+                    self.pc = predicted_target << 2
+                else:
+                    # Otherwise, compute target using your branch instruction logic.
+                    # self.pc = BranchUnit.compute_branch_target(self.current_instruction)
+                    self.pc = BranchUnit.compute_branch_target(self.current_instruction) << 2
+            else:
+                # self.pc += 1  # Next sequential instruction.
+                self.pc += 1 << 2 # Next sequential instruction.
+        elif self.current_instruction.opcode in {Opcode.JAL, Opcode.JALR}:
+            self.current_instruction.predicted_taken = True
+            if self.current_instruction.opcode == Opcode.JAL:
+                target = BranchUnit.compute_jump_target(self.current_instruction)
+            else:
+                target = self.current_instruction.pc + self.current_instruction.imm
+            self.current_instruction.predicted_target = target
+            self.current_instruction.speculative = True
+            # print(f"[Tick {tick}] Jump instruction: {self.current_instruction.opcode} target={target}")
+            print(f"[Tick {tick}] Jump instruction: {self.current_instruction.opcode} target={target << 2}")
+            self.pc = target
+            # self.pc = target << 2
+        else:
+            # self.pc += 1
+            self.pc += 1 << 2
+
+        return self.current_instruction
 
 class DispatchStage(PipelineStage):
     def __init__(self, scoreboard):
@@ -104,7 +107,8 @@ class IssueStage(PipelineStage):
 
         fu_name = None
         ins_to_fu = {Opcode.GEMM: "GEMM", Opcode.LDM: "MATLOAD", Opcode.STM: "MATLOAD", 
-                     Opcode.LW: "SCALARLD", Opcode.SW: "SCALARLD", Opcode.BTYPE: "BRANCH"}
+                     Opcode.LW: "SCALARLD", Opcode.SW: "SCALARLD", Opcode.BTYPE: "BRANCH",
+                     Opcode.JAL: "BRANCH", Opcode.JALR: "BRANCH"}
         if instruction.opcode in ins_to_fu.keys(): fu_name = ins_to_fu[instruction.opcode]
         elif instruction.opcode in opcodes.values(): fu_name = "ALU"
         else: return instruction
@@ -179,6 +183,8 @@ class WriteBackStage(PipelineStage):
                     if instruction.rd is not None:
                         self.scalar_regs[instruction.rd] = result
                     print(f"[Tick {tick}] ALU result: {result} written to x{instruction.rd}")
+            elif instruction.opcode is Opcode.HALT:
+                return "HALT"
             # if instruction.fu is not None:
             #     self.scoreboard.release_fu(instruction.fu)
             return instruction

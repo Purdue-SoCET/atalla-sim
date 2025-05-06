@@ -94,7 +94,7 @@ class ScalarLD(FunctionalUnit):
         self.dcache = None
 
     def intake(self, instruction):
-        print("@@@@@ Intaking", instruction)
+        # print("@@@@@ Intaking", instruction)
         super().intake(instruction)
         self.instruction.cache_finished = None
 
@@ -104,17 +104,17 @@ class ScalarLD(FunctionalUnit):
             self.instruction.is_write = is_write
             address = scalar_regs[self.instruction.rs1] + self.instruction.imm
             self.instruction.address = address
-            print("opcode:", self.instruction.opcode)
-            print("addr:", hex(address))
+            # print("opcode:", self.instruction.opcode)
+            # print("addr:", hex(address))
             if is_write:
                 assert self.instruction.rs1 is not None
-                print("rs1:", self.instruction.rs1)
+                # print("rs1:", self.instruction.rs1)
             else:
                 assert self.instruction.rd is not None
-                print("rd:", self.instruction.rd)
+                # print("rd:", self.instruction.rd)
             data_in = scalar_regs[self.instruction.rs2] if is_write else None
             request_result = self.dcache.request(address=address, is_write=is_write, data_in=data_in, tick=tick)
-            print("~~~~~~~ cache request result: ", request_result)
+            # print("~~~~~~~ cache request result: ", request_result)
             not_hit = isinstance(request_result, str)
             if not not_hit: 
                 self.instruction.cache_finished = True
@@ -124,13 +124,14 @@ class ScalarLD(FunctionalUnit):
         elif self.instruction.cache_finished == False:
             for bank_busy in self.dcache.bank_current_mshr:
                 if bank_busy:
-                    print("~~~Still busy")
+                    # print("~~~Still busy")
                     print(self.dcache.bank_latencies)
                     return "Stall"
             request_result = self.dcache.request(address=self.instruction.address, is_write = self.instruction.is_write, 
                                                 data_in=None, tick=tick)
             if isinstance(request_result, str):
-                print("~~~~~ Still stalling:", hex(self.instruction.address), request_result)
+                # print("~~~~~ Still stalling:", hex(self.instruction.address), request_result)
+                pass
             else:
                 self.instruction.cache_finished = True
         elif self.isntruction.cache_finished == True: assert False
