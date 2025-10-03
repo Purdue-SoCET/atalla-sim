@@ -1,10 +1,11 @@
-from sim.components.scratchpad import Scratchpad
+from sim import Scratchpad
+from sim.common import * 
 import os, json
 
-def dump_shift_masks(scpad, path: str = "shift_masks.json"):
+def dump_shift_masks(scpad, path):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     masks = list(scpad.seen_masks)
-    with open(path, "w", encoding="utf-8") as f:
+    with open(os.path.join(OUT_DIR, path), "w", encoding="utf-8") as f:
         json.dump({"num_unique": len(masks), "masks": masks}, f, indent=2)
     print(f"[shift-masks] unique={len(masks)}  saved_to={path}")
 
