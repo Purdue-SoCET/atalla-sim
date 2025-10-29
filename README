@@ -2,27 +2,33 @@ This is the Atalla 0x01 Cycle Accurate Simulator.
 
 The main website can be found at https://github.com/Purdue-SoCET/atalla/.
 
-> This repository is currently being built.
+> This repository is currently being built. 
 
 A good starting point is https://github.com/Purdue-SoCET/atalla/docs, and for
 more information about building the simulator and getting started
 please see https://github.com/Purdue-SoCET/Atalla-Sim/docs. 
 
 The main source tree includes these subdirectories:
+    /benchmarks/ -> Benchmarking kernels.
+    /configs/ -> Design Configurations.
     /docs/ -> Documentation of Arch, Contribution Guide, etc. 
-    /kernels/ -> Benchmarking kernels.
-    /rtl/ -> Core Design Files. 
-    /tb/ -> Formal, Functional and UVM verification. 
-    /waves/ -> .do scripts for Questa.
-    /scripts/ -> CI/CD pipelines
-    /reports/ -> Genus Optimized Reports.
-    /Flowkit/ -> SoCET-private Physical Design Flows with Genus/Innovus 
-    /aihw-ppci-compiler/ -> Compiler Infra.
-    /atalla-sim/ -> Cycle-Accurate Simulator.
-    /UVM_1.2/ -> UVM 1.2 Core Libs.
+    /src/ -> Core Design Files. 
+    /tests/ -> Unit Tests.
+    /scripts/ -> CI/CD pipelines.
     /LICENSE 
     /Makefile  
+    /README
     
 If you have questions, please send mail to socet@purdue.edu.
 
 Enjoy using Atalla-Sim and please share your modifications and extensions.
+
+*NOTE!*
+
+This project draws conceptual and structural inspiration from the
+[gem5 Simulator](https://www.gem5.org/) project.
+
+Many architectural ideas — including the modular class hierarchy, 
+naming conventions, and simulation lifecycle — are based on the gem5 design.
+
+gem5 is © The gem5 Project and distributed under the BSD 3-Clause License.
