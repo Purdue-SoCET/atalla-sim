@@ -1,1 +1,0 @@
-from .scpad import Scratchpad

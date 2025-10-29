@@ -1,1 +1,0 @@
-from .components.scratchpad import *
