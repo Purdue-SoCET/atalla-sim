@@ -1,3 +1,5 @@
+// discontinued
+
 #ifndef __SIM_TYPES_HH__
 #define __SIM_TYPES_HH__
 

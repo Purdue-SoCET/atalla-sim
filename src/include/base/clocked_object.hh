@@ -1,3 +1,5 @@
+// discontinued
+
 #ifndef __SIM_CLOCKED_OBJECT_HH__
 #define __SIM_CLOCKED_OBJECT_HH__
 
