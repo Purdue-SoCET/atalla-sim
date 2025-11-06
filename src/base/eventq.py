@@ -1,10 +1,9 @@
-from dataclasses import dataclass
 from typing import Callable, Any, Optional, Tuple, Iterable, List
+import heapq
 
 Time = float
 EventHandle = Tuple[Time, int]
 
-@dataclass
 class Event:
     time: Time
     callback: Callable[..., Any]
@@ -14,17 +13,33 @@ class Event:
 
 
 class EventQueue:
+    def __init__(self):
+        self._queue = []
+        self._time = 0.0
+        self._next_id = 0
+
     def now(self) -> Time:
-        pass
+        return self._time
 
     def schedule(self, time: Time, callback: Callable[..., Any], *args, **kwargs) -> EventHandle:
-        pass
+        handle = (time, self._next_id)
+        heapq.heappush(self._queue, (time, self._next_id, callback, args, kwargs))
+        self._next_id += 1
+        return handle
 
     def cancel(self, handle: EventHandle) -> bool:
         pass
 
     def run_until(self, time: Time) -> None:
-        pass
+        while (self._queue and self._queue[0][0] <= time):
+            t, eid, callback, args, kwargs = heapq.heappop(self._queue)
+            self._time = t
+            callback(*args, **(kwargs or {}))
+        self._time = time
+
 
     def run_all(self) -> None:
-        pass
+        while (self._queue and self._queue[0][0] >= 0):
+            t, eid, callback, args, kwargs = heapq.heappop(self._queue)
+            self._time = t
+            callback(*args, **(kwargs or {}))
