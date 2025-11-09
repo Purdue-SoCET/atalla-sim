@@ -1,6 +1,6 @@
 from typing import Callable, Any, Optional, Tuple, Iterable, List
-from eventq import EventQueue
-from clock_domain import ClockDomain
+from base.eventq import EventQueue
+from base.clock_domain import ClockDomain
 
 Time = float
 EventHandle = Tuple[Time, int]

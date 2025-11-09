@@ -1,5 +1,5 @@
-from eventq import EventQueue
-from core import Core
+from base.eventq import EventQueue
+from base.core import Core
 from typing import Optional, Tuple
 
 Time = float

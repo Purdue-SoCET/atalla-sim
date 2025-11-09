@@ -1,5 +1,5 @@
-from eventq import EventQueue
-from clocked_object import Clocked
+from base.eventq import EventQueue
+from base.clocked_object import Clocked
 from typing import Tuple
 
 Time = float

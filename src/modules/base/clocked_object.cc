@@ -1,7 +1,0 @@
-// discontinued
-
-#ifndef __SIM_CLOCKED_OBJECT_CC__
-#define __SIM_CLOCKED_OBJECT_CC__
-
-
-#endif //__SIM_CLOCKED_OBJECT_CC__
