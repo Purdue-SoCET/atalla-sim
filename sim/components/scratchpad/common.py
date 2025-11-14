@@ -9,8 +9,6 @@ from typing import List, Dict, Any, Optional
 
 NUM_BANKS = 32
 
-
-
 class AddressBlock:
     @staticmethod
     def _row_lane(abs_row: int, cols: int):
