@@ -1,0 +1,7 @@
+
+
+''''
+swizzle
+dram req queue
+
+'''
