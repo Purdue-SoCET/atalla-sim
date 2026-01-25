@@ -40,6 +40,10 @@ class SRAMBank(Clocked):
                 self._op_counter = 0
                 self._pending: List[SRAMOperation] = []
 
+                # Stall accounting
+                self.cycles_busy: int = 0         # number of cycles the bank had any pending ops
+                self.enqueue_stalls: int = 0      # number of enqueue calls that found the bank busy
+
         def _check_bounds(self, addr: int, length: int):
                 if addr < 0 or length < 0 or addr + length > self.size:
                         raise IndexError(f"Access out of bounds: addr={addr} len={length} size={self.size}")
@@ -48,6 +52,9 @@ class SRAMBank(Clocked):
                                          callback: Optional[Callable[[bytes], None]] = None) -> int:
                 """Enqueue a read. Returns operation id."""
                 self._check_bounds(addr, length)
+                # count an enqueue stall if there are already pending operations
+                if self._pending:
+                        self.enqueue_stalls += 1
                 self._op_counter += 1
                 op = SRAMOperation(
                         op_id=self._op_counter,
@@ -66,6 +73,9 @@ class SRAMBank(Clocked):
                 """Enqueue a write. Returns operation id."""
                 length = len(data)
                 self._check_bounds(addr, length)
+                # count an enqueue stall if there are already pending operations
+                if self._pending:
+                        self.enqueue_stalls += 1
                 self._op_counter += 1
                 op = SRAMOperation(
                         op_id=self._op_counter,
@@ -86,6 +96,11 @@ class SRAMBank(Clocked):
                 Callbacks are invoked (if provided).
                 """
                 completed: List[Tuple[int, Optional[bytes]]] = []
+
+                # account busy cycle if there are pending ops at start of tick
+                if self._pending:
+                        self.cycles_busy += 1
+
                 for op in list(self._pending):
                         op.remaining_cycles -= 1
                         if op.remaining_cycles <= 0:
@@ -243,3 +258,17 @@ class SRAMBanks(Clocked):
                         for op_id, res in bank.tick():
                                 completed.append((i, op_id, res))
                 return completed
+
+        def get_stats(self) -> Dict[str, object]:
+                """Return aggregate stall statistics and per-bank details."""
+                total_cycles_busy = sum(b.cycles_busy for b in self.banks)
+                total_enqueue_stalls = sum(b.enqueue_stalls for b in self.banks)
+                per_bank = [
+                        {"bank": i, "cycles_busy": b.cycles_busy, "enqueue_stalls": b.enqueue_stalls, "queue_len": len(b._pending)}
+                        for i, b in enumerate(self.banks)
+                ]
+                return {
+                        "total_cycles_busy": total_cycles_busy,
+                        "total_enqueue_stalls": total_enqueue_stalls,
+                        "per_bank": per_bank,
+                }

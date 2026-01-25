@@ -51,7 +51,31 @@ def test_sc_sram_banks():
 
     sim.run(until=4.0)
 
+    # verify data returned
     assert results and results[0] == b"hello_world", f"SRAMBanks readback failed: {results}"
+
+    # collect stall / utilization statistics (work with either API get_stats() or direct attributes)
+    try:
+        stats = banks.get_stats()
+    except Exception:
+        per_bank = []
+        total_cycles_busy = 0
+        total_enqueue_stalls = 0
+        for b in getattr(banks, "banks", []):
+            cb = getattr(b, "cycles_busy", 0)
+            es = getattr(b, "enqueue_stalls", 0)
+            total_cycles_busy += cb
+            total_enqueue_stalls += es
+            per_bank.append({"cycles_busy": cb, "enqueue_stalls": es, "queue_len": len(getattr(b, "_pending", []))})
+        stats = {"total_cycles_busy": total_cycles_busy, "total_enqueue_stalls": total_enqueue_stalls, "per_bank": per_bank}
+
+    print("SRAM stats:", stats)
+
+    # basic expectations: banks should have seen at least one busy cycle and at least one enqueue stall
+    # (the test enqueues a write and a read to the same address/bank at the same time)
+    assert stats["total_cycles_busy"] > 0, "Expected banks to report busy cycles"
+    assert stats["total_enqueue_stalls"] >= 1, "Expected at least one enqueue stall"
+
     print("SRAMBanks test passed.")
 
 if __name__ == "__main__":
