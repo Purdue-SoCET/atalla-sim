@@ -18,34 +18,43 @@ def build_sim():
     sim.init(eq, core)
     return eq, clk, sim
 
-def test_sc_backend_load_flow():
+def test_sc_backend_load_and_store_flow():
     eq, clk, sim = build_sim()
 
     writes = []
+    stores = []
 
     def send_sram_write(sp_addr: int, row_bytes: bytes, row_idx: int, tx_id: int) -> bool:
-        # accept every write and record it
+        # accept every write and record it (for loads)
         writes.append((sp_addr, row_bytes, row_idx, tx_id))
         print(f"[send_sram_write] tx={tx_id} row={row_idx} sp_addr={sp_addr} len={len(row_bytes)}")
         return True
 
-    # small latencies / burst sizes so test completes quickly
-    backend = Backend(dram_latency=2, dram_q_depth=8, dram_burst_bytes=4, elem_bytes=1, send_sram_write=send_sram_write)
+    def send_sram_read(sp_addr: int, row_idx: int, tx_id: int) -> bytes:
+        # For store: return dummy data for the row
+        data = bytes([row_idx + 1] * 6)  # 6 elements, value = row_idx+1
+        stores.append((sp_addr, data, row_idx, tx_id))
+        print(f"[send_sram_read] tx={tx_id} row={row_idx} sp_addr={sp_addr} len={len(data)}")
+        return data
 
-    # register with clock domain
+    backend = Backend(
+        dram_latency=2, dram_q_depth=8, dram_burst_bytes=4, elem_bytes=1,
+        send_sram_write=send_sram_write,
+        send_sram_read=send_sram_read
+    )
+
     clk.add_clocked(backend)
-    
 
-    # start a load: 2 rows, 6 elements per row -> 2 subreqs per row (ceil(6/4)=2)
+    # --- Test LOAD ---
     tx_id = backend.start_load(base_sp_addr=100, base_dram_addr=200, rows=2, cols=6)
     print(f"started LOAD tx={tx_id}")
 
     # drive backend.tick periodically until completion and print status
     def tick_and_reschedule(t, end=5.0, step=0.1):
-        backend.tick()
+        backend.tick(t)
         # print lightweight status
         st = backend.get_stats()
-        print(f"[{t:.2f}] dram_pending={st['dram_pending']} issued={st['issued_bursts']} completed={st['completed_bursts']} writes={len(writes)}")
+        print(f"[{t:.2f}] dram_pending={st['dram_pending']} issued={st['issued_bursts']} completed={st['completed_bursts']} writes={len(writes)} stores={len(stores)}")
         next_t = t + step
         if next_t <= end:
             eq.schedule(next_t, lambda tt: tick_and_reschedule(tt, end, step), next_t)
@@ -53,8 +62,7 @@ def test_sc_backend_load_flow():
     eq.schedule(0.0, lambda t: tick_and_reschedule(t, 3.0, 0.05), 0.0)
     sim.run(until=3.5)
 
-    # Expect one assembled write per row
-    print("collected writes:", [(w[2], len(w[1]), w[3]) for w in writes])
+    print("collected writes (load):", [(w[2], len(w[1]), w[3]) for w in writes])
     assert len(writes) == 2, f"expected 2 sram writes, got {len(writes)}"
 
     stats = backend.get_stats()
@@ -62,8 +70,21 @@ def test_sc_backend_load_flow():
     assert stats["issued_bursts"] == 4, f"expected 4 DRAM bursts issued, got {stats['issued_bursts']}"
     assert stats["tx_completed"] == 1, f"expected tx_completed == 1, got {stats['tx_completed']}"
 
-    print("Backend stats:", stats)
-    print("Backend test passed.")
+    # --- Test STORE ---
+    writes.clear()
+    tx_id2 = backend.start_store(base_sp_addr=300, base_dram_addr=400, rows=2, cols=6)
+    print(f"started STORE tx={tx_id2}")
+
+    eq.schedule(0.0, lambda t: tick_and_reschedule(t, 3.0, 0.05), 0.0)
+    sim.run(until=3.5)
+
+    print("collected stores (store):", [(s[2], len(s[1]), s[3]) for s in stores])
+    stats2 = backend.get_stats()
+    assert stats2["issued_bursts"] == 8, f"expected 8 DRAM bursts issued after store, got {stats2['issued_bursts']}"
+    assert stats2["tx_completed"] == 2, f"expected tx_completed == 2 after store, got {stats2['tx_completed']}"
+
+    print("Backend stats after store:", stats2)
+    print("Backend load/store test passed.")
 
 if __name__ == "__main__":
-    test_sc_backend_load_flow()
+    test_sc_backend_load_and_store_flow()

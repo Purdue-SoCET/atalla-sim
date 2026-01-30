@@ -10,6 +10,10 @@ from base.clocked_object import Clocked
   - enqueue_write(addr, data: bytes, callback=None)
   - tick() -> List[(bank_idx, op_id, Optional[bytes])]
   - get_stats() -> Dict
+
+  DEBUGGAR 
+  SRAMBanks queues should be 1-sized
+  after enqueing op, if another class tries to enque returns false
 """
 
 @dataclass

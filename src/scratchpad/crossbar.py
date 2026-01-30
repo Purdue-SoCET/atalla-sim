@@ -36,12 +36,14 @@ class Xbar(Clocked):
         self.total_submitted = 0
         self.total_completed = 0
 
-    def submit(self, shift_mask: List[Optional[int]], input_vals: List[Any], callback: Optional[Callable[[List[Any]], None]] = None) -> int:
+    def submit(self, shift_mask: List[Optional[int]], input_vals: List[Any], callback: Optional[Callable[[List[Any]], None]] = None) -> int: # DEBUGGAR: change to enqueue?
         """
         Submit a permutation request. The provided callback (if any) will be called with the
         routed output when the request completes.
         Returns an operation id.
         """
+
+        ## DEBUGGAR if pending > LIMIT, then callback handles false
         assert len(shift_mask) == self.num_banks
         assert len(input_vals) == self.num_banks
         self._op_counter += 1

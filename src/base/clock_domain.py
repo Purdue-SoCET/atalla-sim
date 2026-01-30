@@ -20,11 +20,11 @@ class ClockDomain:
     def remove_clocked(self, obj: Clocked) -> None:
         self.objects.remove(obj)
 
-    def _Tick(self, time: Time) -> None:
+    def tick(self, time: Time) -> None:
         for obj in self.objects:
-            obj._Tick(time)
+            obj.tick(time)
         self.schedule_next(time)
 
     def schedule_next(self, time: Time) -> None:
         next_time = time + self.period
-        self.event_queue.schedule(next_time, self._Tick, next_time)
+        self.event_queue.schedule(next_time, self.tick, next_time)

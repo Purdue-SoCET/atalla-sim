@@ -20,7 +20,7 @@ class _DRAMReq:
 
 
 @dataclass
-class _Transaction:
+class _Transaction: #DEBUGGAR backend convention
     tx_id: int
     base_sp: int
     base_dram: int
@@ -32,6 +32,7 @@ class _Transaction:
     row_bufs: List[List[Optional[bytes]]] = field(default_factory=list)
     callback: Optional[Callable[[int], None]] = None
     is_store: bool = False  # store = SP->DRAM (writeback), load = DRAM->SP
+    issued_subreqs: List[set] = field(default_factory=list)
 
 
 class Backend(Clocked):
@@ -59,12 +60,15 @@ class Backend(Clocked):
         dram_burst_bytes: int = 8,
         elem_bytes: int = 2,
         send_sram_write: Optional[Callable[[int, bytes, int, int], bool]] = None,
+        send_sram_read: Optional[Callable[[int, int, int], bytes]] = None,
     ):
         super().__init__()
         self.dram_latency = int(dram_latency)
         self.dram_q_depth = int(dram_q_depth)
         self.dram_burst_bytes = int(dram_burst_bytes)
         self.elem_bytes = int(elem_bytes)
+        self.send_sram_write = send_sram_write
+        self.send_sram_read = send_sram_read
 
         # outstanding DRAM bursts being serviced by the (simulated) DRAM
         self._dram_pending: Deque[_DRAMReq] = deque()
@@ -108,10 +112,12 @@ class Backend(Clocked):
             row_bufs=[[None] * subreqs for _ in range(rows)],
             callback=callback,
             is_store=False,
+            issued_subreqs=[set() for _ in range(rows)],
         )
         self._tx_queue.append(tx)
         return tx_id
 
+    #DEBUGGAR queue should be a different thing, separate queue class
     def start_store(
         self, base_sp_addr: int, base_dram_addr: int, rows: int, cols: int, callback: Optional[Callable[[int], None]] = None
     ) -> int:
@@ -135,6 +141,7 @@ class Backend(Clocked):
             row_bufs=[[None] * subreqs for _ in range(rows)],
             callback=callback,
             is_store=True,
+            issued_subreqs=[set() for _ in range(rows)],
         )
         self._tx_queue.append(tx)
         return tx_id
@@ -162,7 +169,7 @@ class Backend(Clocked):
 
         # try to push them into dram_pending, if cannot, keep them in per-tx buffer and count stalls
         for req in subreqs:
-            if len(self._dram_pending) >= self.dram_q_depth:
+            if len(self._dram_pending) >= self.dram_q_depth: #DEBUGGAR to be handled by queues
                 # cannot accept now; count stall and keep remaining subreqs in tx.row_bufs as pending write data
                 self.total_backend_stalls += 1
                 tx.row_bufs[row_idx][req.subidx] = req.data  # store for later
@@ -182,7 +189,10 @@ class Backend(Clocked):
             self._complete_row_load(tx, r, b"")
             return
 
+        # Issue only subreqs that have not been issued yet
         for s in range(tx.subreqs_per_row):
+            if s in tx.issued_subreqs[r]:
+                continue  # already issued
             if len(self._dram_pending) >= self.dram_q_depth:
                 self.total_backend_stalls += 1
                 return
@@ -202,6 +212,7 @@ class Backend(Clocked):
                 remaining_cycles=self.dram_latency,
             )
             self._dram_pending.append(req)
+            tx.issued_subreqs[r].add(s)  # mark as issued
             self.total_dram_bursts_issued += 1
 
     def _complete_row_load(self, tx: _Transaction, row: int, row_bytes: bytes) -> None:
@@ -261,13 +272,32 @@ class Backend(Clocked):
                     assembled = assembled[:expected]
                     # try to handoff
                     self._complete_row_load(tx, req.row, assembled)
+                else:
+                    # Try to issue more subreqs for this row if queue space is available
+                    self._issue_row_load_subreqs(tx)
         else:
             # DRAM write completed; nothing else required for now
             self.total_dram_bursts_completed += 1
-            # optionally inform tx callback when all writes complete (not tracked per-subreq here)
+            # Check for store transaction completion
+            tx = self._active_txs.get(req.tx_id)
+            if tx and tx.is_store:
+                # If all bursts for all rows are done, complete the transaction
+                all_done = True
+                for row_buf in tx.row_bufs:
+                    if any(chunk is not None for chunk in row_buf):
+                        all_done = False
+                        break
+                if all_done and not self._dram_pending and tx.tx_id in self._active_txs:
+                    self.total_tx_completed += 1
+                    if tx.callback:
+                        try:
+                            tx.callback(tx.tx_id)
+                        except Exception:
+                            pass
+                    del self._active_txs[tx.tx_id]
 
     # ------ Clock tick ------
-    def tick(self) -> None:
+    def tick(self, time=None) -> None:
         """
         Advance one cycle
         Progress DRAM pending bursts, move tx from queue to active,
@@ -276,15 +306,18 @@ class Backend(Clocked):
         # 1) Move queued transactions into active (start as many as capacity allows)
         while self._tx_queue:
             tx = self._tx_queue[0]
-            # we always activate transactions even if dram queue is full; issuance will be gated
             self._tx_queue.popleft()
             self._active_txs[tx.tx_id] = tx
-            # immediately try to issue first-row subreqs
             if not tx.is_store:
                 self._issue_row_load_subreqs(tx)
             else:
-                # store: we wait for SRAM read responses via accept_sram_read_response
-                pass
+                # For store: request all rows from scratchpad if not already present
+                if self.send_sram_read:
+                    for row_idx in range(tx.rows):
+                        # Only request if not already present
+                        if all(x is None for x in tx.row_bufs[row_idx]):
+                            row_bytes = self.send_sram_read(tx.base_sp + row_idx, row_idx, tx.tx_id)
+                            self.accept_sram_read_response(tx.tx_id, row_idx, row_bytes)
 
         # 2) Progress dram pending bursts
         n = len(self._dram_pending)
