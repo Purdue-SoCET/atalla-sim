@@ -32,6 +32,7 @@ class Scratchpad(Clocked):
         write_latency: int = 2,
         xbar_delay: int = 3,
         elem_bytes: int = 2,
+        frontend_queue_size: int = 2,
     ):
         super().__init__()
         self.num_banks = int(num_banks)
@@ -57,7 +58,10 @@ class Scratchpad(Clocked):
         # optional backend reference (set via attach_backend)
         self.backend: Optional[backend_mod.Backend] = None
 
-        self.frontends = [ScratchpadFrontend(0, self), ScratchpadFrontend(1, self)]
+        self.frontends = [
+            ScratchpadFrontend(0, self, queue_size=frontend_queue_size),
+            ScratchpadFrontend(1, self, queue_size=frontend_queue_size)
+        ]
 
     def _tile_and_slot(self, sp_addr: int) -> tuple[int, int]:
         """
@@ -122,7 +126,7 @@ class Scratchpad(Clocked):
 
         # submit to xbar (operation queued). We don't block on xbar completion here.
         try:
-            xbar.submit(shift_mask, lanes, callback=_xbar_cb)
+            xbar.enqueue(shift_mask, lanes, callback=_xbar_cb)
         except Exception:
             return False
         return True
@@ -139,8 +143,7 @@ class Scratchpad(Clocked):
         """
         if tile_id is None:
             tile_id, _ = self._tile_and_slot(base_sp_addr)
-        self.frontends[tile_id].write(base_sp_addr, row_bytes, row_idx)
-        return True
+        return self.frontends[tile_id].write(base_sp_addr, row_bytes, row_idx)
 
     def _accept_backend_read(self, sp_addr: int, row_idx: int, tx_id: int, tile_id: int = None, frontend_cb=None) -> bool:
         """
@@ -171,7 +174,7 @@ class Scratchpad(Clocked):
                 unswizzled = [routed_out[_xor_bank(slot, lane, self.num_banks)] for lane in range(self.num_banks)]
                 frontend_cb(unswizzled)
         try:
-            xbar.submit(list(range(self.num_banks)), per_bank, callback=_xbar_cb)
+            xbar.enqueue(list(range(self.num_banks)), per_bank, callback=_xbar_cb)
         except Exception:
             return False
         return True
@@ -196,6 +199,10 @@ class Scratchpad(Clocked):
     def get_stats(self) -> dict:
         stats = {
             "tiles": [],
+            "frontend_stalls": [
+                {"tile": tid, "write_stalled": fe.write_stalled, "read_stalled": fe.read_stalled}
+                for tid, fe in enumerate(self.frontends)
+            ]
         }
         for tid, tile in enumerate(self.tiles):
             per = {"tile": tid, "banks": []}

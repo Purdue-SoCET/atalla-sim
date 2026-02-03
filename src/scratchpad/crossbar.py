@@ -1,4 +1,5 @@
 from base.clocked_object import Clocked
+from base.queue import SimQueue
 from collections import deque
 from typing import Callable, Deque, Dict, List, Optional, Tuple, Any
 
@@ -23,27 +24,25 @@ class Xbar(Clocked):
                 out[b] = input_vals[i]
         return out
 
-    def __init__(self, delay: int = 3, num_banks: int = 32):
+    def __init__(self, delay: int = 3, num_banks: int = 32, max_size: int = 1):
         super().__init__()
         self.delay = int(delay)
         self.num_banks = int(num_banks)
 
+        self._op_counter = 0
         # pending queue entries: dicts with keys rem, shift, vals, cb, op
-        self._pending: Deque[Dict[str, Any]] = deque()
-        self._op_counter: int = 0
+        self._pending: SimQueue[Dict[str, Any]] = SimQueue(max_size)  # or another limit        self._op_counter: int = 0
 
         # stats
         self.total_submitted = 0
         self.total_completed = 0
 
-    def submit(self, shift_mask: List[Optional[int]], input_vals: List[Any], callback: Optional[Callable[[List[Any]], None]] = None) -> int: # DEBUGGAR: change to enqueue?
+    def enqueue(self, shift_mask: List[Optional[int]], input_vals: List[Any], callback: Optional[Callable[[List[Any]], None]] = None) -> int:
         """
         Submit a permutation request. The provided callback (if any) will be called with the
         routed output when the request completes.
-        Returns an operation id.
+        Returns an operation id, or -1 if the queue is full.
         """
-
-        ## DEBUGGAR if pending > LIMIT, then callback handles false
         assert len(shift_mask) == self.num_banks
         assert len(input_vals) == self.num_banks
         self._op_counter += 1
@@ -54,7 +53,11 @@ class Xbar(Clocked):
             "cb": callback,
             "op": self._op_counter,
         }
-        self._pending.append(entry)
+        if not self._pending.enqueue(entry):
+            # Queue is full, optionally call callback with False or handle overflow
+            if callback:
+                callback(False)
+            return -1
         self.total_submitted += 1
         return self._op_counter
 
@@ -66,21 +69,22 @@ class Xbar(Clocked):
         completed: List[Tuple[int, List[Any]]] = []
 
         # decrement remaining cycles
-        for entry in list(self._pending):
+        for entry in self._pending.items:
             entry["rem"] -= 1
 
         # collect and remove finished entries (preserve FIFO order)
-        to_remove: List[Dict[str, Any]] = []
-        for entry in list(self._pending):
+        to_remove: List[int] = []
+        for idx, entry in enumerate(self._pending.items):
             if entry["rem"] <= 0:
                 out = Xbar.route(entry["shift"], entry["vals"], self.num_banks)
                 completed.append((entry["op"], out))
                 if entry["cb"]:
                     entry["cb"](out)
-                to_remove.append(entry)
+                to_remove.append(idx)
 
-        for entry in to_remove:
-            self._pending.remove(entry)
+        # Remove completed entries by index (reverse order to avoid shifting)
+        for idx in reversed(to_remove):
+            del self._pending.items[idx]
 
         self.total_completed += len(completed)
         return completed

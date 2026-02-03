@@ -20,7 +20,8 @@ def build_sim():
 def test_crossbar_basic():
     eq, clk, sim = build_sim()
 
-    x = Xbar(delay=3, num_banks=8)
+    # Set a small queue size for overflow testing
+    x = Xbar(delay=3, num_banks=8, max_size=2)
 
     # try registering with clock domain if supported by the model
     try:
@@ -45,8 +46,13 @@ def test_crossbar_basic():
 
     input_vals = [100 + i for i in range(8)]
 
-    op_id = x.submit(shift_mask, input_vals, callback=cb)
-    print("submitted xbar op", op_id)
+    op_id1 = x.enqueue(shift_mask, input_vals, callback=cb)
+    op_id2 = x.enqueue(shift_mask, input_vals, callback=cb)
+    op_id3 = x.enqueue(shift_mask, input_vals, callback=cb)  # should overflow
+
+    print("submitted xbar ops", op_id1, op_id2, op_id3)
+    assert op_id1 > 0 and op_id2 > 0, "First two ops should succeed"
+    assert op_id3 == -1, "Third op should fail due to queue overflow"
 
     def tick_and_collect(time):
         comp = x.tick()
@@ -58,10 +64,10 @@ def test_crossbar_basic():
     eq.schedule(1.1, tick_and_collect, 1.1)
     eq.schedule(2.1, tick_and_collect, 2.1)
     eq.schedule(3.1, tick_and_collect, 3.1)
+    eq.schedule(4.1, tick_and_collect, 4.1)
 
-    sim.run(until=4.0)
+    sim.run(until=5.0)
 
-    # build expected output
     expected = [0] * 8
     expected[3] = input_vals[0]
     expected[0] = input_vals[1]
@@ -69,14 +75,16 @@ def test_crossbar_basic():
     expected[1] = input_vals[3]
 
     assert results, "callback not invoked"
-    assert results[0] == expected, f"unexpected routed output: {results[0]} vs {expected}"
+    real_results = [r for r in results if r is not False]
+    assert results[0] is False, "First callback should be False due to overflow"
+    assert real_results[0] == expected, f"unexpected routed output: {real_results[0]} vs {expected}"
 
     # verify tick() completion report contains op_id and same output
-    assert any(op == op_id and out == expected for op, out in completions), f"completion tuple missing or wrong: {completions}"
+    assert any(op == op_id1 and out == expected for op, out in completions), f"completion tuple missing or wrong: {completions}"
 
     stats = x.get_stats()
     print("Xbar stats:", stats)
-    assert stats["total_submitted"] >= 1
+    assert stats["total_submitted"] >= 2
     assert stats["total_completed"] >= 1
 
     print("crossbar test passed.")

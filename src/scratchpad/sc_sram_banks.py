@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional, List, Dict, Tuple, Any
 
 from base.clocked_object import Clocked
+from base.queue import SimQueue
 
 """
   - SRAMBanks(bank_count, bank_size, read_latency, write_latency)
@@ -28,8 +29,7 @@ class SRAMOperation:
 
 
 class SRAMBank(Clocked):
-    def __init__(self, slots: int, read_latency: int = 1, write_latency: int = 1):
-        # slots: number of slots per bank (not bytes)
+    def __init__(self, slots: int, read_latency: int = 1, write_latency: int = 1, queue_size: int = 1):
         super().__init__()
         self.slots = int(slots)
         # each slot holds an arbitrary-bytes payload (empty by default)
@@ -37,8 +37,8 @@ class SRAMBank(Clocked):
         self.read_latency = int(read_latency)
         self.write_latency = int(write_latency)
 
-        # internal pending queue (FIFO) of SRAMOperation
-        self._pending: List[SRAMOperation] = []
+        # Use SimQueue for pending operations
+        self._pending: SimQueue[SRAMOperation] = SimQueue(max_size=queue_size)
         self._op_counter = 0
 
         # Stall / utilization counters
@@ -50,39 +50,37 @@ class SRAMBank(Clocked):
             raise IndexError(f"SRAMBank slot out of bounds: slot={slot} slots={self.slots}")
         # length is advisory: reads will return min(length, len(slot_data))
 
-    def enqueue_read(self, slot: int, length: int, callback: Optional[Callable[[bytes], None]] = None) -> int:
+    def enqueue_read(self, slot: int, length: int, callback: Optional[Callable[[bytes], None]] = None) -> Optional[int]:
         self._check_bounds(slot, length)
-        if self._pending:
-            self.enqueue_stalls += 1
-        self._op_counter += 1
-        op = SRAMOperation(
-            op_id=self._op_counter,
+        if not self._pending.enqueue(SRAMOperation(
+            op_id=self._op_counter + 1,
             is_write=False,
             addr=int(slot),
             data=None,
             length=int(length),
             remaining_cycles=self.read_latency,
             callback=callback,
-        )
-        self._pending.append(op)
-        return op.op_id
-
-    def enqueue_write(self, slot: int, data: bytes, callback: Optional[Callable[[None], None]] = None) -> int:
-        self._check_bounds(slot, len(data))
-        if self._pending:
+        )):
             self.enqueue_stalls += 1
+            return None
         self._op_counter += 1
-        op = SRAMOperation(
-            op_id=self._op_counter,
+        return self._op_counter
+
+    def enqueue_write(self, slot: int, data: bytes, callback: Optional[Callable[[None], None]] = None) -> Optional[int]:
+        self._check_bounds(slot, len(data))
+        if not self._pending.enqueue(SRAMOperation(
+            op_id=self._op_counter + 1,
             is_write=True,
             addr=int(slot),
             data=bytes(data),
             length=len(data),
             remaining_cycles=self.write_latency,
             callback=callback,
-        )
-        self._pending.append(op)
-        return op.op_id
+        )):
+            self.enqueue_stalls += 1
+            return None
+        self._op_counter += 1
+        return self._op_counter
 
     def tick(self) -> List[Tuple[int, Optional[bytes]]]:
         """
@@ -97,12 +95,12 @@ class SRAMBank(Clocked):
             self.cycles_busy += 1
 
         # Decrement remaining_cycles for all pending ops (FIFO/order preserved)
-        for op in list(self._pending):
+        for op in self._pending.items:
             op.remaining_cycles -= 1
 
         # Collect completed ops (those with remaining_cycles <= 0), in order
         to_remove = []
-        for op in list(self._pending):
+        for op in self._pending.items:
             if op.remaining_cycles <= 0:
                 if op.is_write:
                     # perform write: replace the slot contents with provided bytes
@@ -123,7 +121,7 @@ class SRAMBank(Clocked):
 
         # remove completed ops from pending queue
         for op in to_remove:
-            self._pending.remove(op)
+            self._pending._items.remove(op)
 
         return completed
 
