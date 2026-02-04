@@ -24,7 +24,7 @@ def test_sram_lockstep_and_stall():
     for b in banks.banks:
         b._pending = b._pending.__class__(max_size=1)
 
-    # --- Lockstep: staggered ops, no stalls ---
+    # --- Lockstep: staggered ops, no stalls --- DEBUGGAR dont name it this :(
     lockstep_results = []
     def lockstep_cb(data):
         lockstep_results.append(data)
@@ -35,6 +35,7 @@ def test_sram_lockstep_and_stall():
 
     def tick_and_collect(time):
         banks.tick()
+
     eq.schedule(0.1, tick_and_collect, 0.1)
     eq.schedule(1.1, tick_and_collect, 1.1)
     eq.schedule(2.1, tick_and_collect, 2.1)
@@ -72,6 +73,7 @@ def test_sram_lockstep_and_stall():
     stats = banks.get_stats()
     print("Stall stats:", stats)
     # Only the write should succeed, read should not be enqueued
+    # DEBUGGAR: assert write has happened
     assert stall_results == [], "Stall: Read should not complete due to stall"
     assert stats["total_enqueue_stalls"] >= 1, "Stall: Expected at least one enqueue stall"
 

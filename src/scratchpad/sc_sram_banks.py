@@ -11,10 +11,6 @@ from base.queue import SimQueue
   - enqueue_write(addr, data: bytes, callback=None)
   - tick() -> List[(bank_idx, op_id, Optional[bytes])]
   - get_stats() -> Dict
-
-  DEBUGGAR 
-  SRAMBanks queues should be 1-sized
-  after enqueing op, if another class tries to enque returns false
 """
 
 @dataclass
@@ -50,6 +46,7 @@ class SRAMBank(Clocked):
             raise IndexError(f"SRAMBank slot out of bounds: slot={slot} slots={self.slots}")
         # length is advisory: reads will return min(length, len(slot_data))
 
+    # DEBUGGAR: self._curr_tick updated at every tick. if two jobs try to happen at the same tick, raise flag
     def enqueue_read(self, slot: int, length: int, callback: Optional[Callable[[bytes], None]] = None) -> Optional[int]:
         self._check_bounds(slot, length)
         if not self._pending.enqueue(SRAMOperation(
@@ -61,7 +58,7 @@ class SRAMBank(Clocked):
             remaining_cycles=self.read_latency,
             callback=callback,
         )):
-            self.enqueue_stalls += 1
+            self.enqueue_stalls += 1 # DEBUGGAR: THE OTHER UNIT IS STALLING, NOT SRAM BANK
             return None
         self._op_counter += 1
         return self._op_counter
@@ -77,7 +74,7 @@ class SRAMBank(Clocked):
             remaining_cycles=self.write_latency,
             callback=callback,
         )):
-            self.enqueue_stalls += 1
+            self.enqueue_stalls += 1 # DEBUGGAR: THE OTHER UNIT IS STALLING, NOT SRAM BANK
             return None
         self._op_counter += 1
         return self._op_counter
@@ -112,6 +109,7 @@ class SRAMBank(Clocked):
                     result = bytes(slot_data[: op.length])
                 completed.append((op.op_id, result))
                 # invoke callback (swallow exceptions to avoid breaking sim)
+                # DEBUGGAR: it NEEDS to have a callback
                 if op.callback:
                     try:
                         op.callback(result)

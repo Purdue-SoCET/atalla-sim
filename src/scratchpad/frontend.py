@@ -1,8 +1,8 @@
 from typing import Optional, Callable, List, Any
 from base.queue import SimQueue
 
-class ScratchpadFrontend:
-    def __init__(self, tile_id: int, spad: "Scratchpad", queue_size: int = 8):
+class ScratchpadFrontend: # DEBUGGAR: Frontend
+    def __init__(self, tile_id: int, spad: "Scratchpad", queue_size: int = 1):
         self.tile_id = tile_id
         self.spad = spad
         self.writeq = SimQueue(max_size=queue_size)  # (ready_cycle, base_sp_addr, row_bytes, row_idx, callback)
@@ -15,7 +15,7 @@ class ScratchpadFrontend:
         now = getattr(self.spad, 'now', 0)
         latency = 2 + self.spad.tile_write_xbars[self.tile_id].delay
         ready_cycle = now + latency
-        req = (ready_cycle, base_sp_addr, row_bytes, row_idx, callback)
+        req = (ready_cycle, base_sp_addr, row_bytes, row_idx, callback) # DEBUGGAR: do I even use ready cycle?
         if not self.writeq.enqueue(req):
             self.write_stalled = True
             return False
