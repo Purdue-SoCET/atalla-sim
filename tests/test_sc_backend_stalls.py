@@ -48,7 +48,7 @@ def test_backend_stalls():
     print(f"started LOAD tx={tx_id}")
 
     def tick_and_reschedule(t, end=5.0, step=0.1):
-        backend.sim_to_backend_tick(t)
+        backend.tick(t)
         st = backend.backend_to_driver_get_stats()
         print(f"[{t:.2f}] dram_pending={st['dram_pending']} issued={st['issued_bursts']} completed={st['completed_bursts']} stalls={st['backend_stalls']}")
         next_t = t + step

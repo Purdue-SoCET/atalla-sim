@@ -1,7 +1,7 @@
 from __future__ import annotations
-from collections import deque
 from dataclasses import dataclass, field
-from typing import Callable, Deque, Dict, List, Optional, Tuple, Any
+from typing import Callable, Dict, List, Optional, Tuple, Any
+from collections import deque
 
 from base.clocked_object import Clocked
 from base.queue import SimQueue
@@ -22,7 +22,7 @@ class DRAMOperation:
 
 
 @dataclass
-class BACKENDTransaction: # DEBUGGAR: BackendTransaction
+class BackendTransaction:
     tx_id: int
     base_sp: int
     base_dram: int
@@ -61,6 +61,7 @@ class Backend(Clocked):
         dram_q_depth: int = 32,
         dram_burst_bytes: int = 8,
         elem_bytes: int = 2,
+        delay_cycles: int = 1,
         send_sram_write: Optional[Callable[[int, bytes, int, int], bool]] = None,
         send_sram_read: Optional[Callable[[int, int, int], bytes]] = None,
     ):
@@ -76,11 +77,11 @@ class Backend(Clocked):
         self._dram_pending: SimQueue[DRAMOperation] = SimQueue(max_size=self.dram_q_depth)
 
         # queue of transactions waiting to be started
-        self._tx_queue: Deque[BACKENDTransaction] = deque()
+        self._tx_queue: SimQueue[BackendTransaction] = SimQueue(max_size=self.dram_q_depth)
         self._next_tx_id = 1
 
         # active transactions (tx_id -> transaction)
-        self._active_txs: Dict[int, BACKENDTransaction] = {}
+        self._active_txs: Dict[int, BackendTransaction] = {}
 
         # callback to send a completed SRAM write vector to Body
         self.send_sram_write = send_sram_write
@@ -90,6 +91,16 @@ class Backend(Clocked):
         self.total_dram_bursts_completed = 0
         self.total_backend_stalls = 0  # increments when dram_q full and we cannot issue
         self.total_tx_completed = 0
+        self.delay_cycles = int(delay_cycles)
+        self.last_op_tick = -1
+        self._tick = -1
+        self._pending_sram_reads = deque()
+
+    def is_busy(self, now: Optional[int] = None) -> bool:
+        if self.delay_cycles <= 0:
+            return False
+        cur = self._tick if now is None else int(now)
+        return (cur - self.last_op_tick) < self.delay_cycles
 
     # Public API for scheduler/driver
     def driver_to_backend_start_load(
@@ -103,7 +114,7 @@ class Backend(Clocked):
         self._next_tx_id += 1
 
         subreqs = math.ceil((cols * self.elem_bytes) / self.dram_burst_bytes) if cols > 0 else 0
-        tx = BACKENDTransaction(
+        tx = BackendTransaction(
             tx_id=tx_id,
             base_sp=base_sp_addr,
             base_dram=base_dram_addr,
@@ -116,11 +127,12 @@ class Backend(Clocked):
             is_store=False,
             issued_subreqs=[set() for _ in range(rows)],
         )
-        self._tx_queue.append(tx) # DEBUGGAR: use SimQueue
-        # If SimQueue fails, backpressure and stall
+        if not self._tx_queue.enqueue(tx):
+            self.total_backend_stalls += 1
+            return -1
         return tx_id
 
-    #DEBUG queue should be a different thing, separate queue class
+    #TODO queue should be a different thing, separate queue class
     def driver_to_backend_start_store(
         self, base_sp_addr: int, base_dram_addr: int, rows: int, cols: int, callback: Optional[Callable[[int], None]] = None
     ) -> int:
@@ -133,7 +145,7 @@ class Backend(Clocked):
         self._next_tx_id += 1
 
         subreqs = math.ceil((cols * self.elem_bytes) / self.dram_burst_bytes) if cols > 0 else 0
-        tx = BACKENDTransaction(
+        tx = BackendTransaction(
             tx_id=tx_id,
             base_sp=base_sp_addr,
             base_dram=base_dram_addr,
@@ -146,18 +158,25 @@ class Backend(Clocked):
             is_store=True,
             issued_subreqs=[set() for _ in range(rows)],
         )
-        self._tx_queue.append(tx) # DEBUGGAR: use SimQueue
-        # If SimQueue fails, backpressure and stall
+        if not self._tx_queue.enqueue(tx):
+            self.total_backend_stalls += 1
+            return -1
         return tx_id
 
     # Called by Body/other unit when it produces a SRAM-read response for a store transaction.
-    def body_to_backend_sram_read_response(self, tx_id: int, row_idx: int, row_bytes: bytes) -> None: # DEBUGGAR: body_to_backend_response
-        # last_op_tick and delay_cycles
-        # is_busy function
+    def body_to_backend_sram_read_response(self, tx_id: int, row_idx: int, row_bytes: bytes) -> None:
         """
         Accepts a row-worth of bytes from the Scratchpad (for STORE).
         Splits into DRAM write subrequests and enqueue them (subject to DRAM queue depth).
         """
+        if self.is_busy():
+            self.total_backend_stalls += 1
+            self._pending_sram_reads.append((tx_id, row_idx, row_bytes))
+            return
+        self._accept_sram_read_response(tx_id, row_idx, row_bytes)
+
+    def _accept_sram_read_response(self, tx_id: int, row_idx: int, row_bytes: bytes) -> None:
+        self.last_op_tick = self._tick
         tx = self._active_txs.get(tx_id)
         if not tx:
             # If tx not active yet, try enqueueing into tx_queue (unlikely)
@@ -167,29 +186,33 @@ class Backend(Clocked):
 
         # split row_bytes into sub-chunks of dram_burst_bytes
         subreqs = []
-        for s in range(tx.subreqs_per_row):
-            off = s * self.dram_burst_bytes
+        for subidx in range(tx.subreqs_per_row):
+            off = subidx * self.dram_burst_bytes
             chunk = row_bytes[off : off + self.dram_burst_bytes]
             dram_addr = tx.base_dram + (row_idx * tx.cols * self.elem_bytes) + off
-            subreqs.append(DRAMOperation(tx_id=tx.tx_id, row=row_idx, subidx=s, dram_addr=dram_addr, length=len(chunk), is_write=True, data=chunk, remaining_cycles=self.dram_latency))
+            subreqs.append(DRAMOperation(
+                            tx_id=tx.tx_id, 
+                            row=row_idx, 
+                            subidx=subidx, 
+                            dram_addr=dram_addr, 
+                            length=len(chunk), 
+                            is_write=True, 
+                            data=chunk, 
+                            remaining_cycles=self.dram_latency))
 
         # try to push them into dram_pending, if cannot, keep them in per-tx buffer and count stalls
+        pending = self._dram_pending
+        row_buf = tx.row_bufs[row_idx]
         for req in subreqs:
-            if len(self._dram_pending._raw_items) >= self.dram_q_depth: #DEBUG to be handled by queues
+            if not pending.enqueue(req):
                 # cannot accept now; count stall and keep remaining subreqs in tx.row_bufs as pending write data
                 self.total_backend_stalls += 1
-                tx.row_bufs[row_idx][req.subidx] = req.data  # store for later
-            else:
-                if not self._dram_pending.enqueue(req):
-                    self.total_backend_stalls += 1
-                    # Optionally, buffer the request for retry if needed
-                    # For loads: mark as pending in tx.issued_subreqs or tx.row_bufs
-                    # For stores: keep in tx.row_bufs
-                    return
-                self.total_dram_bursts_issued += 1
+                row_buf[req.subidx] = req.data  # store for later
+                continue
+            self.total_dram_bursts_issued += 1
 
     # Internal helpers
-    def backend_to_dram_issue_row_load_subreqs(self, tx: BACKENDTransaction) -> None:
+    def backend_to_dram_issue_row_load_subreqs(self, tx: BackendTransaction) -> None:
         """
         Enqueue DRAM read subrequests for tx.cur_row if dram queue has capacity.
         """
@@ -222,7 +245,7 @@ class Backend(Clocked):
                 tx.issued_subreqs[r].add(s)
                 self.total_dram_bursts_issued += 1
 
-    def backend_to_body_complete_row_load(self, tx: BACKENDTransaction, row: int, row_bytes: bytes) -> None:
+    def backend_to_body_complete_row_load(self, tx: BackendTransaction, row: int, row_bytes: bytes) -> None:
         """
         Attempt to send an assembled row to the Body via callback.
         If Body stalls, buffer the row for retry.
@@ -305,7 +328,7 @@ class Backend(Clocked):
                     self._active_txs.pop(tx.tx_id, None)
 
     # ------ Clock tick ------
-    def sim_to_backend_tick(self, time=None) -> None:
+    def tick(self, time=None) -> None:
         """
         Advance one cycle:
           - Move queued transactions to active
@@ -313,9 +336,19 @@ class Backend(Clocked):
           - Progress DRAM pending bursts
           - Retry stalled row handoffs
         """
+        if time is None:
+            self._tick += 1
+        else:
+            cycle = int(time)
+            if cycle <= self._tick:
+                return
+            self._tick = cycle
+        if self._pending_sram_reads and not self.is_busy():
+            tx_id, row_idx, row_bytes = self._pending_sram_reads.popleft()
+            self._accept_sram_read_response(tx_id, row_idx, row_bytes)
         # 1) Activate queued transactions
-        while self._tx_queue:
-            tx = self._tx_queue.popleft()
+        while not self._tx_queue.is_empty():
+            tx = self._tx_queue.dequeue()
             self._active_txs[tx.tx_id] = tx
             if not tx.is_store:
                 self.backend_to_dram_issue_row_load_subreqs(tx)
@@ -325,7 +358,7 @@ class Backend(Clocked):
                     for row_idx in range(tx.rows):
                         if all(x is None for x in tx.row_bufs[row_idx]):
                             row_bytes = self.send_sram_read(tx.base_sp + row_idx, row_idx, tx.tx_id)
-                            self.accept_sram_read_response(tx.tx_id, row_idx, row_bytes)
+                            self.body_to_backend_sram_read_response(tx.tx_id, row_idx, row_bytes)
 
         # 2) Progress DRAM pending bursts
         n = len(self._dram_pending._raw_items)

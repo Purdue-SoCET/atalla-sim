@@ -1,7 +1,7 @@
 from typing import Optional, Callable, List, Any
 from base.queue import SimQueue
 
-class ScratchpadFrontend: # DEBUGGAR: Frontend
+class Frontend:
     def __init__(self, tile_id: int, spad: "Scratchpad", queue_size: int = 1):
         self.tile_id = tile_id
         self.spad = spad
@@ -15,7 +15,7 @@ class ScratchpadFrontend: # DEBUGGAR: Frontend
         now = getattr(self.spad, 'now', 0)
         latency = 2 + self.spad.tile_write_xbars[self.tile_id].delay
         ready_cycle = now + latency
-        req = (ready_cycle, base_sp_addr, row_bytes, row_idx, callback) # DEBUGGAR: do I even use ready cycle?
+        req = (ready_cycle, base_sp_addr, row_bytes, row_idx, callback)
         if not self.writeq.enqueue(req):
             self.write_stalled = True
             return False
@@ -36,11 +36,21 @@ class ScratchpadFrontend: # DEBUGGAR: Frontend
     def tick(self, now):
         # Write path: only if backend is not using the crossbar
         if not self.spad.backend_write_inflight[self.tile_id]:
-            while self.writeq.items and self.writeq.items[0][0] <= now:
+            head = self.writeq.peek()
+            while head:
+                ready_cycle, *_ = head
+                if ready_cycle > now:
+                    break
                 _, base_sp_addr, row_bytes, row_idx, cb = self.writeq.dequeue()
                 self.spad._accept_backend_write(base_sp_addr, row_bytes, row_idx, tx_id=0, tile_id=self.tile_id, frontend_cb=cb)
+                head = self.writeq.peek()
         # Read path: only if backend is not using the crossbar
         if not self.spad.backend_read_inflight[self.tile_id]:
-            while self.readq.items and self.readq.items[0][0] <= now:
+            head = self.readq.peek()
+            while head:
+                ready_cycle, *_ = head
+                if ready_cycle > now:
+                    break
                 _, base_sp_addr, row_idx, cb = self.readq.dequeue()
                 self.spad._accept_backend_read(base_sp_addr, row_idx, tx_id=0, tile_id=self.tile_id, frontend_cb=cb)
+                head = self.readq.peek()

@@ -51,7 +51,7 @@ def test_scratchpad_full():
     clk.add_clocked(backend)
 
     # Simulate a backend load (DRAM to scratchpad)
-    tx_id = backend.start_load(base_sp_addr=20, base_dram_addr=1000, rows=1, cols=32)
+    tx_id = backend.driver_to_backend_start_load(base_sp_addr=20, base_dram_addr=1000, rows=1, cols=32)
     # Simulate a backend store (scratchpad to DRAM)
     # For store, backend will request rows from scratchpad; we must respond
     backend_store_rows = []
@@ -61,7 +61,7 @@ def test_scratchpad_full():
         backend_store_rows.append((sp_addr, row_idx, tx_id, data))
         return data
     backend.send_sram_read = send_sram_read
-    tx_id2 = backend.start_store(base_sp_addr=24, base_dram_addr=2000, rows=1, cols=32)
+    tx_id2 = backend.driver_to_backend_start_store(base_sp_addr=24, base_dram_addr=2000, rows=1, cols=32)
 
     # --- Run simulation ---
     sim.run(until=10)

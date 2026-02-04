@@ -5,7 +5,7 @@ from base.clocked_object import Clocked
 from scratchpad.sc_sram_banks import SRAMBanks, _xor_bank
 from scratchpad.crossbar import Xbar
 from scratchpad import backend as backend_mod
-from scratchpad.frontend import ScratchpadFrontend
+from scratchpad.frontend import Frontend
 
 class Scratchpad(Clocked):
     """
@@ -59,8 +59,8 @@ class Scratchpad(Clocked):
         self.backend: Optional[backend_mod.Backend] = None
 
         self.frontends = [
-            ScratchpadFrontend(0, self, queue_size=frontend_queue_size),
-            ScratchpadFrontend(1, self, queue_size=frontend_queue_size)
+            Frontend(0, self, queue_size=frontend_queue_size),
+            Frontend(1, self, queue_size=frontend_queue_size)
         ]
 
     def _tile_and_slot(self, sp_addr: int) -> tuple[int, int]:
