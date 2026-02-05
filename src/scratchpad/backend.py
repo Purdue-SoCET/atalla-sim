@@ -309,7 +309,6 @@ class Backend(Clocked):
                     self.backend_to_dram_issue_row_load_subreqs(tx)
         else:
             # DRAM write completed
-            self.total_dram_bursts_completed += 1
             # Check for store transaction completion
             tx = self._active_txs.get(req.tx_id)
             if tx and tx.is_store:
@@ -340,6 +339,14 @@ class Backend(Clocked):
             self._tick += 1
         else:
             cycle = int(time)
+            # Snap near-integer times to the nearest integer to avoid float drift.
+            if isinstance(time, float):
+                rounded = int(round(time))
+                if abs(time - rounded) < 1e-6:
+                    cycle = rounded
+            if cycle < self._tick:
+                # Allow time reset between independent simulations.
+                self._tick = cycle - 1
             if cycle <= self._tick:
                 return
             self._tick = cycle
@@ -369,7 +376,7 @@ class Backend(Clocked):
             if req.remaining_cycles <= 0:
                 # DRAM response arrives this cycle
                 self.dram_to_backend_on_response(req)
-                self.total_dram_bursts_completed += 1 if req.is_write else 0
+                self.total_dram_bursts_completed += 1
             else:
                 to_requeue.append(req)
         for req in to_requeue:
@@ -386,7 +393,7 @@ class Backend(Clocked):
                     # try to hand off again
                     self.backend_to_body_complete_row_load(tx, tx.cur_row, assembled)
 
-    def backend_to_driver_get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> Dict[str, Any]:
         """
         Return backend statistics.
         """
@@ -400,3 +407,7 @@ class Backend(Clocked):
             "backend_stalls": self.total_backend_stalls,
             "tx_completed": self.total_tx_completed,
         }
+
+    # Backwards-compatible stats API used by some tests.
+    def backend_to_driver_get_stats(self) -> Dict[str, Any]:
+        return self.get_stats()

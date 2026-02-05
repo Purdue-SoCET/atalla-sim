@@ -52,7 +52,7 @@ def test_scratchpad_stalls():
     clk.add_clocked(backend)
 
     # This will attempt 4 bursts for one row, but only 2 can be pending
-    tx_id = backend.start_load(base_sp_addr=5, base_dram_addr=1000, rows=1, cols=8)
+    tx_id = backend.driver_to_backend_start_load(base_sp_addr=5, base_dram_addr=1000, rows=1, cols=8)
     sim.run(until=10.0)
     backend_stats = backend.get_stats()
     print("Backend vs Backend stats:", backend_stats)

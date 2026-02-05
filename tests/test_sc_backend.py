@@ -53,7 +53,7 @@ def test_sc_backend_load_and_store_flow():
     def tick_and_reschedule(t, end=5.0, step=0.1):
         backend.tick(t)
         # print lightweight status
-        st = backend.backend_to_driver_get_stats()
+        st = backend.get_stats()
         print(f"[{t:.2f}] dram_pending={st['dram_pending']} issued={st['issued_bursts']} completed={st['completed_bursts']} writes={len(writes)} stores={len(stores)}")
         next_t = t + step
         if next_t <= end:
@@ -65,7 +65,7 @@ def test_sc_backend_load_and_store_flow():
     print("collected writes (load):", [(w[2], len(w[1]), w[3]) for w in writes])
     assert len(writes) == 2, f"expected 2 sram writes, got {len(writes)}"
 
-    stats = backend.backend_to_driver_get_stats()
+    stats = backend.get_stats()
     # 2 rows * 2 subreqs each = 4 DRAM bursts issued
     assert stats["issued_bursts"] == 4, f"expected 4 DRAM bursts issued, got {stats['issued_bursts']}"
     assert stats["tx_completed"] == 1, f"expected tx_completed == 1, got {stats['tx_completed']}"
@@ -79,7 +79,7 @@ def test_sc_backend_load_and_store_flow():
     sim.run(until=3.5)
 
     print("collected stores (store):", [(s[2], len(s[1]), s[3]) for s in stores])
-    stats2 = backend.backend_to_driver_get_stats()
+    stats2 = backend.get_stats()
     assert stats2["issued_bursts"] == 8, f"expected 8 DRAM bursts issued after store, got {stats2['issued_bursts']}"
     assert stats2["tx_completed"] == 2, f"expected tx_completed == 2 after store, got {stats2['tx_completed']}"
 
