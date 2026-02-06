@@ -13,6 +13,9 @@ from base.queue import SimQueue
   - get_stats() -> Dict
 """
 
+def _noop_cb(_: Optional[bytes]) -> None:
+    return None
+
 @dataclass
 class SRAMOperation:
     op_id: int
@@ -40,14 +43,19 @@ class SRAMBank(Clocked):
         # Stall / utilization counters
         self.cycles_busy: int = 0
         self.enqueue_stalls: int = 0
+        self._curr_tick: int = 0
+        self._last_enqueue_tick: int = -1
 
     def _check_bounds(self, slot: int, length: int):
         if slot < 0 or slot >= self.slots:
             raise IndexError(f"SRAMBank slot out of bounds: slot={slot} slots={self.slots}")
         # length is advisory: reads will return min(length, len(slot_data))
 
-    # DEBUGGAR: self._curr_tick updated at every tick. if two jobs try to happen at the same tick, raise flag
-    def enqueue_read(self, slot: int, length: int, callback: Optional[Callable[[bytes], None]] = None) -> Optional[int]:
+    def enqueue_read(self, slot: int, length: int, callback: Optional[Callable[[bytes], None]] = None) -> int:
+        if self._last_enqueue_tick == self._curr_tick:
+            self.enqueue_stalls += 1
+            raise RuntimeError("SRAMBank enqueue stall: multiple enqueues in same cycle")
+        self._last_enqueue_tick = self._curr_tick
         self._check_bounds(slot, length)
         if not self._pending.enqueue(SRAMOperation(
             op_id=self._op_counter + 1,
@@ -58,12 +66,16 @@ class SRAMBank(Clocked):
             remaining_cycles=self.read_latency,
             callback=callback,
         )):
-            self.enqueue_stalls += 1 # DEBUGGAR: THE OTHER UNIT IS STALLING, NOT SRAM BANK
-            return None
+            self.enqueue_stalls += 1
+            raise RuntimeError("SRAMBank enqueue stall: pending queue full")
         self._op_counter += 1
         return self._op_counter
 
-    def enqueue_write(self, slot: int, data: bytes, callback: Optional[Callable[[None], None]] = None) -> Optional[int]:
+    def enqueue_write(self, slot: int, data: bytes, callback: Optional[Callable[[None], None]] = None) -> int:
+        if self._last_enqueue_tick == self._curr_tick:
+            self.enqueue_stalls += 1
+            raise RuntimeError("SRAMBank enqueue stall: multiple enqueues in same cycle")
+        self._last_enqueue_tick = self._curr_tick
         self._check_bounds(slot, len(data))
         if not self._pending.enqueue(SRAMOperation(
             op_id=self._op_counter + 1,
@@ -74,8 +86,8 @@ class SRAMBank(Clocked):
             remaining_cycles=self.write_latency,
             callback=callback,
         )):
-            self.enqueue_stalls += 1 # DEBUGGAR: THE OTHER UNIT IS STALLING, NOT SRAM BANK
-            return None
+            self.enqueue_stalls += 1
+            raise RuntimeError("SRAMBank enqueue stall: pending queue full")
         self._op_counter += 1
         return self._op_counter
 
@@ -85,6 +97,7 @@ class SRAMBank(Clocked):
         (op_id, result) where result is bytes for reads or None for writes.
         Callbacks are invoked before returning.
         """
+        self._curr_tick += 1
         completed: List[Tuple[int, Optional[bytes]]] = []
 
         # account busy cycle if there are pending ops at start of tick
@@ -109,12 +122,11 @@ class SRAMBank(Clocked):
                     result = bytes(slot_data[: op.length])
                 completed.append((op.op_id, result))
                 # invoke callback (swallow exceptions to avoid breaking sim)
-                # DEBUGGAR: it NEEDS to have a callback
-                if op.callback:
-                    try:
-                        op.callback(result)
-                    except Exception:
-                        pass
+                cb = op.callback or _noop_cb
+                try:
+                    cb(result)
+                except Exception:
+                    raise RuntimeError(f"Callback is None at tick: {self._curr_tick}")
                 to_remove.append(op)
 
         # remove completed ops from pending queue

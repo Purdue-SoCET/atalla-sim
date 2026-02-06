@@ -16,7 +16,7 @@ def build_sim():
     sim.init(eq, core)
     return eq, clk, sim
 
-def test_sram_lockstep_and_stall():
+def test_sram_staggered_and_stall():
     eq, clk, sim = build_sim()
 
     # Use queue_size=1 for each bank to test stalls
@@ -24,14 +24,14 @@ def test_sram_lockstep_and_stall():
     for b in banks.banks:
         b._pending = b._pending.__class__(max_size=1)
 
-    # --- Lockstep: staggered ops, no stalls --- DEBUGGAR dont name it this :(
-    lockstep_results = []
-    def lockstep_cb(data):
-        lockstep_results.append(data)
+    # --- Staggered ops, no stalls ---
+    staggered_results = []
+    def staggered_cb(data):
+        staggered_results.append(data)
 
     # Write at t=0, read at t=1 (no overlap, so no stall)
-    eq.schedule(0.0, lambda t: banks.enqueue_write(2, b"lockstep", callback=lambda _: None), 0.0)
-    eq.schedule(1.0, lambda t: banks.enqueue_read(2, 8, callback=lockstep_cb), 1.0)
+    eq.schedule(0.0, lambda t: banks.enqueue_write(2, b"staggered", callback=lambda _: None), 0.0)
+    eq.schedule(1.0, lambda t: banks.enqueue_read(2, 9, callback=staggered_cb), 1.0)
 
     def tick_and_collect(time):
         banks.tick()
@@ -44,9 +44,9 @@ def test_sram_lockstep_and_stall():
     sim.run(until=4.0)
 
     stats = banks.get_stats()
-    print("Lockstep stats:", stats)
-    assert lockstep_results and lockstep_results[0] == b"lockstep", f"Lockstep readback failed: {lockstep_results}"
-    assert stats["total_enqueue_stalls"] == 0, "Lockstep: Expected zero stalls"
+    print("Staggered stats:", stats)
+    assert staggered_results and staggered_results[0] == b"staggered", f"Staggered readback failed: {staggered_results}"
+    assert stats["total_enqueue_stalls"] == 0, "Staggered: Expected zero stalls"
 
     # --- Simultaneous: ops at same time, expect stall ---
     # Reset banks for clean test
@@ -58,10 +58,16 @@ def test_sram_lockstep_and_stall():
     def stall_cb(data):
         stall_results.append(data)
 
-    # Write and read at t=0 (same bank/address), expect read to stall
+    # Write and read at t=0 (same bank/address), expect enqueue conflict
     eq, clk, sim = build_sim()
     eq.schedule(0.0, lambda t: banks.enqueue_write(2, b"stalltest", callback=lambda _: None), 0.0)
-    eq.schedule(0.0, lambda t: banks.enqueue_read(2, 9, callback=stall_cb), 0.0)
+    def expect_conflict(_t):
+        try:
+            banks.enqueue_read(2, 9, callback=stall_cb)
+        except RuntimeError:
+            return
+        assert False, "Stall: Expected enqueue conflict RuntimeError"
+    eq.schedule(0.0, expect_conflict, 0.0)
 
     eq.schedule(0.1, tick_and_collect, 0.1)
     eq.schedule(1.1, tick_and_collect, 1.1)
@@ -72,12 +78,13 @@ def test_sram_lockstep_and_stall():
 
     stats = banks.get_stats()
     print("Stall stats:", stats)
-    # Only the write should succeed, read should not be enqueued
-    # DEBUGGAR: assert write has happened
+    # Only the write should succeed; read enqueue conflicts and should not run
+    bank_idx, slot_idx = banks._addr_to_bank_slot(2)
+    assert banks.banks[bank_idx].mem[slot_idx] == b"stalltest", "Stall: Write did not commit"
     assert stall_results == [], "Stall: Read should not complete due to stall"
     assert stats["total_enqueue_stalls"] >= 1, "Stall: Expected at least one enqueue stall"
 
-    print("SRAMBanks lockstep and stall test passed.")
+    print("SRAMBanks staggered and stall test passed.")
 
 if __name__ == "__main__":
-    test_sram_lockstep_and_stall()
+    test_sram_staggered_and_stall()
