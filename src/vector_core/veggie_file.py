@@ -38,7 +38,7 @@ class Veggie(Clocked):
         self.inp = inp
         self.out = out
 
-    def Tick(self, time):
+    def tick(self, time):
         if not self.inp:
             return
 
@@ -99,7 +99,7 @@ class OpBuffer(Clocked):
         self.inp = inp
         self.out = out
 
-    def Tick(self, time):
+    def tick(self, time):
         if not self.inp:
             return
 

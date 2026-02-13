@@ -53,7 +53,7 @@ def test_vector_pipeline():
     # schedule a write at t=0.0
     veg_in.write_reqs = [{"port": 0, "bank": 0, "addr": 2, "data": 99}]
     veg_in.read_reqs = []
-    eq.schedule(0.0, veggie.Tick, 0.0)
+    eq.schedule(0.0, veggie.tick, 0.0)
 
     # schedule a read at t=1.0 (we set the request just before scheduling)
     def place_read(time):
@@ -63,10 +63,10 @@ def test_vector_pipeline():
     eq.schedule(1.0, place_read, 1.0)
 
     # schedule veggie to service the read shortly after placement
-    eq.schedule(1.01, veggie.Tick, 1.01)
+    eq.schedule(1.01, veggie.tick, 1.01)
 
     # schedule opbuf to sample veggie output after veggie produced it
-    eq.schedule(1.02, opbuf.Tick, 1.02)
+    eq.schedule(1.02, opbuf.tick, 1.02)
 
     # inject mask so op buffer can combine it with data
     def inject_mask(time):
@@ -76,7 +76,7 @@ def test_vector_pipeline():
     eq.schedule(1.03, inject_mask, 1.03)
 
     # call opbuf again to observe the combined result
-    eq.schedule(1.04, opbuf.Tick, 1.04)
+    eq.schedule(1.04, opbuf.tick, 1.04)
 
     # run sim
     sim.run(until=2.0)

@@ -1,0 +1,451 @@
+import math
+from base.clocked_object import Clocked
+from base.queue import SimQueue
+from typing import Callable, Dict, List, Optional, Sequence
+
+Time = float
+
+
+class DType:
+    def __init__(self, name: str, eew_bits: int):
+        self.name = name
+        self.eew_bits = eew_bits
+
+
+BF16 = DType("BF16", 16)
+FP32 = DType("FP32", 32)
+INT8 = DType("INT8", 8)
+
+
+def _safe_div(a: float, b: float) -> float:
+    if b == 0:
+        return float("inf") if a >= 0 else float("-inf")
+    return a / b
+
+
+def _op_lut() -> Dict[str, Callable[[float, float], float]]:
+    return {
+        "add": lambda a, b: a + b,
+        "sub": lambda a, b: a - b,
+        "mul": lambda a, b: a * b,
+        "max": lambda a, b: a if a >= b else b,
+        "min": lambda a, b: a if a <= b else b,
+        "and": lambda a, b: int(a) & int(b),
+        "or": lambda a, b: int(a) | int(b),
+        "xor": lambda a, b: int(a) ^ int(b),
+        "sqrt": lambda a, _b: math.sqrt(a) if a >= 0 else float("nan"),
+        "exp": lambda a, _b: math.exp(a),
+        "div": _safe_div,
+        "shl": lambda a, b: int(a) << int(b),
+        "shr": lambda a, b: int(a) >> int(b),
+    }
+
+
+def _fu_for_op(op: str) -> str:
+    if op in ("sqrt",):
+        return "sqrt"
+    if op in ("exp",):
+        return "exp"
+    if op in ("div",):
+        return "div"
+    if op in ("shl", "shr"):
+        return "shift"
+    return "alu"
+
+
+class FunctionalUnitPipeline:
+    def __init__(self, name: str, latency: int, capacity: int = 8):
+        self.name = name
+        self.latency = max(1, latency)
+        self.capacity = max(1, capacity)
+        self.entries = SimQueue(self.capacity)
+        self.completed = SimQueue(self.capacity * 4)
+
+    def can_accept(self) -> bool:
+        return not self.entries.is_full()
+
+    def push(self, payload: dict) -> bool:
+        if not self.can_accept():
+            return False
+        return self.entries.enqueue({"remain": self.latency, "payload": payload})
+
+    def tick(self) -> None:
+        next_entries = SimQueue(self.capacity)
+        while not self.entries.is_empty():
+            entry = self.entries.dequeue()
+            if entry is None:
+                break
+            entry["remain"] -= 1
+            if entry["remain"] <= 0:
+                self.completed.enqueue(entry["payload"])
+            else:
+                next_entries.enqueue(entry)
+        self.entries = next_entries
+
+    def has_completed(self) -> bool:
+        return not self.completed.is_empty()
+
+    def pop_completed(self) -> Optional[dict]:
+        return self.completed.dequeue()
+
+
+class LaneFUContext:
+    def __init__(
+        self,
+        inst_id: int,
+        op: str,
+        src0: Sequence[float],
+        src1: Sequence[float],
+        mask: Sequence[bool],
+        indices: List[int],
+        dst: int,
+        reduce: bool,
+    ):
+        self.inst_id = inst_id
+        self.op = op
+        self.src0 = src0
+        self.src1 = src1
+        self.mask = mask
+        self.indices = indices
+        self.dst = dst
+        self.reduce = reduce
+        self.cursor = 0
+        self.last_sent = False
+        self.pending_count = 0
+        self.reduce_accum = 0.0
+
+
+class ResultCollector(Clocked):
+    def __init__(self, lane_count: int, vector_len: int, sink_capacity: int = 32):
+        super().__init__()
+        self.lane_count = lane_count
+        self.vector_len = vector_len
+        self.sink_capacity = max(1, sink_capacity)
+        self.inflight = {}
+        self.completed_vectors = SimQueue(self.sink_capacity)
+
+    def can_accept_result(self) -> bool:
+        return not self.completed_vectors.is_full()
+
+    def allocate_instruction(
+        self,
+        inst_id: int,
+        dst: int,
+        op: str,
+        reduce: bool,
+        seed_vector: Optional[List[float]] = None,
+    ) -> None:
+        self.inflight[inst_id] = {
+            "dst": dst,
+            "op": op,
+            "reduce": reduce,
+            "vector": (seed_vector[:] if seed_vector is not None else [0] * self.vector_len),
+            "lane_done": [False] * self.lane_count,
+            "lane_pending": [0] * self.lane_count,
+            "reduce_accum": [0.0] * self.lane_count,
+        }
+
+    def lane_dispatched(self, inst_id: int, lane_id: int) -> None:
+        self.inflight[inst_id]["lane_pending"][lane_id] += 1
+
+    def lane_reduce_accum(self, inst_id: int, lane_id: int, value: float) -> None:
+        self.inflight[inst_id]["reduce_accum"][lane_id] += value
+
+    def lane_result(self, inst_id: int, lane_id: int, lane_elem_idx: int, value: float) -> None:
+        state = self.inflight[inst_id]
+        vector_idx = lane_id + lane_elem_idx * self.lane_count
+        if vector_idx < self.vector_len:
+            state["vector"][vector_idx] = value
+        state["lane_pending"][lane_id] -= 1
+        self._try_complete(inst_id)
+
+    def lane_done(self, inst_id: int, lane_id: int) -> None:
+        self.inflight[inst_id]["lane_done"][lane_id] = True
+        self._try_complete(inst_id)
+
+    def _try_complete(self, inst_id: int) -> None:
+        state = self.inflight.get(inst_id)
+        if state is None:
+            return
+        if not all(state["lane_done"]):
+            return
+        if any(p != 0 for p in state["lane_pending"]):
+            return
+
+        reduction = None
+        if state["reduce"]:
+            reduction = sum(state["reduce_accum"])
+
+        if not self.completed_vectors.enqueue(
+            {
+                "inst_id": inst_id,
+                "dst": state["dst"],
+                "op": state["op"],
+                "vector": state["vector"][:],
+                "reduction": reduction,
+            }
+        ):
+            return
+        del self.inflight[inst_id]
+
+    def pop_completed(self) -> Optional[dict]:
+        item = self.completed_vectors.dequeue()
+        if item is not None:
+            for pending_inst_id in list(self.inflight.keys()):
+                self._try_complete(pending_inst_id)
+        return item
+
+
+class VectorLane(Clocked):
+    def __init__(
+        self,
+        lane_id: int,
+        lane_count: int,
+        fu_latencies: Optional[Dict[str, int]] = None,
+        fu_capacity: int = 8,
+    ):
+        super().__init__()
+        if lane_count <= 0:
+            raise ValueError("lane_count must be > 0")
+        if lane_id < 0 or lane_id >= lane_count:
+            raise ValueError("lane_id must be in [0, lane_count)")
+
+        self.lane_id = lane_id
+        self.lane_count = lane_count
+        self.ops = _op_lut()
+        self.fu_latencies = {
+            "alu": 4,
+            "sqrt": 8,
+            "exp": 14,
+            "div": 11,
+            "shift": 3, # not in the report? VC used an xbar here, but tbh we can abstract this
+        }
+        if fu_latencies:
+            self.fu_latencies.update(fu_latencies)
+
+        self.fus = {}
+        for fu, lat in self.fu_latencies.items():
+            self.fus[fu] = FunctionalUnitPipeline(fu, lat, capacity=fu_capacity)
+
+        self.fu_ctx = {}
+        self.meta_fifo = {}
+        self.pending_outputs = SimQueue(2048)
+        for fu in self.fu_latencies:
+            self.fu_ctx[fu] = None
+            self.meta_fifo[fu] = SimQueue(fu_capacity)
+
+    def _lane_indices(self, vector_len: int) -> List[int]:
+        return list(range(self.lane_id, vector_len, self.lane_count))
+
+    def can_issue(self, fu_name: str) -> bool:
+        return self.fu_ctx[fu_name] is None
+
+    def issue(self, context: LaneFUContext, fu_name: str) -> bool:
+        if not self.can_issue(fu_name):
+            return False
+        self.fu_ctx[fu_name] = context
+        return True
+
+    def tick(self, time: Time, collector: ResultCollector) -> None:
+        # Stage 1: sequencer routes one element/FU/cycle with ready/valid semantics.
+        for fu_name, ctx in self.fu_ctx.items():
+            if ctx is None:
+                continue
+
+            if ctx.cursor >= len(ctx.indices):
+                if not ctx.last_sent:
+                    collector.lane_done(ctx.inst_id, self.lane_id)
+                    ctx.last_sent = True
+                    self.fu_ctx[fu_name] = None
+                continue
+
+            if not self.fus[fu_name].can_accept():
+                continue
+
+            lane_elem_idx = ctx.cursor
+            vector_idx = ctx.indices[ctx.cursor]
+            ctx.cursor += 1
+            active = bool(ctx.mask[vector_idx])
+
+            if active:
+                value = self.ops[ctx.op](ctx.src0[vector_idx], ctx.src1[vector_idx])
+                pushed = self.fus[fu_name].push({"value": value})
+                if pushed:
+                    self.meta_fifo[fu_name].enqueue(
+                        {
+                            "inst_id": ctx.inst_id,
+                            "lane_elem_idx": lane_elem_idx,
+                            "dst": ctx.dst,
+                            "reduce": ctx.reduce,
+                            "value": value,
+                        }
+                    )
+                    collector.lane_dispatched(ctx.inst_id, self.lane_id)
+                    ctx.pending_count += 1
+                    if ctx.reduce:
+                        ctx.reduce_accum += value
+                        collector.lane_reduce_accum(ctx.inst_id, self.lane_id, value)
+                else:
+                    # Pipeline refused entry; retry this element next cycle.
+                    ctx.cursor -= 1
+
+            if ctx.cursor >= len(ctx.indices) and not ctx.last_sent:
+                collector.lane_done(ctx.inst_id, self.lane_id)
+                ctx.last_sent = True
+                if ctx.pending_count == 0:
+                    self.fu_ctx[fu_name] = None
+
+        # Stage 2: execute pipelines.
+        for fu in self.fus.values():
+            fu.tick()
+
+        # Stage 3: pair FU output with metadata FIFO.
+        for fu_name, fu in self.fus.items():
+            while fu.has_completed() and (not self.meta_fifo[fu_name].is_empty()):
+                payload = fu.pop_completed()
+                meta = self.meta_fifo[fu_name].dequeue()
+                ctx = self.fu_ctx[fu_name]
+                if ctx is not None:
+                    ctx.pending_count -= 1
+                    if ctx.last_sent and ctx.pending_count == 0:
+                        self.fu_ctx[fu_name] = None
+                if not self.pending_outputs.enqueue(
+                    {
+                        "inst_id": meta["inst_id"],
+                        "lane_elem_idx": meta["lane_elem_idx"],
+                        "value": payload["value"],
+                    }
+                ):
+                    raise RuntimeError("lane pending output queue overflow")
+
+        # Stage 4: forward to result collector with backpressure.
+        while (not self.pending_outputs.is_empty()) and collector.can_accept_result():
+            item = self.pending_outputs.dequeue()
+            if item is None:
+                break
+            collector.lane_result(
+                item["inst_id"],
+                self.lane_id,
+                item["lane_elem_idx"],
+                item["value"],
+            )
+
+
+class VectorDatapath(Clocked):
+    def __init__(
+        self,
+        veggie_size: int,
+        lane_count: int = 1,
+        dtype: DType = BF16,
+        issue_width: int = 1,
+        fu_latencies: Optional[Dict[str, int]] = None,
+    ):
+        super().__init__()
+        if veggie_size <= 0:
+            raise ValueError("veggie_size must be > 0")
+        if lane_count <= 0:
+            raise ValueError("lane_count must be > 0")
+        if issue_width <= 0:
+            raise ValueError("issue_width must be > 0")
+        if veggie_size % dtype.eew_bits != 0:
+            raise ValueError("veggie_size must be divisible by dtype EEW")
+
+        self.veggie_size = veggie_size
+        self.dtype = dtype
+        self.vector_len = veggie_size // dtype.eew_bits
+        self.lane_count = min(lane_count, self.vector_len)
+        self.issue_width = issue_width
+        self.next_inst_id = 0
+
+        self.lanes = [
+            VectorLane(i, self.lane_count, fu_latencies=fu_latencies)
+            for i in range(self.lane_count)
+        ]
+        self.collector = ResultCollector(self.lane_count, self.vector_len)
+        self.pending_issue = SimQueue(128)
+
+        self.result_valid = False
+        self.last_result = None
+
+    def _mk_src1(self, src0: Sequence[float], src1: Optional[Sequence[float]]) -> Sequence[float]:
+        if src1 is None:
+            return [0] * len(src0)
+        return src1
+
+    def enqueue(
+        self,
+        src0: Sequence[float],
+        src1: Optional[Sequence[float]] = None,
+        mask: Optional[Sequence[bool]] = None,
+        op: str = "add",
+        dst: int = 0,
+        reduce: bool = False,
+    ) -> int:
+        if len(src0) != self.vector_len:
+            raise ValueError("src0 length mismatch")
+        src1_full = self._mk_src1(src0, src1)
+        if len(src1_full) != self.vector_len:
+            raise ValueError("src1 length mismatch")
+        mask_full = list(mask) if mask is not None else [True] * self.vector_len
+        if len(mask_full) != self.vector_len:
+            raise ValueError("mask length mismatch")
+        if op not in _op_lut():
+            raise ValueError("unsupported op: %s" % op)
+
+        inst_id = self.next_inst_id
+        self.next_inst_id += 1
+        if not self.pending_issue.enqueue(
+            {
+                "inst_id": inst_id,
+                "src0": list(src0),
+                "src1": list(src1_full),
+                "mask": mask_full,
+                "op": op,
+                "dst": dst,
+                "reduce": reduce,
+            }
+        ):
+            raise RuntimeError("datapath pending issue queue overflow")
+        return inst_id
+
+    def _can_issue_to_all_lanes(self, fu_name: str) -> bool:
+        for lane in self.lanes:
+            if not lane.can_issue(fu_name):
+                return False
+        return True
+
+    def tick(self, time: Time) -> None:
+        issued = 0
+        while (not self.pending_issue.is_empty()) and issued < self.issue_width:
+            inst = self.pending_issue.peek()
+            if inst is None:
+                break
+            fu_name = _fu_for_op(inst["op"])
+            if not self._can_issue_to_all_lanes(fu_name):
+                break
+
+            self.pending_issue.dequeue()
+            self.collector.allocate_instruction(
+                inst["inst_id"], inst["dst"], inst["op"], inst["reduce"]
+            )
+            for lane in self.lanes:
+                ctx = LaneFUContext(
+                    inst_id=inst["inst_id"],
+                    op=inst["op"],
+                    src0=inst["src0"],
+                    src1=inst["src1"],
+                    mask=inst["mask"],
+                    indices=lane._lane_indices(self.vector_len),
+                    dst=inst["dst"],
+                    reduce=inst["reduce"],
+                )
+                lane.issue(ctx, fu_name)
+            issued += 1
+
+        for lane in self.lanes:
+            lane.tick(time, self.collector)
+
+        completed = self.collector.pop_completed()
+        self.result_valid = completed is not None
+        if completed is not None:
+            self.last_result = completed
