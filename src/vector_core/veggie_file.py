@@ -38,7 +38,7 @@ class Veggie(Clocked):
         self.inp = inp
         self.out = out
 
-    def tick(self, time):
+    def tick(self):
         if not self.inp:
             return
 
@@ -79,10 +79,6 @@ class Veggie(Clocked):
             self.out.vreg = read_results
             self.out.dvalid = {p: (p in read_results) for p in range(self.dread_ports)}
             self.out.ready = True
-        #     print(f"[{time}] Veggie wrote: {[(bank_id, req['addr'], req['data']) for bank_id, reqs in bank_wreqs.items() for req in reqs]}")
-        #     print(f"[{time}] Veggie read_results: {read_results}")
-
-        # print(f"[{time}] Veggie Tick: read_reqs={read_reqs} write_reqs={write_reqs}")
 
 class OpBuffer(Clocked):
     def __init__(self, num_pairs=1):
@@ -99,7 +95,7 @@ class OpBuffer(Clocked):
         self.inp = inp
         self.out = out
 
-    def tick(self, time):
+    def tick(self):
         if not self.inp:
             return
 
@@ -133,5 +129,3 @@ class OpBuffer(Clocked):
         if all(ivalid):
             self.dready = [False] * (2 * self.num_pairs)
             self.mready = [False] * self.num_pairs
-
-        # print(f"[{time}] OpBuffer Tick: dvalid={dvalid} mvalid={mvalid} -> ivalid={ivalid}")

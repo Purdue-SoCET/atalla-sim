@@ -1,6 +1,6 @@
 # filepath: /home/asicfab/a/socet149/atalla-sim/tests/test_sc_backend.py
 import os, sys
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..", "src")))
 
 from base.eventq import EventQueue
 from base.clock_domain import ClockDomain

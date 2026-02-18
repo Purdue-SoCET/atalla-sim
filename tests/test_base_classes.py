@@ -7,8 +7,6 @@ from base.core import Core
 from base.sim import Sim
 from base.clocked_object import Clocked
 
-# refactored organization of code base. to run tests, $ cd atalla-sim, $ python3 -m tests.[testname]
-
 eq = EventQueue()
 clk = ClockDomain(eq, period=1.0)
 core = Core(eq)

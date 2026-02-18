@@ -115,14 +115,86 @@ class LaneFUContext:
         self.reduce_accum = 0.0
 
 
+class GlobalReductionUnit:
+    SUPPORTED_OPS = ("sum", "min", "max")
+    SUPPORTED_OUT_MODES = ("partial_zero", "partial_passthru", "broadcast")
+
+    def __init__(self, vector_len: int):
+        if vector_len <= 0:
+            raise ValueError("vector_len must be > 0")
+        self.vector_len = vector_len
+        self.tree_alus = max(1, vector_len // 2)
+
+    def _reduce_pair(self, op: str, a: float, b: float) -> float:
+        if op == "sum":
+            return a + b
+        if op == "min":
+            return a if a <= b else b
+        if op == "max":
+            return a if a >= b else b
+        raise ValueError("unsupported reduction op: %s" % op)
+
+    def reduce_tree(self, values: Sequence[float], op: str) -> Optional[float]:
+        if op not in self.SUPPORTED_OPS:
+            raise ValueError("unsupported reduction op: %s" % op)
+        if not values:
+            return None
+
+        level = list(values)
+        while len(level) > 1:
+            next_level = []
+            i = 0
+            while i + 1 < len(level):
+                next_level.append(self._reduce_pair(op, level[i], level[i + 1]))
+                i += 2
+            if i < len(level):
+                next_level.append(level[i])
+            level = next_level
+        return level[0]
+
+    def format_output_vector(
+        self,
+        reduction: Optional[float],
+        out_mode: str,
+        seed_vector: Optional[Sequence[float]] = None,
+    ) -> List[float]:
+        if out_mode not in self.SUPPORTED_OUT_MODES:
+            raise ValueError("unsupported reduction out_mode: %s" % out_mode)
+        if seed_vector is None:
+            seed = [0] * self.vector_len
+        else:
+            seed = list(seed_vector)
+            if len(seed) != self.vector_len:
+                raise ValueError("seed_vector length mismatch")
+
+        if out_mode == "broadcast":
+            if reduction is None:
+                return seed
+            return [reduction] * self.vector_len
+
+        out = seed[:]
+        if reduction is not None and len(out) > 0:
+            out[0] = reduction
+        return out
+
+
 class ResultCollector(Clocked):
-    def __init__(self, lane_count: int, vector_len: int, sink_capacity: int = 32):
+    def __init__(
+        self,
+        lane_count: int,
+        vector_len: int,
+        sink_capacity: int = 32,
+        reduction_alu_latency: int = 4,
+    ):
         super().__init__()
         self.lane_count = lane_count
         self.vector_len = vector_len
         self.sink_capacity = max(1, sink_capacity)
+        self.reduction_alu_latency = max(1, reduction_alu_latency)
+        self.reduction_unit = GlobalReductionUnit(vector_len)
         self.inflight = {}
         self.completed_vectors = SimQueue(self.sink_capacity)
+        self.pending_reductions = SimQueue(max(1, self.sink_capacity * 4))
 
     def can_accept_result(self) -> bool:
         return not self.completed_vectors.is_full()
@@ -133,23 +205,52 @@ class ResultCollector(Clocked):
         dst: int,
         op: str,
         reduce: bool,
+        reduce_op: str = "sum",
+        reduce_out_mode: str = "partial_zero",
         seed_vector: Optional[List[float]] = None,
     ) -> None:
+        if reduce:
+            if reduce_op not in self.reduction_unit.SUPPORTED_OPS:
+                raise ValueError("unsupported reduction op: %s" % reduce_op)
+            if reduce_out_mode not in self.reduction_unit.SUPPORTED_OUT_MODES:
+                raise ValueError("unsupported reduction out_mode: %s" % reduce_out_mode)
         self.inflight[inst_id] = {
             "dst": dst,
             "op": op,
             "reduce": reduce,
+            "reduce_op": reduce_op,
+            "reduce_out_mode": reduce_out_mode,
             "vector": (seed_vector[:] if seed_vector is not None else [0] * self.vector_len),
             "lane_done": [False] * self.lane_count,
             "lane_pending": [0] * self.lane_count,
             "reduce_accum": [0.0] * self.lane_count,
+            "reduce_seen": [False] * self.lane_count,
+            "reduce_count": 0,
+            "completion_scheduled": False,
         }
 
     def lane_dispatched(self, inst_id: int, lane_id: int) -> None:
         self.inflight[inst_id]["lane_pending"][lane_id] += 1
 
     def lane_reduce_accum(self, inst_id: int, lane_id: int, value: float) -> None:
-        self.inflight[inst_id]["reduce_accum"][lane_id] += value
+        state = self.inflight[inst_id]
+        reduce_op = state["reduce_op"]
+        if reduce_op == "sum":
+            state["reduce_accum"][lane_id] += value
+        elif reduce_op == "min":
+            if not state["reduce_seen"][lane_id]:
+                state["reduce_accum"][lane_id] = value
+            else:
+                state["reduce_accum"][lane_id] = min(state["reduce_accum"][lane_id], value)
+        elif reduce_op == "max":
+            if not state["reduce_seen"][lane_id]:
+                state["reduce_accum"][lane_id] = value
+            else:
+                state["reduce_accum"][lane_id] = max(state["reduce_accum"][lane_id], value)
+        else:
+            raise ValueError("unsupported reduction op: %s" % reduce_op)
+        state["reduce_seen"][lane_id] = True
+        state["reduce_count"] += 1
 
     def lane_result(self, inst_id: int, lane_id: int, lane_elem_idx: int, value: float) -> None:
         state = self.inflight[inst_id]
@@ -167,6 +268,8 @@ class ResultCollector(Clocked):
         state = self.inflight.get(inst_id)
         if state is None:
             return
+        if state["completion_scheduled"]:
+            return
         if not all(state["lane_done"]):
             return
         if any(p != 0 for p in state["lane_pending"]):
@@ -174,19 +277,69 @@ class ResultCollector(Clocked):
 
         reduction = None
         if state["reduce"]:
-            reduction = sum(state["reduce_accum"])
+            lane_partials = [
+                state["reduce_accum"][lane_id]
+                for lane_id in range(self.lane_count)
+                if state["reduce_seen"][lane_id]
+            ]
+            reduction = self.reduction_unit.reduce_tree(lane_partials, state["reduce_op"])
+            state["vector"] = self.reduction_unit.format_output_vector(
+                reduction=reduction,
+                out_mode=state["reduce_out_mode"],
+                seed_vector=(state["vector"] if state["reduce_out_mode"] == "partial_passthru" else None),
+            )
+        packet = {
+            "inst_id": inst_id,
+            "dst": state["dst"],
+            "op": state["op"],
+            "reduce_op": state["reduce_op"],
+            "reduce_out_mode": state["reduce_out_mode"],
+            "vector": state["vector"][:],
+            "reduction": reduction,
+        }
 
-        if not self.completed_vectors.enqueue(
+        if not state["reduce"]:
+            if not self.completed_vectors.enqueue(packet):
+                return
+            del self.inflight[inst_id]
+            return
+
+        n = state["reduce_count"]
+        remaining_cycles = max(0, (n - 1) * self.reduction_alu_latency)
+        if remaining_cycles == 0:
+            if not self.completed_vectors.enqueue(packet):
+                return
+            del self.inflight[inst_id]
+            return
+
+        if not self.pending_reductions.enqueue(
             {
                 "inst_id": inst_id,
-                "dst": state["dst"],
-                "op": state["op"],
-                "vector": state["vector"][:],
-                "reduction": reduction,
+                "remain": remaining_cycles,
+                "packet": packet,
             }
         ):
             return
-        del self.inflight[inst_id]
+        state["completion_scheduled"] = True
+
+    def tick(self) -> None:
+        next_pending = SimQueue(self.pending_reductions.max_size)
+        while not self.pending_reductions.is_empty():
+            item = self.pending_reductions.dequeue()
+            if item is None:
+                break
+            if item["remain"] > 0:
+                item["remain"] -= 1
+            if item["remain"] <= 0:
+                if not self.completed_vectors.enqueue(item["packet"]):
+                    next_pending.enqueue(item)
+                else:
+                    inst_id = item["inst_id"]
+                    if inst_id in self.inflight:
+                        del self.inflight[inst_id]
+            else:
+                next_pending.enqueue(item)
+        self.pending_reductions = next_pending
 
     def pop_completed(self) -> Optional[dict]:
         item = self.completed_vectors.dequeue()
@@ -246,7 +399,7 @@ class VectorLane(Clocked):
         self.fu_ctx[fu_name] = context
         return True
 
-    def tick(self, time: Time, collector: ResultCollector) -> None:
+    def tick(self, collector: ResultCollector) -> None:
         # Stage 1: sequencer routes one element/FU/cycle with ready/valid semantics.
         for fu_name, ctx in self.fu_ctx.items():
             if ctx is None:
@@ -356,12 +509,19 @@ class VectorDatapath(Clocked):
         self.lane_count = min(lane_count, self.vector_len)
         self.issue_width = issue_width
         self.next_inst_id = 0
+        self.alu_latency = 4
+        if fu_latencies and ("alu" in fu_latencies):
+            self.alu_latency = max(1, fu_latencies["alu"])
 
         self.lanes = [
             VectorLane(i, self.lane_count, fu_latencies=fu_latencies)
             for i in range(self.lane_count)
         ]
-        self.collector = ResultCollector(self.lane_count, self.vector_len)
+        self.collector = ResultCollector(
+            self.lane_count,
+            self.vector_len,
+            reduction_alu_latency=self.alu_latency,
+        )
         self.pending_issue = SimQueue(128)
 
         self.result_valid = False
@@ -380,6 +540,8 @@ class VectorDatapath(Clocked):
         op: str = "add",
         dst: int = 0,
         reduce: bool = False,
+        reduce_op: str = "sum",
+        reduce_out_mode: str = "partial_zero",
     ) -> int:
         if len(src0) != self.vector_len:
             raise ValueError("src0 length mismatch")
@@ -391,6 +553,11 @@ class VectorDatapath(Clocked):
             raise ValueError("mask length mismatch")
         if op not in _op_lut():
             raise ValueError("unsupported op: %s" % op)
+        if reduce:
+            if reduce_op not in self.collector.reduction_unit.SUPPORTED_OPS:
+                raise ValueError("unsupported reduction op: %s" % reduce_op)
+            if reduce_out_mode not in self.collector.reduction_unit.SUPPORTED_OUT_MODES:
+                raise ValueError("unsupported reduction out_mode: %s" % reduce_out_mode)
 
         inst_id = self.next_inst_id
         self.next_inst_id += 1
@@ -403,6 +570,8 @@ class VectorDatapath(Clocked):
                 "op": op,
                 "dst": dst,
                 "reduce": reduce,
+                "reduce_op": reduce_op,
+                "reduce_out_mode": reduce_out_mode,
             }
         ):
             raise RuntimeError("datapath pending issue queue overflow")
@@ -414,7 +583,8 @@ class VectorDatapath(Clocked):
                 return False
         return True
 
-    def tick(self, time: Time) -> None:
+    def tick(self) -> None:
+        self.collector.tick()
         issued = 0
         while (not self.pending_issue.is_empty()) and issued < self.issue_width:
             inst = self.pending_issue.peek()
@@ -426,7 +596,13 @@ class VectorDatapath(Clocked):
 
             self.pending_issue.dequeue()
             self.collector.allocate_instruction(
-                inst["inst_id"], inst["dst"], inst["op"], inst["reduce"]
+                inst["inst_id"],
+                inst["dst"],
+                inst["op"],
+                inst["reduce"],
+                reduce_op=inst["reduce_op"],
+                reduce_out_mode=inst["reduce_out_mode"],
+                seed_vector=(inst["src0"] if inst["reduce"] and inst["reduce_out_mode"] == "partial_passthru" else None),
             )
             for lane in self.lanes:
                 ctx = LaneFUContext(
@@ -443,7 +619,7 @@ class VectorDatapath(Clocked):
             issued += 1
 
         for lane in self.lanes:
-            lane.tick(time, self.collector)
+            lane.tick(self.collector)
 
         completed = self.collector.pop_completed()
         self.result_valid = completed is not None
