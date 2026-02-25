@@ -60,7 +60,7 @@ def test_pe_horizontal_activation_and_weight_shift():
 
     clk.add_clocked(PEHorizontalShiftHarness(left, right))
     clk.schedule_next(0.0)
-    sim.run()
+    sim.run(until=5.0)
 
     assert right.activation_latch == 3.25
     assert right.weight == 7.5
@@ -74,6 +74,10 @@ def test_pe_vertical_accumulation_shift():
 
     clk.add_clocked(PEVerticalAccumHarness(top, bottom))
     clk.schedule_next(0.0)
-    sim.run()
+    sim.run(until=5.0)
 
     assert bottom.accumulation == 9.75
+
+if __name__ == "__main__":
+    test_pe_horizontal_activation_and_weight_shift()
+    test_pe_vertical_accumulation_shift()

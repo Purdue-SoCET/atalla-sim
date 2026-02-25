@@ -96,7 +96,7 @@ def test_systolic_array_weight_preload_shifts_right():
     clk.add_clocked(driver)
     clk.add_clocked(sa)
     clk.schedule_next(0.0)
-    sim.run()
+    sim.run(until=5.0)
 
 
 def test_systolic_array_start_to_value_ready_latency():
@@ -106,7 +106,7 @@ def test_systolic_array_start_to_value_ready_latency():
     clk.add_clocked(driver)
     clk.add_clocked(sa)
     clk.schedule_next(0.0)
-    sim.run()
+    sim.run(until=5.0)
 
     # Driver samples before sa.tick, so ready pulse appears one tick later in this trace.
     assert driver.ready_trace[:4] == [False, False, False, True]
@@ -120,7 +120,12 @@ def test_systolic_array_stall_freezes_and_resumes():
     clk.add_clocked(driver)
     clk.add_clocked(sa)
     clk.schedule_next(0.0)
-    sim.run()
+    sim.run(until=5.0)
 
     # After unstall, pipeline should resume and produce output.
     assert sa.get_buffer() == [[20.0]]
+
+if __name__ == "__main__":
+    test_systolic_array_weight_preload_shifts_right()
+    test_systolic_array_start_to_value_ready_latency()
+    test_systolic_array_stall_freezes_and_resumes()
