@@ -1,0 +1,23 @@
+import os, sys
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
+
+from base.eventq import EventQueue
+from base.clock_domain import ClockDomain
+from base.core import Core
+from base.sim import Sim
+from base.clocked_object import Clocked
+
+eq = EventQueue()
+clk = ClockDomain(eq, period=1.0)
+core = Core(eq)
+core.add_clock_domain(clk)
+sim = Sim()
+sim.init(eq, core)
+
+class MyCPU(Clocked):
+    def _Tick(self, time): print(f"CPU tick {time}")
+
+cpu = MyCPU()
+clk.add_clocked(cpu)
+clk.schedule_next(0)
+sim.run(until=5)
