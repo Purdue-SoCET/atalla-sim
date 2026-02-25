@@ -6,15 +6,7 @@ from typing import Callable, Dict, List, Optional, Sequence
 Time = float
 
 
-class DType:
-    def __init__(self, name: str, eew_bits: int):
-        self.name = name
-        self.eew_bits = eew_bits
-
-
-BF16 = DType("BF16", 16)
-FP32 = DType("FP32", 32)
-INT8 = DType("INT8", 8)
+FLOAT_SLOT_BITS = 16
 
 
 def _safe_div(a: float, b: float) -> float:
@@ -30,14 +22,14 @@ def _op_lut() -> Dict[str, Callable[[float, float], float]]:
         "mul": lambda a, b: a * b,
         "max": lambda a, b: a if a >= b else b,
         "min": lambda a, b: a if a <= b else b,
-        "and": lambda a, b: int(a) & int(b),
-        "or": lambda a, b: int(a) | int(b),
-        "xor": lambda a, b: int(a) ^ int(b),
+        "and": lambda a, b: float(int(a) & int(b)),
+        "or": lambda a, b: float(int(a) | int(b)),
+        "xor": lambda a, b: float(int(a) ^ int(b)),
         "sqrt": lambda a, _b: math.sqrt(a) if a >= 0 else float("nan"),
         "exp": lambda a, _b: math.exp(a),
         "div": _safe_div,
-        "shl": lambda a, b: int(a) << int(b),
-        "shr": lambda a, b: int(a) >> int(b),
+        "shl": lambda a, b: float(int(a) << int(b)),
+        "shr": lambda a, b: float(int(a) >> int(b)),
     }
 
 
@@ -161,7 +153,7 @@ class GlobalReductionUnit:
         if out_mode not in self.SUPPORTED_OUT_MODES:
             raise ValueError("unsupported reduction out_mode: %s" % out_mode)
         if seed_vector is None:
-            seed = [0] * self.vector_len
+            seed = [0.0] * self.vector_len
         else:
             seed = list(seed_vector)
             if len(seed) != self.vector_len:
@@ -220,7 +212,7 @@ class ResultCollector(Clocked):
             "reduce": reduce,
             "reduce_op": reduce_op,
             "reduce_out_mode": reduce_out_mode,
-            "vector": (seed_vector[:] if seed_vector is not None else [0] * self.vector_len),
+            "vector": (seed_vector[:] if seed_vector is not None else [0.0] * self.vector_len),
             "lane_done": [False] * self.lane_count,
             "lane_pending": [0] * self.lane_count,
             "reduce_accum": [0.0] * self.lane_count,
@@ -489,7 +481,7 @@ class VectorDatapath(Clocked):
         self,
         veggie_size: int,
         lane_count: int = 1,
-        dtype: DType = BF16,
+        dtype: Optional[object] = None,
         issue_width: int = 1,
         fu_latencies: Optional[Dict[str, int]] = None,
     ):
@@ -500,12 +492,12 @@ class VectorDatapath(Clocked):
             raise ValueError("lane_count must be > 0")
         if issue_width <= 0:
             raise ValueError("issue_width must be > 0")
-        if veggie_size % dtype.eew_bits != 0:
-            raise ValueError("veggie_size must be divisible by dtype EEW")
+        if veggie_size % FLOAT_SLOT_BITS != 0:
+            raise ValueError("veggie_size must be divisible by %d" % FLOAT_SLOT_BITS)
 
         self.veggie_size = veggie_size
         self.dtype = dtype
-        self.vector_len = veggie_size // dtype.eew_bits
+        self.vector_len = veggie_size // FLOAT_SLOT_BITS
         self.lane_count = min(lane_count, self.vector_len)
         self.issue_width = issue_width
         self.next_inst_id = 0
@@ -529,8 +521,8 @@ class VectorDatapath(Clocked):
 
     def _mk_src1(self, src0: Sequence[float], src1: Optional[Sequence[float]]) -> Sequence[float]:
         if src1 is None:
-            return [0] * len(src0)
-        return src1
+            return [0.0] * len(src0)
+        return [float(x) for x in src1]
 
     def enqueue(
         self,
@@ -545,7 +537,8 @@ class VectorDatapath(Clocked):
     ) -> int:
         if len(src0) != self.vector_len:
             raise ValueError("src0 length mismatch")
-        src1_full = self._mk_src1(src0, src1)
+        src0_full = [float(x) for x in src0]
+        src1_full = self._mk_src1(src0_full, src1)
         if len(src1_full) != self.vector_len:
             raise ValueError("src1 length mismatch")
         mask_full = list(mask) if mask is not None else [True] * self.vector_len
@@ -564,7 +557,7 @@ class VectorDatapath(Clocked):
         if not self.pending_issue.enqueue(
             {
                 "inst_id": inst_id,
-                "src0": list(src0),
+                "src0": src0_full,
                 "src1": list(src1_full),
                 "mask": mask_full,
                 "op": op,

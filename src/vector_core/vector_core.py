@@ -2,7 +2,7 @@ from base.clocked_object import Clocked
 from base.queue import SimQueue
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
-from vector_core.vector_lanes import BF16, DType, VectorDatapath
+from vector_core.vector_lanes import VectorDatapath
 from vector_core.vector_load_store import VLSU
 from vector_core.veggie_file import Veggie
 
@@ -74,7 +74,7 @@ class VectorCore(Clocked):
         self,
         veggie_size: int,
         lane_count: int = 1,
-        dtype: DType = BF16,
+        dtype: Optional[object] = None,
         issue_width: int = 1,
         vls_count: int = 2,
         wb_depth: int = 128,
@@ -125,7 +125,7 @@ class VectorCore(Clocked):
         return bank, addr
 
     def _normalize_vector(self, data: Sequence[float]) -> List[float]:
-        vec = list(data)
+        vec = [float(x) for x in data]
         if len(vec) != self.vector_len:
             raise ValueError(
                 "vector length mismatch: expected %d, got %d"
@@ -138,13 +138,13 @@ class VectorCore(Clocked):
         raw = self.veggie.data_banks[bank][addr]
         if isinstance(raw, list):
             if len(raw) == self.vector_len:
-                return raw[:]
+                return [float(x) for x in raw]
             if len(raw) == 0:
-                return [0] * self.vector_len
+                return [0.0] * self.vector_len
             if len(raw) < self.vector_len:
-                return raw[:] + ([0] * (self.vector_len - len(raw)))
-            return raw[: self.vector_len]
-        return [raw] * self.vector_len
+                return [float(x) for x in raw] + ([0.0] * (self.vector_len - len(raw)))
+            return [float(x) for x in raw[: self.vector_len]]
+        return [float(raw)] * self.vector_len
 
     def write_vreg(self, reg: int, data: Sequence[float]) -> None:
         bank, addr = self._reg_to_bank_addr(reg)
@@ -200,7 +200,7 @@ class VectorCore(Clocked):
     def _resolve_operand(self, value, default_zero: bool = False) -> List[float]:
         if value is None:
             if default_zero:
-                return [0] * self.vector_len
+                return [0.0] * self.vector_len
             raise ValueError("missing required operand")
         if isinstance(value, int):
             return self.read_vreg(value)

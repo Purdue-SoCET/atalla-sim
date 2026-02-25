@@ -5,7 +5,7 @@ Time = float
 
 class VBank:
     def __init__(self, rows, width):
-        self.mem = [[0]*width for _ in range(rows)]
+        self.mem = [[0.0] * width for _ in range(rows)]
 
     def read(self, addr):
         return self.mem[addr]
@@ -23,8 +23,8 @@ class Veggie(Clocked):
         self.mask_banks = mask_banks
 
         # register storage
-        self.data_banks = [[0] * regs_per_bank for _ in range(bank_count)]
-        self.mask_banks_data = [[0] * regs_per_bank for _ in range(mask_banks)]
+        self.data_banks = [[0.0] * regs_per_bank for _ in range(bank_count)]
+        self.mask_banks_data = [[0.0] * regs_per_bank for _ in range(mask_banks)]
 
         # connection endpoints
         self.inp = None
