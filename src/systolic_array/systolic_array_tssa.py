@@ -44,16 +44,16 @@ class PE:
         raise ValueError("stream must be one of: activation, weight, accumulation")
 
 
-class SystolicArray(Clocked):
+class SystolicArrayTSSA(Clocked):
     def __init__(self, size: int, boundary_buffer_depth: int = 32, dtype: Optional[object] = None):
         super().__init__()
         self.size = int(size)
         self.dtype = dtype
-        self.buffer: List[List[float]] = []
+        self.psum_output_fifo_bottom: List[List[float]] = []
         self.array: List[List[PE]] = self._setup_array()
-        self._act_boundary: List[SimQueue[float]] = [SimQueue(boundary_buffer_depth) for _ in range(self.size)]
+        self._input_fifo_left: List[SimQueue[float]] = [SimQueue(boundary_buffer_depth) for _ in range(self.size)]
         self._weight_boundary: List[SimQueue[float]] = [SimQueue(boundary_buffer_depth) for _ in range(self.size)]
-        self._psum_boundary: List[SimQueue[float]] = [SimQueue(boundary_buffer_depth) for _ in range(self.size)]
+        self._psum_input_fifo_top: List[SimQueue[float]] = [SimQueue(boundary_buffer_depth) for _ in range(self.size)]
 
         # Top-level controls (driven by GSAU/controller in the full design).
         self.weight_en: bool = False
@@ -67,15 +67,15 @@ class SystolicArray(Clocked):
         self._start_pipe_1: bool = False
 
     def enqueue(self, activations: List[float]) -> bool:
-        """Enqueue one activation vector for left-boundary streaming (one value per row)."""
+        """Enqueue one activation vector into input FIFO (left boundary), one value per row."""
         if len(activations) != self.size:
             raise ValueError("activations must match systolic array size")
 
-        if any(q.is_full() for q in self._act_boundary):
+        if any(q.is_full() for q in self._input_fifo_left):
             return False
 
         for i in range(self.size):
-            self._act_boundary[i].enqueue(float(activations[i]))
+            self._input_fifo_left[i].enqueue(float(activations[i]))
         return True
 
     def enqueue_weights(self, weights: List[float]) -> bool:
@@ -89,13 +89,13 @@ class SystolicArray(Clocked):
         return True
 
     def enqueue_psums(self, psums: List[float]) -> bool:
-        """Optional top-boundary psum injection (one value per column)."""
+        """Optional psum input FIFO injection (top boundary), one value per column."""
         if len(psums) != self.size:
             raise ValueError("psums must match systolic array size")
-        if any(q.is_full() for q in self._psum_boundary):
+        if any(q.is_full() for q in self._psum_input_fifo_top):
             return False
         for j in range(self.size):
-            self._psum_boundary[j].enqueue(float(psums[j]))
+            self._psum_input_fifo_top[j].enqueue(float(psums[j]))
         return True
 
     def set_control(
@@ -154,7 +154,7 @@ class SystolicArray(Clocked):
                     pass_bus = prev_weight
         elif self.mac_shift:
             for i in range(self.size):
-                in_val = self._act_boundary[i].dequeue()
+                in_val = self._input_fifo_left[i].dequeue()
                 pass_bus = float(in_val) if in_val is not None else 0.0
                 for j in range(self.size):
                     prev_act = old_act[i][j]
@@ -164,7 +164,7 @@ class SystolicArray(Clocked):
         # Stage 2: add registered product with vertical psum input.
         for i in range(self.size):
             for j in range(self.size):
-                top_boundary = self._psum_boundary[j].dequeue() if i == 0 else None
+                top_boundary = self._psum_input_fifo_top[j].dequeue() if i == 0 else None
                 psum_in = float(top_boundary) if top_boundary is not None else (0.0 if i == 0 else old_acc[i - 1][j])
                 self.array[i][j].accumulation = float(old_mul[i][j] + psum_in)
 
@@ -183,11 +183,11 @@ class SystolicArray(Clocked):
 
         if self.value_ready:
             bottom_row = [self.array[self.size - 1][j].accumulation for j in range(self.size)]
-            self.buffer.append(bottom_row)
+            self.psum_output_fifo_bottom.append(bottom_row)
 
     def get_buffer(self) -> List[List[float]]:
-        return self.buffer
+        return self.psum_output_fifo_bottom
 
     def boundary_levels(self) -> List[int]:
-        """Current fill level of each boundary activation FIFO."""
-        return [len(q) for q in self._act_boundary]
+        """Current fill level of each input FIFO (left boundary)."""
+        return [len(q) for q in self._input_fifo_left]

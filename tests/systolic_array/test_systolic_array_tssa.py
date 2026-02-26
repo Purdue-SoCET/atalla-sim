@@ -8,7 +8,7 @@ from base.clocked_object import Clocked
 from base.core import Core
 from base.eventq import EventQueue
 from base.sim import Sim
-from systolic_array.systolic_array import SystolicArray
+from systolic_array.systolic_array_tssa import SystolicArrayTSSA
 
 
 def build_sim():
@@ -22,7 +22,7 @@ def build_sim():
 
 
 class WeightPreloadHarness(Clocked):
-    def __init__(self, sa: SystolicArray):
+    def __init__(self, sa: SystolicArrayTSSA):
         super().__init__()
         self.sa = sa
 
@@ -43,7 +43,7 @@ class WeightPreloadHarness(Clocked):
 
 
 class ReadyLatencyHarness(Clocked):
-    def __init__(self, sa: SystolicArray):
+    def __init__(self, sa: SystolicArrayTSSA):
         super().__init__()
         self.sa = sa
         self.ready_trace = []
@@ -60,7 +60,7 @@ class ReadyLatencyHarness(Clocked):
 
 
 class StallHarness(Clocked):
-    def __init__(self, sa: SystolicArray):
+    def __init__(self, sa: SystolicArrayTSSA):
         super().__init__()
         self.sa = sa
         self.snapshot = {}
@@ -91,7 +91,7 @@ class StallHarness(Clocked):
 
 def test_systolic_array_weight_preload_shifts_right():
     eq, clk, sim = build_sim()
-    sa = SystolicArray(size=3)
+    sa = SystolicArrayTSSA(size=3)
     driver = WeightPreloadHarness(sa)
     clk.add_clocked(driver)
     clk.add_clocked(sa)
@@ -101,7 +101,7 @@ def test_systolic_array_weight_preload_shifts_right():
 
 def test_systolic_array_start_to_value_ready_latency():
     eq, clk, sim = build_sim()
-    sa = SystolicArray(size=1)
+    sa = SystolicArrayTSSA(size=1)
     driver = ReadyLatencyHarness(sa)
     clk.add_clocked(driver)
     clk.add_clocked(sa)
@@ -115,7 +115,7 @@ def test_systolic_array_start_to_value_ready_latency():
 
 def test_systolic_array_stall_freezes_and_resumes():
     eq, clk, sim = build_sim()
-    sa = SystolicArray(size=1)
+    sa = SystolicArrayTSSA(size=1)
     driver = StallHarness(sa)
     clk.add_clocked(driver)
     clk.add_clocked(sa)

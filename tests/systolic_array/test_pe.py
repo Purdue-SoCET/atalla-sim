@@ -8,7 +8,7 @@ from base.clocked_object import Clocked
 from base.core import Core
 from base.eventq import EventQueue
 from base.sim import Sim
-from systolic_array.systolic_array import PE
+from systolic_array.systolic_array_tssa import PE
 
 
 def build_sim():

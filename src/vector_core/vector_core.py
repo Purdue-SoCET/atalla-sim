@@ -145,7 +145,7 @@ class VectorCore(Clocked):
 
     def __init__(
         self,
-        veggie_size: int,
+        veggie_size: int, # width of one vector register value (used to determine vector_len = veggie_size / FLOAT_SLOT_BITS)
         lane_count: int = 1,
         dtype: Optional[object] = None,
         issue_width: int = 1,
@@ -173,7 +173,7 @@ class VectorCore(Clocked):
             bank_count=veggie_bank_count,
             regs_per_bank=veggie_regs_per_bank,
         )
-        self.max_vregs = self.veggie.bank_count * self.veggie.regs_per_bank
+        self.max_vregs = self.veggie.bank_count * self.veggie.regs_per_bank # number of vregs available
 
         self.wb_buffer = WBBuffer(depth=wb_depth)
         self.gsau = GSAU(max_vregs=self.max_vregs)
