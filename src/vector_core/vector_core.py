@@ -37,24 +37,98 @@ class WBBuffer(Clocked):
         return len(self.entries)
 
 
-class GSAUStub(Clocked):
+class GSAU(Clocked):
     """
-    Placeholder Global Systolic Array Unit interface.
-    TODO: Will update it to a new class on a new file after I implement Systolic Array
+    Global Systolic Array Unit control block.
+
+    Responsibilities:
+    - Accept scheduler-issued vectors and stream them to systolic-array control.
+    - Track destination register indices in-order via rd FIFO.
+    - Pair returning systolic vectors with rd queue and emit WB packets.
     """
 
-    def __init__(self, queue_depth: int = 64):
+    def __init__(
+        self,
+        max_vregs: int = 256,
+        instruction_latency_mac: int = 64,
+        clocks_per_mac_cycle: int = 3,
+        req_depth: int = 256,
+        rsp_depth: int = 256,
+    ):
         super().__init__()
-        self.pending = SimQueue(max(1, queue_depth))
+        self.max_vregs = max(1, int(max_vregs))
+        self.instruction_latency_mac = max(1, int(instruction_latency_mac))
+        self.clocks_per_mac_cycle = max(1, int(clocks_per_mac_cycle))
+        # Formula-driven destination queue depth in entries.
+        self.rd_queue_depth = max(1, self.instruction_latency_mac * self.clocks_per_mac_cycle)
+
+        self.to_systolic = SimQueue(max(1, int(req_depth)))
+        self.from_systolic = SimQueue(max(1, int(rsp_depth)))
+        self.rd_queue = SimQueue(self.rd_queue_depth)
+        self.writebacks = SimQueue(max(1, int(rsp_depth)))
 
     def issue(self, cmd: Dict) -> bool:
-        return self.pending.enqueue(dict(cmd))
+        entry = dict(cmd)
+        expects_output = bool(entry.get("expect_output", not bool(entry.get("is_weight", False))))
+        if self.to_systolic.is_full():
+            return False
+        if expects_output:
+            dst = entry.get("dst")
+            if dst is None:
+                raise ValueError("gsau command missing dst for expected output")
+            if self.rd_queue.is_full():
+                return False
+            if not self.rd_queue.enqueue({"dst": int(dst), "meta": dict(entry.get("meta", {}))}):
+                return False
 
-    def pop_pending(self) -> Optional[Dict]:
-        return self.pending.dequeue()
+        return self.to_systolic.enqueue(
+            {
+                "vdata": list(entry["vdata"]),
+                "is_weight": bool(entry.get("is_weight", False)),
+                "meta": dict(entry.get("meta", {})),
+                "expect_output": expects_output,
+            }
+        )
+
+    def pop_systolic_request(self) -> Optional[Dict]:
+        return self.to_systolic.dequeue()
+
+    def push_systolic_response(self, rsp: Dict) -> bool:
+        packet = dict(rsp)
+        if "vdata" not in packet and "data" in packet:
+            packet["vdata"] = packet["data"]
+        if "vdata" not in packet:
+            raise ValueError("gsau response missing vdata")
+        packet["vdata"] = list(packet["vdata"])
+        return self.from_systolic.enqueue(packet)
+
+    def can_pop_writeback(self) -> bool:
+        return not self.writebacks.is_empty()
+
+    def pop_writeback(self) -> Optional[Dict]:
+        return self.writebacks.dequeue()
 
     def has_pending(self) -> bool:
-        return not self.pending.is_empty()
+        return (not self.to_systolic.is_empty()) or (not self.from_systolic.is_empty())
+
+    def tick(self) -> None:
+        while (not self.from_systolic.is_empty()) and (not self.rd_queue.is_empty()) and (not self.writebacks.is_full()):
+            rsp = self.from_systolic.dequeue()
+            rd = self.rd_queue.dequeue()
+            if rsp is None or rd is None:
+                break
+            self.writebacks.enqueue(
+                {
+                    "dst": int(rd["dst"]),
+                    "data": list(rsp["vdata"]),
+                    "mask": rsp.get("mask"),
+                    "meta": {
+                        "rdq_depth": self.rd_queue_depth,
+                        "rdq_entry": rd.get("meta", {}),
+                        "rsp_meta": rsp.get("meta", {}),
+                    },
+                }
+            )
 
 
 class VectorCore(Clocked):
@@ -65,9 +139,8 @@ class VectorCore(Clocked):
     - VectorDatapath (compute operations)
     - Veggie (vector register file storage backing)
     - VLSU(s) (scratchpad load/store path)
+    - GSAU (systolic-array ingress/egress + rd queue tracking)
     - WBBuffer (common result sink before VRF write)
-
-    TODO: GSAU is intentionally left as a stub and can be replaced later.
     """
 
     def __init__(
@@ -103,7 +176,7 @@ class VectorCore(Clocked):
         self.max_vregs = self.veggie.bank_count * self.veggie.regs_per_bank
 
         self.wb_buffer = WBBuffer(depth=wb_depth)
-        self.gsau = GSAUStub() # TODO
+        self.gsau = GSAU(max_vregs=self.max_vregs)
         self.scheduler_q = SimQueue(max(1, scheduler_depth))
 
         self.vls_units = []
@@ -163,7 +236,7 @@ class VectorCore(Clocked):
         Supported instruction classes:
         - Compute: {"unit":"datapath", "op", "dst", "src0", "src1?", ...}
         - Memory:  {"unit":"vlsu", "kind":"load|store", "vls":0/1, ...}
-        - GSAU:    {"unit":"gsau", ...}  # TODO
+        - GSAU:    {"unit":"gsau", ...}
         """
         return self.scheduler_q.enqueue(dict(inst))
 
@@ -263,7 +336,37 @@ class VectorCore(Clocked):
     def _issue_gsau(self, inst: Dict) -> bool:
         cmd = dict(inst)
         cmd.pop("unit", None)
-        return self.gsau.issue(cmd)
+        src_spec = cmd.get("src", cmd.get("vs"))
+        vdata_spec = cmd.get("vdata")
+        if vdata_spec is None:
+            if src_spec is None:
+                raise ValueError("gsau instruction requires src or vdata")
+            if isinstance(src_spec, int):
+                vdata = self.read_vreg(src_spec)
+            else:
+                vdata = self._normalize_vector(src_spec)
+        else:
+            if isinstance(vdata_spec, int):
+                vdata = self.read_vreg(vdata_spec)
+            else:
+                vdata = self._normalize_vector(vdata_spec)
+
+        expects_output = bool(cmd.get("expect_output", not bool(cmd.get("is_weight", False))))
+        gsau_cmd = {
+            "vdata": vdata,
+            "is_weight": bool(cmd.get("is_weight", False)),
+            "expect_output": expects_output,
+            "meta": {
+                "kind": cmd.get("kind"),
+                "src": src_spec,
+            },
+        }
+        if expects_output:
+            dst = cmd.get("dst", cmd.get("vd"))
+            if dst is None:
+                raise ValueError("gsau instruction missing dst")
+            gsau_cmd["dst"] = int(dst)
+        return self.gsau.issue(gsau_cmd)
 
     def _try_issue_scheduler(self) -> None:
         inst = self.scheduler_q.peek()
@@ -316,6 +419,20 @@ class VectorCore(Clocked):
                     }
                 )
 
+        while self.gsau.can_pop_writeback() and self.wb_buffer.can_accept():
+            wb = self.gsau.pop_writeback()
+            if wb is None:
+                break
+            self.wb_buffer.enqueue(
+                {
+                    "source": "gsau",
+                    "dst": wb["dst"],
+                    "data": wb["data"],
+                    "mask": wb.get("mask"),
+                    "meta": wb.get("meta", {}),
+                }
+            )
+
     def _commit_one_writeback(self) -> None:
         self.wb_valid = False
         self.last_wb = None
@@ -348,6 +465,7 @@ class VectorCore(Clocked):
         self.datapath.tick()
         for vls in self.vls_units:
             vls.tick()
+        self.gsau.tick()
 
         # 3) Funnel unit outputs into shared writeback buffer.
         self._collect_results_to_wb()
@@ -369,6 +487,12 @@ class VectorCore(Clocked):
 
     def scheduler_backlog(self) -> int:
         return len(self.scheduler_q)
+
+    def pop_systolic_request(self) -> Optional[Dict]:
+        return self.gsau.pop_systolic_request()
+
+    def push_systolic_response(self, rsp: Dict) -> bool:
+        return self.gsau.push_systolic_response(rsp)
 
 
 VC = VectorCore
