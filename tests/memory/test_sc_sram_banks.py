@@ -5,7 +5,7 @@ from base.eventq import EventQueue
 from base.clock_domain import ClockDomain
 from base.core import Core
 from base.sim import Sim
-from scratchpad.sc_sram_banks import SRAMBanks
+from memory.sc_sram_banks import SRAMBanks
 
 def build_sim():
     eq = EventQueue()

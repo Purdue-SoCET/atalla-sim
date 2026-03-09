@@ -1,4 +1,5 @@
 from typing import Dict, Iterable, Optional, Tuple, Union
+from base.debug import dprintf
 
 
 class DRAM:
@@ -48,6 +49,7 @@ class DRAM:
             cur += step
             dst += step
             remaining -= step
+        dprintf("DRAM", f"read addr=0x{int(addr):x} len={int(length)}")
         return bytes(out)
 
     def write(self, addr: int, data: Union[bytes, bytearray, memoryview, Iterable[int]]) -> None:
@@ -67,6 +69,7 @@ class DRAM:
             cur += step
             src += step
             remaining -= step
+        dprintf("DRAM", f"write addr=0x{int(addr):x} len={len(blob)}")
 
     def clear(self) -> None:
         self._blocks.clear()

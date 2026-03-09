@@ -2,10 +2,10 @@ from typing import Callable, Optional, List, Any
 
 from base.clocked_object import Clocked
 
-from scratchpad.sc_sram_banks import SRAMBanks, _xor_bank
-from scratchpad.crossbar import Xbar
-from scratchpad import backend as backend_mod
-from scratchpad.frontend import Frontend
+from memory.sc_sram_banks import SRAMBanks, _xor_bank
+from memory.crossbar import Xbar
+from memory import backend
+from memory.frontend import Frontend
 
 class Scratchpad(Clocked):
     """
@@ -56,7 +56,7 @@ class Scratchpad(Clocked):
         ]
 
         # optional backend reference (set via attach_backend)
-        self.backend: Optional[backend_mod.Backend] = None
+        self.backend: Optional[backend.Backend] = None
 
         self.frontends = [
             Frontend(0, self, queue_size=frontend_queue_size),

@@ -6,7 +6,7 @@ from base.clock_domain import ClockDomain
 from base.core import Core
 from base.sim import Sim
 
-from scratchpad.crossbar import Xbar
+from memory.crossbar import Xbar
 
 def build_sim():
     eq = EventQueue()

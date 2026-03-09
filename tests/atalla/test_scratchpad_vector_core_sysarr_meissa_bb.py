@@ -8,8 +8,8 @@ from base.clock_domain import ClockDomain
 from base.core import Core
 from base.eventq import EventQueue
 from base.sim import Sim
-from scratchpad.sc_sram_banks import _xor_bank
-from scratchpad.scratchpad import Scratchpad
+from memory.sc_sram_banks import _xor_bank
+from memory.scratchpad import Scratchpad
 from systolic_array.systolic_array_meissa_blackbox import SystolicArrayMEISSABlackbox
 from vector_core.vector_core import VectorCore
 

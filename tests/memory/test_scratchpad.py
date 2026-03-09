@@ -6,9 +6,9 @@ from base.clock_domain import ClockDomain
 from base.core import Core
 from base.sim import Sim
 
-from scratchpad.sc_sram_banks import _xor_bank
-from scratchpad.scratchpad import Scratchpad
-from scratchpad.backend import Backend
+from memory.sc_sram_banks import _xor_bank
+from memory.scratchpad import Scratchpad
+from memory.backend import Backend
 
 def build_sim():
     eq = EventQueue()

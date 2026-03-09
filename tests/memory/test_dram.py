@@ -28,3 +28,7 @@ def test_sparse_dram_cross_block_write_and_overwrite():
 
     dram.write(7, b"\xAA\xBB\xCC")
     assert dram.read(6, 4) == b"\x01\xAA\xBB\xCC"
+
+if __name__ == "__main__":
+    test_sparse_dram_is_lazily_allocated_and_zero_initialized()
+    test_sparse_dram_cross_block_write_and_overwrite()

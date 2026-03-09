@@ -1,7 +1,7 @@
 from base.clocked_object import Clocked
+from base.debug import dprintf
 from base.queue import SimQueue
-from collections import deque
-from typing import Callable, Deque, Dict, List, Optional, Tuple, Any
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 class Xbar(Clocked):
     """
@@ -57,8 +57,10 @@ class Xbar(Clocked):
             # Queue is full, optionally call callback with False or handle overflow
             if callback:
                 callback(False)
+            dprintf("Xbar", f"enqueue dropped: queue full (op={self._op_counter})")
             return -1
         self.total_submitted += 1
+        dprintf("Xbar", f"enqueue op={self._op_counter} delay={self.delay}")
         return self._op_counter
 
     def tick(self) -> List[Tuple[int, List[Any]]]:
@@ -80,6 +82,7 @@ class Xbar(Clocked):
                 completed.append((entry["op"], out))
                 if entry["cb"]:
                     entry["cb"](out)
+                dprintf("Xbar", f"complete op={entry['op']}")
                 to_remove.append(idx)
 
         # Remove completed entries by index (reverse order to avoid shifting)
