@@ -23,11 +23,17 @@ def test_sysarr_tssa_system_end_to_end():
     wgt_stream = [[wgt[r][c] for r in range(size)] for c in range(size - 1, -1, -1)]
 
     system.load_inputs(act, wgt_stream)
-    got, mirror = system.run()
+    got, mirror, cycles, metrics = system.run()
 
     assert mirror is not None
     assert len(mirror) == size
     assert got == mirror
+
+    # Metrics from the test configuration.
+    print("cycles", cycles)
+    print("flops", metrics.flops)
+    print("bytes_moved", metrics.bytes_moved)
+    print("arithmetic_intensity", metrics.arithmetic_intensity())
 
 
 if __name__ == "__main__":

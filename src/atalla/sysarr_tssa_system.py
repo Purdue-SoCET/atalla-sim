@@ -57,6 +57,32 @@ def _fp16_bits(value: float) -> int:
     return int(np.asarray(value, dtype=np.float16).view(np.uint16).item())
 
 
+class TSSAMetrics:
+    def __init__(self, size: int):
+        self.size = int(size)
+        self.cycles = 0
+        self.bytes_moved = 0
+        self.flops = 0
+
+    def count_weight_load(self) -> None:
+        self.bytes_moved += self.size * 2
+
+    def count_act_load(self) -> None:
+        self.bytes_moved += self.size * 2
+
+    def count_store_row(self) -> None:
+        self.bytes_moved += self.size * 2
+
+    def count_output_row(self) -> None:
+        self.flops += 2 * self.size * self.size
+
+    def count_cycle(self) -> None:
+        self.cycles += 1
+
+    def arithmetic_intensity(self) -> float:
+        return (self.flops / self.bytes_moved) if self.bytes_moved else 0.0
+
+
 class VLSFrontendBridge:
     def __init__(self, vc: VectorCore, spad: Scratchpad, vls_id: int = 0, frontend_id: int = 0):
         self.vc = vc
@@ -273,6 +299,7 @@ class SysArrTSSASystem:
         self.mirror = TSSAReference(size=self.size, dtype=self.dtype) if mirror else None
         self.vls_bridge = VLSFrontendBridge(self.vc, self.spad, vls_id=0, frontend_id=0)
         self.sysarr_bridge = GSAUTSSABridge(self.vc, self.sa, mirror=self.mirror)
+        self.metrics = TSSAMetrics(size=self.size)
 
     def load_inputs(self, act: List[List[int]], wgt_stream: List[List[int]]) -> None:
         row_bytes = self.size * 2
@@ -291,7 +318,7 @@ class SysArrTSSASystem:
                 bank = _xor_bank(slot, lane, self.spad.num_banks)
                 self.spad.tiles[0].banks[bank].mem[slot] = int(value).to_bytes(2, "little", signed=False)
 
-    def run(self, max_cycles: int = 20000) -> Tuple[List[List[int]], Optional[List[List[int]]]]:
+    def run(self, max_cycles: int = 20000) -> Tuple[List[List[int]], Optional[List[List[int]]], int, "TSSAMetrics"]:
         row_bytes = self.size * 2
         observed_rows: List[Optional[List[int]]] = [None for _ in range(self.size)]
         state = {
@@ -352,6 +379,7 @@ class SysArrTSSASystem:
 
                 if src == "vlsu" and dst == self.W_REG and state["pending_weight_load"]:
                     state["pending_weight_load"] = False
+                    self.metrics.count_weight_load()
                     assert self.vc.enqueue_scheduler_instruction(
                         {
                             "unit": "gsau",
@@ -369,6 +397,7 @@ class SysArrTSSASystem:
 
                 elif src == "vlsu" and dst == self.A_REG and state["pending_act_load"]:
                     state["pending_act_load"] = False
+                    self.metrics.count_act_load()
                     assert self.vc.enqueue_scheduler_instruction(
                         {
                             "unit": "gsau",
@@ -386,6 +415,7 @@ class SysArrTSSASystem:
                 elif src == "gsau" and dst == self.OUT_REG:
                     row_idx = state["next_out_row"]
                     if row_idx < self.size:
+                        self.metrics.count_output_row()
                         if observed_rows[row_idx] is None:
                             observed_rows[row_idx] = [int(x) for x in list(wb.get("data", []))[: self.size]]
                         state["pending_output_rows"].append(
@@ -431,6 +461,7 @@ class SysArrTSSASystem:
                 state["store_age"] += 1
                 if spad_vec == (state["store_row_data"] or []):
                     self.dram.write(self.DRAM_OUT + row_idx * row_bytes, _encode_row_u16(spad_vec))
+                    self.metrics.count_store_row()
                     state["completed_rows"].add(row_idx)
                     state["store_inflight"] = False
                     state["store_row_idx"] = None
@@ -442,6 +473,7 @@ class SysArrTSSASystem:
                     raise AssertionError("store did not commit to scratchpad")
 
             state["cycles"] += 1
+            self.metrics.count_cycle()
             if len(state["completed_rows"]) >= self.size:
                 return
             if state["cycles"] >= max_cycles:
@@ -460,4 +492,4 @@ class SysArrTSSASystem:
             blob = self.dram.read(self.DRAM_OUT + r * row_bytes, row_bytes)
             out.append(_decode_row_u16(blob, self.size))
         mirror_out = self.mirror.outputs if self.mirror is not None else None
-        return out, mirror_out
+        return out, mirror_out, state["cycles"], self.metrics

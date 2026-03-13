@@ -17,6 +17,7 @@ from memory.sc_sram_banks import _xor_bank
 from memory.scratchpad import Scratchpad
 from systolic_array.systolic_array_tssa import SystolicArrayTSSA
 from vector_core.vector_core import VectorCore
+from atalla.sysarr_tssa_system import TSSAMetrics
 
 
 def build_sim():
@@ -222,12 +223,15 @@ class VLSFrontendBridge:
         self.frontend_id = int(frontend_id)
         self._next_load_id = 0
         self._completed_load_ids = set()
+        self.bytes_load = 0
+        self.bytes_store = 0
 
     def _on_frontend_read(self, load_id: int, addr: int, lanes) -> None:
         if load_id in self._completed_load_ids:
             return
         self._completed_load_ids.add(load_id)
         data = _decode_lanes_u16(lanes, self.vc.vector_len)
+        self.bytes_load += len(data) * 2
         nz = [i for i, v in enumerate(data) if v != 0]
         if load_id < 2:
             dprintf(
@@ -246,6 +250,7 @@ class VLSFrontendBridge:
             addr = int(req.get("addr", 0))
             if req["kind"] == "store":
                 dprintf("SYSARR", f"vls_req store addr={addr} len={len(req.get('data', []))}")
+                self.bytes_store += len(req.get("data", [])) * 2
                 assert self.spad.frontend_write(
                     addr,
                     _encode_vector_u16(req["data"]),
@@ -508,6 +513,7 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
             "completed_rows": set(),
             "weights_done": False,
         }
+        metrics = TSSAMetrics(size=tile)
         observed_rows = [None for _ in range(tile)]
 
         def _issue_weight_load():
@@ -556,6 +562,7 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
                     state["pending_weight_load"] = False
                     dprintf("SYSARR", f"weight load done row={state['weight_row']} len={len(wb.get('data', []))}")
                     wdata = list(wb.get("data", []))
+                    metrics.count_weight_load()
                     nz = [i for i, v in enumerate(wdata) if v != 0]
                     if state["weight_row"] < 2:
                         dprintf(
@@ -582,6 +589,7 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
                     state["pending_act_load"] = False
                     dprintf("SYSARR", f"act load done row={state['act_row']} len={len(wb.get('data', []))}")
                     adata = list(wb.get("data", []))
+                    metrics.count_act_load()
                     nz = [i for i, v in enumerate(adata) if v != 0]
                     if state["act_row"] < 2:
                         dprintf(
@@ -608,6 +616,7 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
                         dprintf("SYSARR", f"gsau output row={row_idx} len={len(wb.get('data', []))}")
                         if observed_rows[row_idx] is None:
                             observed_rows[row_idx] = [int(x) for x in list(wb.get("data", []))[:tile]]
+                        metrics.count_output_row()
                         state["pending_output_rows"].append(
                             {
                                 "row": row_idx,
@@ -662,6 +671,7 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
                 if spad_vec == (state["store_row_data"] or []):
                     dprintf("SYSARR", f"store complete row={row_idx}")
                     dram.write(DRAM_OUT + row_idx * row_bytes, _encode_row_u16(spad_vec))
+                    metrics.count_store_row()
                     state["completed_rows"].add(row_idx)
                     state["store_inflight"] = False
                     state["store_row_idx"] = None
@@ -676,6 +686,7 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
                     )
                     raise AssertionError("store did not commit to scratchpad")
 
+            metrics.count_cycle()
             state["cycles"] += 1
             if state["cycles"] % 500 == 0:
                 dprintf(
@@ -813,6 +824,30 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
             dprintf("SYSARR", f"act[-1][:8]={act[-1][:8]}")
         expected = expected_cycle
         assert got == expected
+        bytes_tx = vls_bridge.bytes_load + vls_bridge.bytes_store
+        pe_mul = sum(pe.mul_ops for row in sa.array for pe in row)
+        pe_add = sum(pe.add_ops for row in sa.array for pe in row)
+        pe_mac = sum(pe.mac_ops for row in sa.array for pe in row)
+        pe_psum_add = sum(pe.psum_adds for row in sa.array for pe in row)
+        vec_total_ops = sum(lane.total_ops for lane in vc.datapath.lanes)
+        vec_op_counts = {}
+        for lane in vc.datapath.lanes:
+            for op, cnt in lane.op_counts.items():
+                vec_op_counts[op] = vec_op_counts.get(op, 0) + cnt
+        vec_reduce_ops = vc.datapath.collector.reduction_unit.reduce_ops
+        flops = (pe_mul + pe_add + vec_total_ops + vec_reduce_ops)
+        arithmetic_intensity = (flops / bytes_tx) if bytes_tx else 0.0
+        print("cycles", state["cycles"])
+        print("pe_mul_ops", pe_mul)
+        print("pe_add_ops", pe_add)
+        print("pe_mac_ops", pe_mac)
+        print("pe_psum_adds", pe_psum_add)
+        print("vec_total_ops", vec_total_ops)
+        print("vec_op_counts", vec_op_counts)
+        print("vec_reduce_ops", vec_reduce_ops)
+        print("flops", flops)
+        print("bytes_transmitted", bytes_tx)
+        print("arithmetic_intensity", arithmetic_intensity)
     finally:
         close_debug()
 

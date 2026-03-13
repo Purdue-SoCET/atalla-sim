@@ -19,6 +19,10 @@ class PE:
         self.weight: float = 0.0
         self.accumulation: float = 0.0
         self.mul_reg: float = 0.0
+        self.mul_ops: int = 0
+        self.add_ops: int = 0
+        self.psum_adds: int = 0
+        self.mac_ops: int = 0
 
     def _input(self, activation: float) -> None:
         self.activation_latch = float(activation)
@@ -28,6 +32,15 @@ class PE:
 
     def _accumulation(self, accumulation: float) -> None:
         self.accumulation = float(accumulation)
+
+    def count_mul(self) -> None:
+        self.mul_ops += 1
+        self.mac_ops += 1
+
+    def count_add(self, is_psum: bool = False) -> None:
+        self.add_ops += 1
+        if is_psum:
+            self.psum_adds += 1
 
     def shift(self, shift_direction: int, stream: str = "activation") -> None:
         neighbor = self.links[shift_direction]
@@ -52,6 +65,12 @@ class SystolicArrayTSSA(Clocked):
         self.size = int(size)
         self.dtype = normalize_dtype(dtype, default=None)
         self._current_dtype: Optional[DType] = None
+        self.metrics = {
+            "mul_ops": 0,
+            "add_ops": 0,
+            "psum_adds": 0,
+            "mac_ops": 0,
+        }
         self.psum_output_fifo_bottom: List[List[float]] = []
         self.array: List[List[PE]] = self._setup_array()
         self._input_fifo_left: List[SimQueue[float]] = [SimQueue(boundary_buffer_depth) for _ in range(self.size)]
@@ -184,6 +203,10 @@ class SystolicArrayTSSA(Clocked):
                 top_boundary = self._psum_input_fifo_top[j].dequeue() if i == 0 else None
                 psum_in = float(top_boundary) if top_boundary is not None else (0.0 if i == 0 else old_acc[i - 1][j])
                 acc = old_mul[i][j] + psum_in
+                self.array[i][j].count_add(is_psum=(i == 0))
+                self.metrics["add_ops"] += 1
+                if i == 0:
+                    self.metrics["psum_adds"] += 1
                 if self._current_dtype is not None:
                     acc = cast_scalar(acc, self._current_dtype)
                 self.array[i][j].accumulation = float(acc)
@@ -193,6 +216,9 @@ class SystolicArrayTSSA(Clocked):
             for j in range(self.size):
                 if self.start:
                     prod = self.array[i][j].activation_latch * self.array[i][j].weight
+                    self.array[i][j].count_mul()
+                    self.metrics["mul_ops"] += 1
+                    self.metrics["mac_ops"] += 1
                     if self._current_dtype is not None:
                         prod = cast_scalar(prod, self._current_dtype)
                     self.array[i][j].mul_reg = float(prod)

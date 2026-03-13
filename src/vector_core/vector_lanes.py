@@ -120,6 +120,7 @@ class GlobalReductionUnit:
             raise ValueError("vector_len must be > 0")
         self.vector_len = vector_len
         self.tree_alus = max(1, vector_len // 2)
+        self.reduce_ops = 0
 
     def _reduce_pair(self, op: str, a: float, b: float) -> float:
         if op == "sum":
@@ -142,6 +143,7 @@ class GlobalReductionUnit:
             i = 0
             while i + 1 < len(level):
                 next_level.append(self._reduce_pair(op, level[i], level[i + 1]))
+                self.reduce_ops += 1
                 i += 2
             if i < len(level):
                 next_level.append(level[i])
@@ -382,6 +384,8 @@ class VectorLane(Clocked):
         self.fu_ctx = {}
         self.meta_fifo = {}
         self.pending_outputs = SimQueue(2048)
+        self.op_counts = {op: 0 for op in self.ops}
+        self.total_ops = 0
         for fu in self.fu_latencies:
             self.fu_ctx[fu] = None
             self.meta_fifo[fu] = SimQueue(fu_capacity)
@@ -424,6 +428,8 @@ class VectorLane(Clocked):
                 value = cast_scalar(value, ctx.dtype)
                 pushed = self.fus[fu_name].push({"value": value})
                 if pushed:
+                    self.op_counts[ctx.op] += 1
+                    self.total_ops += 1
                     self.meta_fifo[fu_name].enqueue(
                         {
                             "inst_id": ctx.inst_id,
