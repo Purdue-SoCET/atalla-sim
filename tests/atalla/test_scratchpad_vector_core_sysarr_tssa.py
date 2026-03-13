@@ -134,6 +134,10 @@ def _fp16_bits(value: float) -> int:
     return int(np.asarray(value, dtype=np.float16).view(np.uint16).item())
 
 
+def _fp16_from_u16(value: int) -> float:
+    return float(np.frombuffer(np.uint16(int(value)).tobytes(), dtype=np.float16)[0])
+
+
 def _tssa_reference_output(
     act_rows: List[List[int]],
     weight_stream: List[List[int]],
@@ -264,12 +268,67 @@ class VLSFrontendBridge:
             raise ValueError("unsupported request kind: %s" % req["kind"])
 
 
+class TSSAReference:
+    def __init__(self, size: int, dtype: str = "fp16"):
+        self.sa = SystolicArrayTSSA(size=size, dtype=dtype)
+        self.size = size
+        self.dtype = dtype
+        self._pending = 0
+        self._out_read_idx = 0
+        self._warmup = max(0, size - 1)
+        self._flush_pending = 0
+        self._zero_row = [0.0] * size
+        self.outputs: List[List[int]] = []
+
+    def tick_from_bridge(
+        self,
+        *,
+        did_req: bool,
+        row: List[float],
+        is_weight: bool,
+        expect_output: bool,
+        did_flush: bool,
+    ) -> None:
+        self.sa.set_control(weight_en=False, mac_shift=False, start=False, stall=False)
+        if did_req:
+            if is_weight:
+                assert self.sa.enqueue_weights(row, dtype=self.dtype)
+                self.sa.set_control(weight_en=True, mac_shift=False, start=False, stall=False)
+            else:
+                assert self.sa.enqueue(row, dtype=self.dtype)
+                assert self.sa.enqueue_psums([0.0] * self.size, dtype=self.dtype)
+                self.sa.set_control(weight_en=False, mac_shift=True, start=True, stall=False)
+                if expect_output:
+                    self._pending += 1
+                self._flush_pending = self.size - 1
+        elif did_flush and self._flush_pending > 0:
+            if self.sa.enqueue(self._zero_row, dtype=self.dtype):
+                assert self.sa.enqueue_psums([0.0] * self.size, dtype=self.dtype)
+                self.sa.set_control(weight_en=False, mac_shift=True, start=True, stall=False)
+                self._flush_pending -= 1
+
+        self.sa.tick()
+
+        buf = self.sa.get_buffer()
+        while self._out_read_idx < len(buf):
+            if self._out_read_idx < self._warmup:
+                self._out_read_idx += 1
+                continue
+            if self._pending <= 0:
+                break
+            out_row = [float(x) for x in buf[self._out_read_idx]]
+            self.outputs.append([_fp16_bits(x) for x in out_row[: self.size]])
+            self._pending -= 1
+            self._out_read_idx += 1
+
+
 class GSAUTSSABridge:
     """Consumes VectorCore GSAU requests, drives TSSA model, returns responses."""
 
-    def __init__(self, vc: VectorCore, sa: SystolicArrayTSSA):
+    def __init__(self, vc: VectorCore, sa: SystolicArrayTSSA, mirror: TSSAReference = None):
         self.vc = vc
         self.sa = sa
+        self.mirror = mirror
         self.size = sa.size
         self._pending_meta: List[Dict] = []
         self._out_read_idx = 0
@@ -283,7 +342,7 @@ class GSAUTSSABridge:
     def _pack_rsp(self, out_row: List[float], meta: Dict) -> Dict:
         vec = [0.0] * self.vc.vector_len
         for i, val in enumerate(out_row[: self.size]):
-            vec[i] = float(val)
+            vec[i] = _fp16_bits(val)
         return {"vdata": vec, "meta": dict(meta), "dtype": meta.get("dtype")}
 
     def tick(self) -> None:
@@ -291,6 +350,11 @@ class GSAUTSSABridge:
         self.sa.set_control(weight_en=False, mac_shift=False, start=False, stall=False)
 
         req = self.vc.pop_systolic_request()
+        did_req = False
+        did_flush = False
+        row = self._zero_row
+        is_weight = False
+        expect_output = False
         if req is not None:
             vdata = [float(x) for x in req.get("vdata", [])]
             row = vdata[: self.size]
@@ -298,26 +362,40 @@ class GSAUTSSABridge:
                 row += [0.0] * (self.size - len(row))
 
             if bool(req.get("is_weight", False)):
+                did_req = True
+                is_weight = True
                 assert self.sa.enqueue_weights(row, dtype=req.get("dtype"))
                 self.sa.set_control(weight_en=True, mac_shift=False, start=False, stall=False)
                 if self._debug_weight_count < 2:
                     dprintf("SYSARR", f"ref weight enqueue head={row[:8]}")
                     self._debug_weight_count += 1
             else:
+                did_req = True
+                expect_output = bool(req.get("expect_output", True))
                 assert self.sa.enqueue(row, dtype=req.get("dtype"))
                 assert self.sa.enqueue_psums([0.0] * self.size, dtype=req.get("dtype"))
                 self.sa.set_control(weight_en=False, mac_shift=True, start=True, stall=False)
                 if self._debug_act_count < 2:
                     dprintf("SYSARR", f"ref act enqueue head={row[:8]}")
                     self._debug_act_count += 1
-                if bool(req.get("expect_output", True)):
+                if expect_output:
                     self._pending_meta.append(dict(req.get("meta", {})))
                 self._flush_pending = self.size - 1
         elif self._flush_pending > 0:
             if self.sa.enqueue(self._zero_row, dtype=self.sa.dtype):
+                did_flush = True
                 assert self.sa.enqueue_psums([0.0] * self.size, dtype=self.sa.dtype)
                 self.sa.set_control(weight_en=False, mac_shift=True, start=True, stall=False)
                 self._flush_pending -= 1
+
+        if self.mirror is not None:
+            self.mirror.tick_from_bridge(
+                did_req=did_req,
+                row=row,
+                is_weight=is_weight,
+                expect_output=expect_output,
+                did_flush=did_flush,
+            )
 
         self.sa.tick()
 
@@ -359,7 +437,8 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
         sa = SystolicArrayTSSA(size=tile, dtype="fp16")
 
         vls_bridge = VLSFrontendBridge(vc, spad, vls_id=0, frontend_id=0)
-        sysarr_bridge = GSAUTSSABridge(vc, sa)
+        mirror = TSSAReference(size=tile, dtype="fp16")
+        sysarr_bridge = GSAUTSSABridge(vc, sa, mirror=mirror)
 
         dram = DRAM(block_bytes=256)
         DRAM_ACT = 0x1000
@@ -644,6 +723,30 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
             dprintf("SYSARR", f"got[{mismatch_row}][:8]={got[mismatch_row][:8]}")
             dprintf("SYSARR", f"gsau[{mismatch_row}][:8]={expected_from_gsau[mismatch_row][:8]}")
             assert got == expected_from_gsau
+        expected_cycle = mirror.outputs
+        if len(expected_cycle) != tile:
+            dprintf("SYSARR", f"mirror outputs len={len(expected_cycle)}")
+        assert len(expected_cycle) == tile
+        dprintf("SYSARR", f"mirror[0][:8]={expected_cycle[0][:8]}")
+        if got != expected_cycle:
+            mismatch_row = None
+            for i in range(tile):
+                if got[i] != expected_cycle[i]:
+                    mismatch_row = i
+                    break
+            if mismatch_row is None:
+                mismatch_row = 0
+            dprintf("SYSARR", f"mirror mismatch row={mismatch_row}")
+            dprintf("SYSARR", f"got_m[{mismatch_row}][:8]={got[mismatch_row][:8]}")
+            dprintf("SYSARR", f"mir[{mismatch_row}][:8]={expected_cycle[mismatch_row][:8]}")
+            dprintf(
+                "SYSARR",
+                f"got_m_fp16[{mismatch_row}][:8]={[ _fp16_from_u16(v) for v in got[mismatch_row][:8] ]}",
+            )
+            dprintf(
+                "SYSARR",
+                f"mir_fp16[{mismatch_row}][:8]={[ _fp16_from_u16(v) for v in expected_cycle[mismatch_row][:8] ]}",
+            )
         if got != expected_ref:
             mismatch_row = None
             for i in range(tile):
@@ -655,20 +758,60 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
             dprintf("SYSARR", f"mismatch row={mismatch_row}")
             dprintf("SYSARR", f"got[{mismatch_row}][:8]={got[mismatch_row][:8]}")
             dprintf("SYSARR", f"exp[{mismatch_row}][:8]={expected_ref[mismatch_row][:8]}")
+            dprintf(
+                "SYSARR",
+                f"got_fp16[{mismatch_row}][:8]={[ _fp16_from_u16(v) for v in got[mismatch_row][:8] ]}",
+            )
+            dprintf(
+                "SYSARR",
+                f"exp_fp16[{mismatch_row}][:8]={[ _fp16_from_u16(v) for v in expected_ref[mismatch_row][:8] ]}",
+            )
             dprintf("SYSARR", f"got[0][:8]={got[0][:8]}")
             dprintf("SYSARR", f"exp[0][:8]={expected_ref[0][:8]}")
+            dprintf(
+                "SYSARR",
+                f"got_fp16[0][:8]={[ _fp16_from_u16(v) for v in got[0][:8] ]}",
+            )
+            dprintf(
+                "SYSARR",
+                f"exp_fp16[0][:8]={[ _fp16_from_u16(v) for v in expected_ref[0][:8] ]}",
+            )
             dprintf("SYSARR", f"got[-1][:8]={got[-1][:8]}")
             dprintf("SYSARR", f"exp[-1][:8]={expected_ref[-1][:8]}")
+            dprintf(
+                "SYSARR",
+                f"got_fp16[-1][:8]={[ _fp16_from_u16(v) for v in got[-1][:8] ]}",
+            )
+            dprintf(
+                "SYSARR",
+                f"exp_fp16[-1][:8]={[ _fp16_from_u16(v) for v in expected_ref[-1][:8] ]}",
+            )
             dprintf("SYSARR", f"got[1][:8]={got[1][:8]}")
             dprintf("SYSARR", f"exp[1][:8]={expected_ref[1][:8]}")
+            dprintf(
+                "SYSARR",
+                f"got_fp16[1][:8]={[ _fp16_from_u16(v) for v in got[1][:8] ]}",
+            )
+            dprintf(
+                "SYSARR",
+                f"exp_fp16[1][:8]={[ _fp16_from_u16(v) for v in expected_ref[1][:8] ]}",
+            )
             dprintf("SYSARR", f"got[2][:8]={got[2][:8]}")
             dprintf("SYSARR", f"exp[2][:8]={expected_ref[2][:8]}")
+            dprintf(
+                "SYSARR",
+                f"got_fp16[2][:8]={[ _fp16_from_u16(v) for v in got[2][:8] ]}",
+            )
+            dprintf(
+                "SYSARR",
+                f"exp_fp16[2][:8]={[ _fp16_from_u16(v) for v in expected_ref[2][:8] ]}",
+            )
             dprintf("SYSARR", f"got_row_sum={sum(got[mismatch_row])} exp_row_sum={sum(expected_ref[mismatch_row])}")
             dprintf("SYSARR", f"wgt_stream[0][:8]={wgt_stream[0][:8]}")
             dprintf("SYSARR", f"wgt_stream[-1][:8]={wgt_stream[-1][:8]}")
             dprintf("SYSARR", f"act[0][:8]={act[0][:8]}")
             dprintf("SYSARR", f"act[-1][:8]={act[-1][:8]}")
-        expected = expected_from_gsau
+        expected = expected_cycle
         assert got == expected
     finally:
         close_debug()
