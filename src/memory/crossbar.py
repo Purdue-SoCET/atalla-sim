@@ -69,14 +69,15 @@ class Xbar(Clocked):
         Callbacks are invoked before returning.
         """
         completed: List[Tuple[int, List[Any]]] = []
+        pending = self._pending._raw_items
 
         # decrement remaining cycles
-        for entry in self._pending.items:
+        for entry in pending:
             entry["rem"] -= 1
 
         # collect and remove finished entries (preserve FIFO order)
         to_remove: List[int] = []
-        for idx, entry in enumerate(self._pending.items):
+        for idx, entry in enumerate(pending):
             if entry["rem"] <= 0:
                 out = Xbar.route(entry["shift"], entry["vals"], self.num_banks)
                 completed.append((entry["op"], out))
@@ -87,7 +88,7 @@ class Xbar(Clocked):
 
         # Remove completed entries by index (reverse order to avoid shifting)
         for idx in reversed(to_remove):
-            del self._pending.items[idx]
+            del pending[idx]
 
         self.total_completed += len(completed)
         return completed

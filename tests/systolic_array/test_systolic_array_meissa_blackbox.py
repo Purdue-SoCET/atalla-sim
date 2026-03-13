@@ -10,13 +10,13 @@ def test_meissa_blackbox_latency_and_matmul():
     sa = SystolicArrayMEISSABlackbox(n=2, m=3, p=2)
 
     # B (m x p) loaded top-to-bottom as m rows.
-    assert sa.issue({"vdata": [1.0, 2.0], "is_weight": True, "expect_output": False})
-    assert sa.issue({"vdata": [3.0, 4.0], "is_weight": True, "expect_output": False})
-    assert sa.issue({"vdata": [5.0, 6.0], "is_weight": True, "expect_output": False})
+    assert sa.issue({"vdata": [1.0, 2.0], "is_weight": True, "expect_output": False, "dtype": "fp16"})
+    assert sa.issue({"vdata": [3.0, 4.0], "is_weight": True, "expect_output": False, "dtype": "fp16"})
+    assert sa.issue({"vdata": [5.0, 6.0], "is_weight": True, "expect_output": False, "dtype": "fp16"})
 
     # A (n x m) streamed left-to-right as n rows.
-    assert sa.issue({"vdata": [1.0, 0.0, 1.0], "is_weight": False, "expect_output": True, "meta": {"dst": 10}})
-    assert sa.issue({"vdata": [2.0, 1.0, 0.0], "is_weight": False, "expect_output": True, "meta": {"dst": 11}})
+    assert sa.issue({"vdata": [1.0, 0.0, 1.0], "is_weight": False, "expect_output": True, "meta": {"dst": 10}, "dtype": "fp16"})
+    assert sa.issue({"vdata": [2.0, 1.0, 0.0], "is_weight": False, "expect_output": True, "meta": {"dst": 11}, "dtype": "fp16"})
 
     # t_total = n + m + ceil(log2(m)) + p - 1 = 2 + 3 + 2 + 2 - 1 = 8.
     # Since outputs stream one row/cycle, first output appears at t_total - (n-1) = 7.
@@ -41,9 +41,9 @@ def test_meissa_blackbox_gsau_packet_shape():
     sa = SystolicArrayMEISSABlackbox(n=1, m=2, p=1)
 
     # One weight row for m=2? No, B is (m x p), so 2 rows of length 1.
-    assert sa.issue({"vdata": [2.0], "is_weight": True, "expect_output": False})
-    assert sa.issue({"vdata": [3.0], "is_weight": True, "expect_output": False})
-    assert sa.issue({"vdata": [4.0, 5.0], "is_weight": False, "expect_output": True, "meta": {"tag": "req0"}})
+    assert sa.issue({"vdata": [2.0], "is_weight": True, "expect_output": False, "dtype": "fp16"})
+    assert sa.issue({"vdata": [3.0], "is_weight": True, "expect_output": False, "dtype": "fp16"})
+    assert sa.issue({"vdata": [4.0, 5.0], "is_weight": False, "expect_output": True, "meta": {"tag": "req0"}, "dtype": "fp16"})
 
     # Total latency: 1 + 2 + ceil(log2(2)) + 1 - 1 = 4 cycles.
     for _ in range(4):

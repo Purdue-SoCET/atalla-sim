@@ -24,6 +24,7 @@ class Veggie(Clocked):
 
         # register storage
         self.data_banks = [[0.0] * regs_per_bank for _ in range(bank_count)]
+        self.dtype_banks = [[None] * regs_per_bank for _ in range(bank_count)]
         self.mask_banks_data = [[0.0] * regs_per_bank for _ in range(mask_banks)]
 
         # connection endpoints

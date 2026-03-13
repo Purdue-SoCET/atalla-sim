@@ -1,5 +1,7 @@
 from typing import List, Optional
 
+from base.dtype import DType, cast_scalar, normalize_dtype
+
 from base.clocked_object import Clocked
 from base.queue import SimQueue
 
@@ -48,7 +50,8 @@ class SystolicArrayTSSA(Clocked):
     def __init__(self, size: int, boundary_buffer_depth: int = 32, dtype: Optional[object] = None):
         super().__init__()
         self.size = int(size)
-        self.dtype = dtype
+        self.dtype = normalize_dtype(dtype, default=None)
+        self._current_dtype: Optional[DType] = None
         self.psum_output_fifo_bottom: List[List[float]] = []
         self.array: List[List[PE]] = self._setup_array()
         self._input_fifo_left: List[SimQueue[float]] = [SimQueue(boundary_buffer_depth) for _ in range(self.size)]
@@ -66,7 +69,17 @@ class SystolicArrayTSSA(Clocked):
         self._start_pipe_0: bool = False
         self._start_pipe_1: bool = False
 
-    def enqueue(self, activations: List[float]) -> bool:
+    def _resolve_dtype(self, dtype: Optional[object]) -> DType:
+        dtype_norm = normalize_dtype(dtype, default=self.dtype)
+        if dtype_norm is None:
+            raise ValueError("dtype must be specified")
+        if self._current_dtype is None:
+            self._current_dtype = dtype_norm
+        if dtype_norm != self._current_dtype:
+            raise ValueError("tssa dtype mismatch: job=%s req=%s" % (self._current_dtype, dtype_norm))
+        return dtype_norm
+
+    def enqueue(self, activations: List[float], dtype: Optional[object] = None) -> bool:
         """Enqueue one activation vector into input FIFO (left boundary), one value per row."""
         if len(activations) != self.size:
             raise ValueError("activations must match systolic array size")
@@ -74,28 +87,31 @@ class SystolicArrayTSSA(Clocked):
         if any(q.is_full() for q in self._input_fifo_left):
             return False
 
+        dtype = self._resolve_dtype(dtype)
         for i in range(self.size):
-            self._input_fifo_left[i].enqueue(float(activations[i]))
+            self._input_fifo_left[i].enqueue(cast_scalar(activations[i], dtype))
         return True
 
-    def enqueue_weights(self, weights: List[float]) -> bool:
+    def enqueue_weights(self, weights: List[float], dtype: Optional[object] = None) -> bool:
         """Enqueue one weight vector to preload row-stationary weights through shared pass buses."""
         if len(weights) != self.size:
             raise ValueError("weights must match systolic array size")
         if any(q.is_full() for q in self._weight_boundary):
             return False
+        dtype_norm = self._resolve_dtype(dtype)
         for i in range(self.size):
-            self._weight_boundary[i].enqueue(float(weights[i]))
+            self._weight_boundary[i].enqueue(cast_scalar(weights[i], dtype_norm))
         return True
 
-    def enqueue_psums(self, psums: List[float]) -> bool:
+    def enqueue_psums(self, psums: List[float], dtype: Optional[object] = None) -> bool:
         """Optional psum input FIFO injection (top boundary), one value per column."""
         if len(psums) != self.size:
             raise ValueError("psums must match systolic array size")
         if any(q.is_full() for q in self._psum_input_fifo_top):
             return False
+        dtype_norm = self._resolve_dtype(dtype)
         for j in range(self.size):
-            self._psum_input_fifo_top[j].enqueue(float(psums[j]))
+            self._psum_input_fifo_top[j].enqueue(cast_scalar(psums[j], dtype_norm))
         return True
 
     def set_control(
@@ -129,9 +145,10 @@ class SystolicArrayTSSA(Clocked):
     def load_weights(self, weights: List[List[float]]) -> None:
         if len(weights) != self.size or any(len(row) != self.size for row in weights):
             raise ValueError("weights must be size x size")
+        dtype_norm = self._resolve_dtype(None)
         for i in range(self.size):
             for j in range(self.size):
-                self.array[i][j].weight = float(weights[i][j])
+                self.array[i][j].weight = cast_scalar(weights[i][j], dtype_norm)
 
     def tick(self, time: Optional[float] = None) -> None:
         # Stall freezes forward progress so values/ready can be preserved for lossless backpressure.
@@ -166,15 +183,19 @@ class SystolicArrayTSSA(Clocked):
             for j in range(self.size):
                 top_boundary = self._psum_input_fifo_top[j].dequeue() if i == 0 else None
                 psum_in = float(top_boundary) if top_boundary is not None else (0.0 if i == 0 else old_acc[i - 1][j])
-                self.array[i][j].accumulation = float(old_mul[i][j] + psum_in)
+                acc = old_mul[i][j] + psum_in
+                if self._current_dtype is not None:
+                    acc = cast_scalar(acc, self._current_dtype)
+                self.array[i][j].accumulation = float(acc)
 
         # Stage 1: combinational multiply, product captured into register for next cycle.
         for i in range(self.size):
             for j in range(self.size):
                 if self.start:
-                    self.array[i][j].mul_reg = float(
-                        self.array[i][j].activation_latch * self.array[i][j].weight
-                    )
+                    prod = self.array[i][j].activation_latch * self.array[i][j].weight
+                    if self._current_dtype is not None:
+                        prod = cast_scalar(prod, self._current_dtype)
+                    self.array[i][j].mul_reg = float(prod)
 
         # value_ready is asserted two cycles after start.
         self.value_ready = self._start_pipe_1

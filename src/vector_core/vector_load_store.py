@@ -144,6 +144,7 @@ class VectorLoadStoreUnit(Clocked):
                     "vl": op.get("vl"),
                     "eew": op.get("eew"),
                     "swizzle": op.get("swizzle"),
+                    "dtype": op.get("dtype"),
                 }
             ):
                 return
@@ -211,6 +212,7 @@ class VectorLoadStoreUnit(Clocked):
             "vl": dst_tag.get("vl"),
             "eew": dst_tag.get("eew"),
             "swizzle": dst_tag.get("swizzle"),
+            "dtype": dst_tag.get("dtype"),
             "addr": rsp.get("addr"),
             "meta": rsp.get("meta"),
         }

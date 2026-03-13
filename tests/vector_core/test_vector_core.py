@@ -123,6 +123,7 @@ def _run_core_with_systolic(
                         "time": time + float(rsp_latency),
                         "rsp": {
                             "vdata": list(transform_cb(req)),
+                            "dtype": req.get("dtype"),
                             "meta": {"echo_is_weight": bool(req.get("is_weight", False))},
                         },
                     }
@@ -143,7 +144,7 @@ def _run_core_with_systolic(
 
 def test_vector_core_sim_compute_writeback():
     eq, clk, sim = build_sim()
-    vc = VectorCore(veggie_size=128, lane_count=4, fu_latencies={"alu": 1})
+    vc = VectorCore(veggie_size=128, lane_count=4, fu_latencies={"alu": 1}, dtype="fp16")
     vc.load_vreg(1, [1, 2, 3, 4, 5, 6, 7, 8])
     vc.load_vreg(2, [8, 7, 6, 5, 4, 3, 2, 1])
 
@@ -167,13 +168,13 @@ def test_vector_core_sim_compute_writeback():
 
 def test_vector_core_sim_vlsu_store_then_load_round_trip():
     eq, clk, sim = build_sim()
-    vc = VectorCore(veggie_size=128, lane_count=4, vls_count=1, fu_latencies={"alu": 1})
+    vc = VectorCore(veggie_size=128, lane_count=4, vls_count=1, fu_latencies={"alu": 1}, dtype="fp16")
     src_vec = [11, 22, 33, 44, 55, 66, 77, 88]
     vc.load_vreg(6, src_vec)
     memory = {}
 
-    assert vc.enqueue_memory({"kind": "store", "vls": 0, "src": 6, "addr": 0x1000})
-    assert vc.enqueue_memory({"kind": "load", "vls": 0, "dst": 7, "addr": 0x1000})
+    assert vc.enqueue_memory({"kind": "store", "vls": 0, "src": 6, "addr": 0x1000, "dtype": "fp16"})
+    assert vc.enqueue_memory({"kind": "load", "vls": 0, "dst": 7, "addr": 0x1000, "dtype": "fp16"})
 
     _run_core_with_scratchpad(
         sim,
@@ -194,7 +195,7 @@ def test_vector_core_sim_vlsu_store_then_load_round_trip():
 
 def test_vector_core_sim_gsau_round_trip_with_rd_queue():
     eq, clk, sim = build_sim()
-    vc = VectorCore(veggie_size=128, lane_count=4, fu_latencies={"alu": 1})
+    vc = VectorCore(veggie_size=128, lane_count=4, fu_latencies={"alu": 1}, dtype="fp16")
     src0 = [1, 2, 3, 4, 5, 6, 7, 8]
     src1 = [9, 8, 7, 6, 5, 4, 3, 2]
     vc.load_vreg(20, src0)

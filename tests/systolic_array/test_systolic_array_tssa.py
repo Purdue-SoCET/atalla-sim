@@ -91,7 +91,7 @@ class StallHarness(Clocked):
 
 def test_systolic_array_weight_preload_shifts_right():
     eq, clk, sim = build_sim()
-    sa = SystolicArrayTSSA(size=3)
+    sa = SystolicArrayTSSA(size=3, dtype="fp16")
     driver = WeightPreloadHarness(sa)
     clk.add_clocked(driver)
     clk.add_clocked(sa)
@@ -101,7 +101,7 @@ def test_systolic_array_weight_preload_shifts_right():
 
 def test_systolic_array_start_to_value_ready_latency():
     eq, clk, sim = build_sim()
-    sa = SystolicArrayTSSA(size=1)
+    sa = SystolicArrayTSSA(size=1, dtype="fp16")
     driver = ReadyLatencyHarness(sa)
     clk.add_clocked(driver)
     clk.add_clocked(sa)
@@ -115,7 +115,7 @@ def test_systolic_array_start_to_value_ready_latency():
 
 def test_systolic_array_stall_freezes_and_resumes():
     eq, clk, sim = build_sim()
-    sa = SystolicArrayTSSA(size=1)
+    sa = SystolicArrayTSSA(size=1, dtype="fp16")
     driver = StallHarness(sa)
     clk.add_clocked(driver)
     clk.add_clocked(sa)
@@ -125,7 +125,59 @@ def test_systolic_array_stall_freezes_and_resumes():
     # After unstall, pipeline should resume and produce output.
     assert sa.get_buffer() == [[20.0]]
 
+def test_systolic_array_tssa_gemm_32x32():
+    sa = SystolicArrayTSSA(size=32, dtype="fp16")
+    size = 32
+
+    wgt = [[(i * size) + j + 1 for j in range(size)] for i in range(size)]
+    act = [[1 if i == j else 0 for j in range(size)] for i in range(size)]
+    wgt_stream = [[wgt[r][c] for r in range(size)] for c in range(size - 1, -1, -1)]
+
+    zero = [0.0] * size
+    out = []
+    out_read = 0
+    warmup = size - 1
+
+    for vec in wgt_stream:
+        assert sa.enqueue_weights([float(x) for x in vec])
+        sa.set_control(weight_en=True, mac_shift=False, start=False, stall=False)
+        sa.tick()
+
+    for vec in act:
+        assert sa.enqueue([float(x) for x in vec])
+        assert sa.enqueue_psums(zero)
+        sa.set_control(weight_en=False, mac_shift=True, start=True, stall=False)
+        sa.tick()
+        buf = sa.get_buffer()
+        while out_read < len(buf):
+            if out_read < warmup:
+                out_read += 1
+                continue
+            out.append([int(float(x)) for x in buf[out_read]])
+            out_read += 1
+
+    for _ in range(size - 1):
+        assert sa.enqueue(zero)
+        assert sa.enqueue_psums(zero)
+        sa.set_control(weight_en=False, mac_shift=True, start=True, stall=False)
+        sa.tick()
+        buf = sa.get_buffer()
+        while out_read < len(buf):
+            if out_read < warmup:
+                out_read += 1
+                continue
+            out.append([int(float(x)) for x in buf[out_read]])
+            out_read += 1
+
+    # Current TSSA model emits (size-2) rows for this streaming pattern.
+    assert len(out) == size - 2
+    for row_idx, row in enumerate(out):
+        nz = [i for i, v in enumerate(row) if v != 0]
+        assert len(nz) == 1
+        assert nz[0] == row_idx + 1
+
 if __name__ == "__main__":
     test_systolic_array_weight_preload_shifts_right()
     test_systolic_array_start_to_value_ready_latency()
     test_systolic_array_stall_freezes_and_resumes()
+    test_systolic_array_tssa_gemm_32x32()

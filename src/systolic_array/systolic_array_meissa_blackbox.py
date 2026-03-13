@@ -5,6 +5,7 @@ import numpy as np
 
 from base.clocked_object import Clocked
 from base.queue import SimQueue
+from base.dtype import DType, cast_vector, normalize_dtype, numpy_dtype
 
 
 class SystolicArrayMEISSABlackbox(Clocked):
@@ -49,6 +50,7 @@ class SystolicArrayMEISSABlackbox(Clocked):
         self._activation_rows: List[List[float]] = []
         self._activation_meta: List[Dict] = []
         self._scheduled = False
+        self._job_dtype: Optional[DType] = None
 
     @property
     def t_load(self) -> int:
@@ -73,7 +75,15 @@ class SystolicArrayMEISSABlackbox(Clocked):
         entry = dict(req)
         if "vdata" not in entry:
             raise ValueError("request missing vdata")
-        entry["vdata"] = [float(x) for x in entry["vdata"]]
+        dtype = normalize_dtype(entry.get("dtype") or entry.get("meta", {}).get("dtype"), default=None)
+        if dtype is None:
+            raise ValueError("request missing dtype")
+        if self._job_dtype is None:
+            self._job_dtype = dtype
+        if dtype != self._job_dtype:
+            raise ValueError("meissa dtype mismatch: job=%s req=%s" % (self._job_dtype, dtype))
+        entry["dtype"] = dtype
+        entry["vdata"] = cast_vector(entry["vdata"], dtype)
         entry["is_weight"] = bool(entry.get("is_weight", False))
         entry["expect_output"] = bool(
             entry.get("expect_output", not entry["is_weight"])
@@ -135,8 +145,10 @@ class SystolicArrayMEISSABlackbox(Clocked):
         if len(self._weights_rows) < self.m or len(self._activation_rows) < self.n:
             return
 
-        a = np.asarray(self._activation_rows, dtype=np.float64)
-        b = np.asarray(self._weights_rows, dtype=np.float64)
+        if self._job_dtype is None:
+            raise ValueError("meissa job missing dtype")
+        a = np.asarray(self._activation_rows, dtype=numpy_dtype(self._job_dtype))
+        b = np.asarray(self._weights_rows, dtype=numpy_dtype(self._job_dtype))
         c = np.matmul(a, b)
 
         if self._job_start_cycle is None:
@@ -164,13 +176,15 @@ class SystolicArrayMEISSABlackbox(Clocked):
                         "t_out": self.t_out,
                         "t_total": self.t_total,
                     },
+                    "dtype": self._job_dtype,
                 }
             )
             self._pending_ready.append(
                 {
                     "due_cycle": first_due_cycle + row_idx,
                     "rsp": {
-                        "vdata": [float(x) for x in c[row_idx].tolist()],
+                        "vdata": cast_vector(c[row_idx].tolist(), self._job_dtype),
+                        "dtype": self._job_dtype,
                         "meta": meta,
                     },
                 }

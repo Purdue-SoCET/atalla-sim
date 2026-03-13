@@ -3,6 +3,8 @@ from base.clocked_object import Clocked
 from base.queue import SimQueue
 from typing import Callable, Dict, List, Optional, Sequence
 
+from base.dtype import DType, cast_scalar, cast_vector, normalize_dtype
+
 Time = float
 
 
@@ -61,7 +63,7 @@ class FunctionalUnitPipeline:
             return False
         return self.entries.enqueue({"remain": self.latency, "payload": payload})
 
-    def tick(self) -> None:
+    def tick(self, time: Optional[float] = None) -> None:
         next_entries = SimQueue(self.capacity)
         while not self.entries.is_empty():
             entry = self.entries.dequeue()
@@ -92,6 +94,7 @@ class LaneFUContext:
         indices: List[int],
         dst: int,
         reduce: bool,
+        dtype: DType,
     ):
         self.inst_id = inst_id
         self.op = op
@@ -101,6 +104,7 @@ class LaneFUContext:
         self.indices = indices
         self.dst = dst
         self.reduce = reduce
+        self.dtype = dtype
         self.cursor = 0
         self.last_sent = False
         self.pending_count = 0
@@ -200,6 +204,7 @@ class ResultCollector(Clocked):
         reduce_op: str = "sum",
         reduce_out_mode: str = "partial_zero",
         seed_vector: Optional[List[float]] = None,
+        dtype: Optional[DType] = None,
     ) -> None:
         if reduce:
             if reduce_op not in self.reduction_unit.SUPPORTED_OPS:
@@ -213,6 +218,7 @@ class ResultCollector(Clocked):
             "reduce_op": reduce_op,
             "reduce_out_mode": reduce_out_mode,
             "vector": (seed_vector[:] if seed_vector is not None else [0.0] * self.vector_len),
+            "dtype": dtype,
             "lane_done": [False] * self.lane_count,
             "lane_pending": [0] * self.lane_count,
             "reduce_accum": [0.0] * self.lane_count,
@@ -288,6 +294,7 @@ class ResultCollector(Clocked):
             "reduce_out_mode": state["reduce_out_mode"],
             "vector": state["vector"][:],
             "reduction": reduction,
+            "dtype": state.get("dtype"),
         }
 
         if not state["reduce"]:
@@ -314,7 +321,7 @@ class ResultCollector(Clocked):
             return
         state["completion_scheduled"] = True
 
-    def tick(self) -> None:
+    def tick(self, time: Optional[float] = None) -> None:
         next_pending = SimQueue(self.pending_reductions.max_size)
         while not self.pending_reductions.is_empty():
             item = self.pending_reductions.dequeue()
@@ -414,6 +421,7 @@ class VectorLane(Clocked):
 
             if active:
                 value = self.ops[ctx.op](ctx.src0[vector_idx], ctx.src1[vector_idx])
+                value = cast_scalar(value, ctx.dtype)
                 pushed = self.fus[fu_name].push({"value": value})
                 if pushed:
                     self.meta_fifo[fu_name].enqueue(
@@ -496,7 +504,7 @@ class VectorDatapath(Clocked):
             raise ValueError("veggie_size must be divisible by %d" % FLOAT_SLOT_BITS)
 
         self.veggie_size = veggie_size
-        self.dtype = dtype
+        self.dtype = normalize_dtype(dtype, default=None)
         self.vector_len = veggie_size // FLOAT_SLOT_BITS
         self.lane_count = min(lane_count, self.vector_len)
         self.issue_width = issue_width
@@ -534,11 +542,16 @@ class VectorDatapath(Clocked):
         reduce: bool = False,
         reduce_op: str = "sum",
         reduce_out_mode: str = "partial_zero",
+        dtype: Optional[object] = None,
     ) -> int:
         if len(src0) != self.vector_len:
             raise ValueError("src0 length mismatch")
-        src0_full = [float(x) for x in src0]
+        op_dtype = normalize_dtype(dtype, default=self.dtype)
+        if op_dtype is None:
+            raise ValueError("dtype must be specified")
+        src0_full = cast_vector(src0, op_dtype)
         src1_full = self._mk_src1(src0_full, src1)
+        src1_full = cast_vector(src1_full, op_dtype)
         if len(src1_full) != self.vector_len:
             raise ValueError("src1 length mismatch")
         mask_full = list(mask) if mask is not None else [True] * self.vector_len
@@ -565,6 +578,7 @@ class VectorDatapath(Clocked):
                 "reduce": reduce,
                 "reduce_op": reduce_op,
                 "reduce_out_mode": reduce_out_mode,
+                "dtype": op_dtype,
             }
         ):
             raise RuntimeError("datapath pending issue queue overflow")
@@ -576,7 +590,7 @@ class VectorDatapath(Clocked):
                 return False
         return True
 
-    def tick(self) -> None:
+    def tick(self, time: Optional[float] = None) -> None:
         self.collector.tick()
         issued = 0
         while (not self.pending_issue.is_empty()) and issued < self.issue_width:
@@ -596,6 +610,7 @@ class VectorDatapath(Clocked):
                 reduce_op=inst["reduce_op"],
                 reduce_out_mode=inst["reduce_out_mode"],
                 seed_vector=(inst["src0"] if inst["reduce"] and inst["reduce_out_mode"] == "partial_passthru" else None),
+                dtype=inst.get("dtype"),
             )
             for lane in self.lanes:
                 ctx = LaneFUContext(
@@ -607,6 +622,7 @@ class VectorDatapath(Clocked):
                     indices=lane._lane_indices(self.vector_len),
                     dst=inst["dst"],
                     reduce=inst["reduce"],
+                    dtype=inst.get("dtype", self.dtype),
                 )
                 lane.issue(ctx, fu_name)
             issued += 1

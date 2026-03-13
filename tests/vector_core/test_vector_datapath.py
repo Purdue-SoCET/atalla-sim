@@ -80,7 +80,7 @@ def test_global_reduction_sum_partial_zero_mode():
     src0 = [1, 2, 3, 4, 5, 6, 7, 8]
     src1 = [0] * len(src0)
 
-    vd.enqueue(
+    vd.enqueue(dtype="fp16", 
         src0=src0,
         src1=src1,
         op="add",
@@ -99,7 +99,7 @@ def test_global_reduction_min_partial_passthru_mode():
     src0 = [9, 4, 7, 3, 6, 1, 8, 5]
     src1 = [0] * len(src0)
 
-    vd.enqueue(
+    vd.enqueue(dtype="fp16", 
         src0=src0,
         src1=src1,
         op="add",
@@ -120,7 +120,7 @@ def test_global_reduction_max_broadcast_mode():
     src1 = [0] * len(src0)
     mask = [True, True, False, True, True, True, True, False]
 
-    vd.enqueue(
+    vd.enqueue(dtype="fp16", 
         src0=src0,
         src1=src1,
         mask=mask,
@@ -143,12 +143,12 @@ def test_global_reduction_latency_is_n_minus_one_times_alu_latency():
 
     eq0, clk0, sim0 = build_sim()
     vd0 = VectorDatapath(veggie_size=128, lane_count=4, fu_latencies={"alu": alu_latency})
-    vd0.enqueue(src0=src0, src1=src1, op="add", reduce=False)
+    vd0.enqueue(dtype="fp16", src0=src0, src1=src1, op="add", reduce=False)
     _, non_reduce_done_time = _run_until_result(sim0, eq0, vd0)
 
     eq1, clk1, sim1 = build_sim()
     vd1 = VectorDatapath(veggie_size=128, lane_count=4, fu_latencies={"alu": alu_latency})
-    vd1.enqueue(
+    vd1.enqueue(dtype="fp16", 
         src0=src0,
         src1=src1,
         op="add",
@@ -178,9 +178,9 @@ def test_vector_datapath_integration_mixed_ops_across_lanes():
     src_mul_1 = [10] * 8
     mask_mul = [True, False, True, True, False, True, True, False]
 
-    inst0 = vd.enqueue(src0=src_add_0, src1=src_add_1, op="add", dst=10, reduce=False)
-    inst1 = vd.enqueue(src0=src_sqrt, src1=[0] * 8, op="sqrt", dst=11, reduce=False)
-    inst2 = vd.enqueue(
+    inst0 = vd.enqueue(dtype="fp16", src0=src_add_0, src1=src_add_1, op="add", dst=10, reduce=False)
+    inst1 = vd.enqueue(dtype="fp16", src0=src_sqrt, src1=[0] * 8, op="sqrt", dst=11, reduce=False)
+    inst2 = vd.enqueue(dtype="fp16", 
         src0=src_mul_0,
         src1=src_mul_1,
         mask=mask_mul,
@@ -205,14 +205,14 @@ def test_vector_datapath_integration_regular_and_reduction_results():
     eq, clk, sim = build_sim()
     vd = VectorDatapath(veggie_size=128, lane_count=4, fu_latencies={"alu": 1})
 
-    inst0 = vd.enqueue(
+    inst0 = vd.enqueue(dtype="fp16", 
         src0=[1, 1, 1, 1, 1, 1, 1, 1],
         src1=[2, 2, 2, 2, 2, 2, 2, 2],
         op="add",
         dst=20,
         reduce=False,
     )
-    inst1 = vd.enqueue(
+    inst1 = vd.enqueue(dtype="fp16", 
         src0=[3, 1, 4, 1, 5, 9, 2, 6],
         src1=[0] * 8,
         op="add",

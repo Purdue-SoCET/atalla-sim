@@ -2,6 +2,7 @@ from base.clocked_object import Clocked
 from base.queue import SimQueue
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
+from base.dtype import DType, cast_vector, normalize_dtype
 from vector_core.vector_lanes import VectorDatapath
 from vector_core.vector_load_store import VLSU
 from vector_core.veggie_file import Veggie
@@ -69,6 +70,9 @@ class GSAU(Clocked):
 
     def issue(self, cmd: Dict) -> bool:
         entry = dict(cmd)
+        dtype = normalize_dtype(entry.get("dtype"), default=None)
+        if dtype is None:
+            raise ValueError("gsau command missing dtype")
         expects_output = bool(entry.get("expect_output", not bool(entry.get("is_weight", False))))
         if self.to_systolic.is_full():
             return False
@@ -78,13 +82,20 @@ class GSAU(Clocked):
                 raise ValueError("gsau command missing dst for expected output")
             if self.rd_queue.is_full():
                 return False
-            if not self.rd_queue.enqueue({"dst": int(dst), "meta": dict(entry.get("meta", {}))}):
+            if not self.rd_queue.enqueue(
+                {
+                    "dst": int(dst),
+                    "dtype": dtype,
+                    "meta": dict(entry.get("meta", {})),
+                }
+            ):
                 return False
 
         return self.to_systolic.enqueue(
             {
                 "vdata": list(entry["vdata"]),
                 "is_weight": bool(entry.get("is_weight", False)),
+                "dtype": dtype,
                 "meta": dict(entry.get("meta", {})),
                 "expect_output": expects_output,
             }
@@ -117,11 +128,20 @@ class GSAU(Clocked):
             rd = self.rd_queue.dequeue()
             if rsp is None or rd is None:
                 break
+            rsp_dtype = normalize_dtype(
+                rsp.get("dtype") or rsp.get("meta", {}).get("dtype"),
+                default=None,
+            )
+            if rd.get("dtype") is None or rsp_dtype is None:
+                raise ValueError("gsau response missing dtype")
+            if rsp_dtype != rd.get("dtype"):
+                raise ValueError("gsau dtype mismatch: rd=%s rsp=%s" % (rd.get("dtype"), rsp_dtype))
             self.writebacks.enqueue(
                 {
                     "dst": int(rd["dst"]),
                     "data": list(rsp["vdata"]),
                     "mask": rsp.get("mask"),
+                    "dtype": rd.get("dtype"),
                     "meta": {
                         "rdq_depth": self.rd_queue_depth,
                         "rdq_entry": rd.get("meta", {}),
@@ -160,10 +180,11 @@ class VectorCore(Clocked):
         if vls_count <= 0:
             raise ValueError("vls_count must be > 0")
 
+        self.dtype_default = normalize_dtype(dtype, default=None)
         self.datapath = VectorDatapath(
             veggie_size=veggie_size,
             lane_count=lane_count,
-            dtype=dtype,
+            dtype=self.dtype_default,
             issue_width=issue_width,
             fu_latencies=fu_latencies,
         )
@@ -219,12 +240,33 @@ class VectorCore(Clocked):
             return [float(x) for x in raw[: self.vector_len]]
         return [float(raw)] * self.vector_len
 
-    def write_vreg(self, reg: int, data: Sequence[float]) -> None:
+    def read_vreg_with_dtype(self, reg: int) -> Tuple[List[float], DType]:
         bank, addr = self._reg_to_bank_addr(reg)
-        self.veggie.data_banks[bank][addr] = self._normalize_vector(data)
+        vec = self.read_vreg(reg)
+        dtype = self.veggie.dtype_banks[bank][addr]
+        dtype = normalize_dtype(dtype, default=self.dtype_default)
+        if dtype is None:
+            raise ValueError("dtype must be specified for vreg %s" % reg)
+        if self.veggie.dtype_banks[bank][addr] is None:
+            self.veggie.dtype_banks[bank][addr] = dtype
+        return vec, dtype
 
-    def load_vreg(self, reg: int, data: Sequence[float]) -> None:
-        self.write_vreg(reg, data)
+    def write_vreg(self, reg: int, data: Sequence[float], dtype: Optional[object] = None) -> None:
+        bank, addr = self._reg_to_bank_addr(reg)
+        dtype_norm = normalize_dtype(dtype, default=self.dtype_default)
+        if dtype_norm is None:
+            raise ValueError("dtype must be specified for write_vreg")
+        vec = cast_vector(data, dtype_norm)
+        if len(vec) != self.vector_len:
+            raise ValueError(
+                "vector length mismatch: expected %d, got %d"
+                % (self.vector_len, len(vec))
+            )
+        self.veggie.data_banks[bank][addr] = vec
+        self.veggie.dtype_banks[bank][addr] = dtype_norm
+
+    def load_vreg(self, reg: int, data: Sequence[float], dtype: Optional[object] = None) -> None:
+        self.write_vreg(reg, data, dtype=dtype)
 
     def dump_vreg(self, reg: int) -> List[float]:
         return self.read_vreg(reg)
@@ -270,14 +312,21 @@ class VectorCore(Clocked):
         inst.setdefault("unit", "vlsu")
         return self.enqueue_scheduler_instruction(inst)
 
-    def _resolve_operand(self, value, default_zero: bool = False) -> List[float]:
+    def _resolve_operand_with_dtype(self, value, default_zero: bool, dtype_hint: Optional[object]) -> Tuple[List[float], DType]:
         if value is None:
             if default_zero:
-                return [0.0] * self.vector_len
+                dtype_norm = normalize_dtype(dtype_hint, default=self.dtype_default)
+                if dtype_norm is None:
+                    raise ValueError("dtype must be specified")
+                return [0.0] * self.vector_len, dtype_norm
             raise ValueError("missing required operand")
         if isinstance(value, int):
-            return self.read_vreg(value)
-        return self._normalize_vector(value)
+            vec, dtype = self.read_vreg_with_dtype(value)
+            return vec, dtype
+        dtype_norm = normalize_dtype(dtype_hint, default=self.dtype_default)
+        if dtype_norm is None:
+            raise ValueError("dtype must be specified")
+        return self._normalize_vector(value), dtype_norm
 
     def _resolve_mask(self, mask_value) -> List[bool]:
         if mask_value is None:
@@ -300,8 +349,11 @@ class VectorCore(Clocked):
 
         src0_spec = inst.get("src0", inst.get("vs1"))
         src1_spec = inst.get("src1", inst.get("vs2"))
-        src0 = self._resolve_operand(src0_spec, default_zero=False)
-        src1 = self._resolve_operand(src1_spec, default_zero=True)
+        dtype_hint = inst.get("dtype")
+        src0, dtype0 = self._resolve_operand_with_dtype(src0_spec, default_zero=False, dtype_hint=inst.get("src0_dtype", dtype_hint))
+        src1, dtype1 = self._resolve_operand_with_dtype(src1_spec, default_zero=True, dtype_hint=inst.get("src1_dtype", dtype_hint) or dtype0)
+        if dtype0 != dtype1:
+            raise ValueError("datatype mismatch: src0=%s src1=%s" % (dtype0, dtype1))
         mask = self._resolve_mask(inst.get("mask"))
 
         inst_id = self.datapath.enqueue(
@@ -313,6 +365,7 @@ class VectorCore(Clocked):
             reduce=bool(inst.get("reduce", False)),
             reduce_op=inst.get("reduce_op", "sum"),
             reduce_out_mode=inst.get("reduce_out_mode", "partial_zero"),
+            dtype=dtype0,
         )
         self.last_datapath_inst_id = inst_id
         return True
@@ -338,18 +391,26 @@ class VectorCore(Clocked):
         cmd.pop("unit", None)
         src_spec = cmd.get("src", cmd.get("vs"))
         vdata_spec = cmd.get("vdata")
+        dtype_hint = cmd.get("dtype")
         if vdata_spec is None:
             if src_spec is None:
                 raise ValueError("gsau instruction requires src or vdata")
             if isinstance(src_spec, int):
-                vdata = self.read_vreg(src_spec)
+                vdata, dtype0 = self.read_vreg_with_dtype(src_spec)
             else:
+                dtype0 = normalize_dtype(dtype_hint, default=self.dtype_default)
+                if dtype0 is None:
+                    raise ValueError("dtype must be specified")
                 vdata = self._normalize_vector(src_spec)
         else:
             if isinstance(vdata_spec, int):
-                vdata = self.read_vreg(vdata_spec)
+                vdata, dtype0 = self.read_vreg_with_dtype(vdata_spec)
             else:
+                dtype0 = normalize_dtype(dtype_hint, default=self.dtype_default)
+                if dtype0 is None:
+                    raise ValueError("dtype must be specified")
                 vdata = self._normalize_vector(vdata_spec)
+        vdata = cast_vector(vdata, dtype0)
 
         expects_output = bool(cmd.get("expect_output", not bool(cmd.get("is_weight", False))))
         gsau_cmd = {
@@ -359,7 +420,9 @@ class VectorCore(Clocked):
             "meta": {
                 "kind": cmd.get("kind"),
                 "src": src_spec,
+                "dtype": dtype0,
             },
+            "dtype": dtype0,
         }
         if expects_output:
             dst = cmd.get("dst", cmd.get("vd"))
@@ -393,6 +456,7 @@ class VectorCore(Clocked):
                         "source": "datapath",
                         "dst": pkt["dst"],
                         "data": pkt["vector"],
+                        "dtype": pkt.get("dtype"),
                         "meta": {
                             "inst_id": pkt["inst_id"],
                             "op": pkt["op"],
@@ -415,6 +479,7 @@ class VectorCore(Clocked):
                         "dst": wb["vd"],
                         "data": wb["data"],
                         "mask": wb.get("mask"),
+                        "dtype": wb.get("dtype"),
                         "meta": wb,
                     }
                 )
@@ -429,6 +494,7 @@ class VectorCore(Clocked):
                     "dst": wb["dst"],
                     "data": wb["data"],
                     "mask": wb.get("mask"),
+                    "dtype": wb.get("dtype"),
                     "meta": wb.get("meta", {}),
                 }
             )
@@ -443,16 +509,23 @@ class VectorCore(Clocked):
 
         dst = int(wb["dst"])
         new_vec = self._normalize_vector(wb["data"])
+        wb_dtype = normalize_dtype(wb.get("dtype"), default=None)
         mask = wb.get("mask")
         if mask is not None:
             mask_vec = [bool(x) for x in list(mask)]
             if len(mask_vec) != self.vector_len:
                 raise ValueError("writeback mask length mismatch")
             old_vec = self.read_vreg(dst)
+            _, old_dtype = self.read_vreg_with_dtype(dst)
+            if wb_dtype is not None and wb_dtype != old_dtype:
+                raise ValueError("masked writeback dtype mismatch: dst=%s wb=%s" % (old_dtype, wb_dtype))
             merged = [new_vec[i] if mask_vec[i] else old_vec[i] for i in range(self.vector_len)]
-            self.write_vreg(dst, merged)
+            self.write_vreg(dst, merged, dtype=old_dtype)
         else:
-            self.write_vreg(dst, new_vec)
+            if wb_dtype is None:
+                _, old_dtype = self.read_vreg_with_dtype(dst)
+                wb_dtype = old_dtype
+            self.write_vreg(dst, new_vec, dtype=wb_dtype)
 
         self.last_wb = wb
         self.wb_valid = True

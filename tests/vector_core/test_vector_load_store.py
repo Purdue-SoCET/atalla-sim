@@ -9,8 +9,8 @@ from vector_core.vector_load_store import VLSU
 def test_vlsu_load_issue_tracks_destination_per_scratchpad():
     vls = VLSU(scratchpad_count=2)
 
-    assert vls.enqueue_issue({"kind": "load", "scratchpad": 0, "vd": 5, "addr": 0x1000})
-    assert vls.enqueue_issue({"kind": "load", "scratchpad": 1, "vd": 9, "addr": 0x2000})
+    assert vls.enqueue_issue({"kind": "load", "scratchpad": 0, "vd": 5, "addr": 0x1000, "dtype": "fp16"})
+    assert vls.enqueue_issue({"kind": "load", "scratchpad": 1, "vd": 9, "addr": 0x2000, "dtype": "fp16"})
 
     vls.tick()
     req0 = vls.pop_request()
@@ -29,8 +29,8 @@ def test_vlsu_load_issue_tracks_destination_per_scratchpad():
 def test_vlsu_load_response_maps_back_to_dest_fifo_order():
     vls = VLSU(scratchpad_count=2)
 
-    assert vls.enqueue_issue({"kind": "load", "scratchpad": 0, "vd": 3, "addr": 0x1000})
-    assert vls.enqueue_issue({"kind": "load", "scratchpad": 0, "vd": 4, "addr": 0x1040})
+    assert vls.enqueue_issue({"kind": "load", "scratchpad": 0, "vd": 3, "addr": 0x1000, "dtype": "fp16"})
+    assert vls.enqueue_issue({"kind": "load", "scratchpad": 0, "vd": 4, "addr": 0x1040, "dtype": "fp16"})
 
     vls.tick()
     assert vls.pop_request()["kind"] == "load"
@@ -69,6 +69,7 @@ def test_vlsu_store_is_pass_through_and_uses_vrf_read_callback():
             "addr": 0x3000,
             "swizzle": "col_major",
             "mask": [True, False],
+            "dtype": "fp16",
         }
     )
 
@@ -92,7 +93,7 @@ def test_vlsu_writeback_callback_consumes_completed_load():
 
     vls = VLSU(scratchpad_count=2, write_vreg_cb=_write_vreg)
 
-    assert vls.enqueue_issue({"kind": "load", "scratchpad": 1, "vd": 10, "addr": 0x5000})
+    assert vls.enqueue_issue({"kind": "load", "scratchpad": 1, "vd": 10, "addr": 0x5000, "dtype": "fp16"})
     vls.tick()
     _ = vls.pop_request()
     assert vls.outstanding_loads(1) == 1

@@ -113,7 +113,7 @@ def _write_slot_vector_u16(spad: Scratchpad, addr: int, values):
 
 def test_scratchpad_vector_core_load_compute_store_back():
     eq, clk, sim = build_sim()
-    vc = VectorCore(veggie_size=128, lane_count=4, vls_count=1, fu_latencies={"alu": 1})
+    vc = VectorCore(veggie_size=128, lane_count=4, vls_count=1, fu_latencies={"alu": 1}, dtype="fp16")
     spad = Scratchpad(
         num_banks=8,
         bank_size=32,
@@ -132,7 +132,7 @@ def test_scratchpad_vector_core_load_compute_store_back():
 
     # Preload source vector directly into scratchpad slot, then load it via VLS.
     _write_slot_vector_u16(spad, src_addr, src)
-    assert vc.enqueue_memory({"kind": "load", "vls": 0, "dst": 5, "addr": src_addr})
+    assert vc.enqueue_memory({"kind": "load", "vls": 0, "dst": 5, "addr": src_addr, "dtype": "fp16"})
 
     state = {
         "cycles": 0,
@@ -156,7 +156,7 @@ def test_scratchpad_vector_core_load_compute_store_back():
                 assert vc.enqueue_compute("add", dst=6, src0=5, src1=[1] * vc.vector_len)
                 state["compute_issued"] = True
             if state["compute_issued"] and (not state["store_issued"]) and source == "datapath" and dst == 6:
-                assert vc.enqueue_memory({"kind": "store", "vls": 0, "src": 6, "addr": dst_addr})
+                assert vc.enqueue_memory({"kind": "store", "vls": 0, "src": 6, "addr": dst_addr, "dtype": "fp16"})
                 state["store_issued"] = True
 
         if state["store_issued"]:
