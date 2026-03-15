@@ -107,12 +107,12 @@ def _read_dram_tile_u16(dram: DRAM, base_addr: int, rows: int, cols: int) -> Lis
     return out
 
 
-def _identity_u16(size: int) -> List[List[int]]:
-    return [[1 if i == j else 0 for j in range(size)] for i in range(size)]
+def _act_u16(size: int) -> List[List[int]]:
+    return [[((j * size + i) % 4) + 1 for j in range(size)] for i in range(size)]
 
 
 def _weights_u16(size: int) -> List[List[int]]:
-    return [[(i * size) + j + 1 for j in range(size)] for i in range(size)]
+    return [[((i * size + j) % 8) + 1 for j in range(size)] for i in range(size)]
 
 
 def _matmul_u16(a: List[List[int]], b: List[List[int]]) -> List[List[int]]:
@@ -194,7 +194,7 @@ def _tssa_reference_output(
 
     # Flush pipeline.
     for _ in range(size - 1):
-        assert sa.enqueue(zero_row, dtype=dtype)
+        assert sa.enqueue(zero_row, dtype=dtype, count_algo=False)
         assert sa.enqueue_psums(zero_row, dtype=dtype)
         sa.set_control(weight_en=False, mac_shift=True, start=True, stall=False)
         sa.tick()
@@ -307,7 +307,7 @@ class TSSAReference:
                     self._pending += 1
                 self._flush_pending = self.size - 1
         elif did_flush and self._flush_pending > 0:
-            if self.sa.enqueue(self._zero_row, dtype=self.dtype):
+            if self.sa.enqueue(self._zero_row, dtype=self.dtype, count_algo=False):
                 assert self.sa.enqueue_psums([0.0] * self.size, dtype=self.dtype)
                 self.sa.set_control(weight_en=False, mac_shift=True, start=True, stall=False)
                 self._flush_pending -= 1
@@ -387,7 +387,7 @@ class GSAUTSSABridge:
                     self._pending_meta.append(dict(req.get("meta", {})))
                 self._flush_pending = self.size - 1
         elif self._flush_pending > 0:
-            if self.sa.enqueue(self._zero_row, dtype=self.sa.dtype):
+            if self.sa.enqueue(self._zero_row, dtype=self.sa.dtype, count_algo=False):
                 did_flush = True
                 assert self.sa.enqueue_psums([0.0] * self.size, dtype=self.sa.dtype)
                 self.sa.set_control(weight_en=False, mac_shift=True, start=True, stall=False)
@@ -454,7 +454,7 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
         SPAD_WGT_BASE = tile
         SPAD_OUT_BASE = tile * 2
 
-        act = _identity_u16(tile)
+        act = _act_u16(tile)
         wgt = _weights_u16(tile)
         # TSSA weight load shifts right each cycle; stream columns in reverse order.
         wgt_stream = [[wgt[r][c] for r in range(tile)] for c in range(tile - 1, -1, -1)]
@@ -512,6 +512,14 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
             "store_age": 0,
             "completed_rows": set(),
             "weights_done": False,
+            "bytes_load_wgt": 0,
+            "bytes_load_act": 0,
+            "bytes_store_out": 0,
+        }
+        q_stats = {
+            "samples": 0,
+            "max": {},
+            "sum": {},
         }
         metrics = TSSAMetrics(size=tile)
         observed_rows = [None for _ in range(tile)]
@@ -562,6 +570,7 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
                     state["pending_weight_load"] = False
                     dprintf("SYSARR", f"weight load done row={state['weight_row']} len={len(wb.get('data', []))}")
                     wdata = list(wb.get("data", []))
+                    state["bytes_load_wgt"] += len(wdata) * 2
                     metrics.count_weight_load()
                     nz = [i for i, v in enumerate(wdata) if v != 0]
                     if state["weight_row"] < 2:
@@ -589,6 +598,7 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
                     state["pending_act_load"] = False
                     dprintf("SYSARR", f"act load done row={state['act_row']} len={len(wb.get('data', []))}")
                     adata = list(wb.get("data", []))
+                    state["bytes_load_act"] += len(adata) * 2
                     metrics.count_act_load()
                     nz = [i for i, v in enumerate(adata) if v != 0]
                     if state["act_row"] < 2:
@@ -671,6 +681,7 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
                 if spad_vec == (state["store_row_data"] or []):
                     dprintf("SYSARR", f"store complete row={row_idx}")
                     dram.write(DRAM_OUT + row_idx * row_bytes, _encode_row_u16(spad_vec))
+                    state["bytes_store_out"] += len(spad_vec) * 2
                     metrics.count_store_row()
                     state["completed_rows"].add(row_idx)
                     state["store_inflight"] = False
@@ -688,6 +699,25 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
 
             metrics.count_cycle()
             state["cycles"] += 1
+            # Queue backpressure tracking (max + average depth).
+            vlsu0 = vc.vls_units[0]
+            q_depths = {
+                "gsau_to_systolic": len(vc.gsau.to_systolic),
+                "gsau_from_systolic": len(vc.gsau.from_systolic),
+                "gsau_rd_queue": len(vc.gsau.rd_queue),
+                "gsau_writebacks": len(vc.gsau.writebacks),
+                "scheduler_q": len(vc.scheduler_q),
+                "wb_buffer": len(vc.wb_buffer.entries),
+                "vlsu_issue_q": len(vlsu0.issue_q),
+                "vlsu_req_q": len(vlsu0.req_q),
+                "vlsu_rsp_q": len(vlsu0.rsp_q),
+                "vlsu_wb_q": len(vlsu0.wb_q),
+                "vlsu_dst_fifo": len(vlsu0.load_dst_fifos[0]),
+            }
+            q_stats["samples"] += 1
+            for name, depth in q_depths.items():
+                q_stats["sum"][name] = q_stats["sum"].get(name, 0) + depth
+                q_stats["max"][name] = max(q_stats["max"].get(name, 0), depth)
             if state["cycles"] % 500 == 0:
                 dprintf(
                     "SYSARR",
@@ -835,19 +865,87 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
             for op, cnt in lane.op_counts.items():
                 vec_op_counts[op] = vec_op_counts.get(op, 0) + cnt
         vec_reduce_ops = vc.datapath.collector.reduction_unit.reduce_ops
-        flops = (pe_mul + pe_add + vec_total_ops + vec_reduce_ops)
-        arithmetic_intensity = (flops / bytes_tx) if bytes_tx else 0.0
-        print("cycles", state["cycles"])
-        print("pe_mul_ops", pe_mul)
-        print("pe_add_ops", pe_add)
-        print("pe_mac_ops", pe_mac)
-        print("pe_psum_adds", pe_psum_add)
-        print("vec_total_ops", vec_total_ops)
-        print("vec_op_counts", vec_op_counts)
-        print("vec_reduce_ops", vec_reduce_ops)
-        print("flops", flops)
-        print("bytes_transmitted", bytes_tx)
-        print("arithmetic_intensity", arithmetic_intensity)
+        flops_micro = (pe_mul + pe_add + vec_total_ops + vec_reduce_ops)
+        bytes_internal = sa.internal_bytes_valid_total()
+        arithmetic_intensity_internal = (flops_micro / bytes_internal) if bytes_internal else 0.0
+        flops_algo = sa.algo_flops()
+        bytes_algo = sa.algo_bytes()
+        arithmetic_intensity_algo = sa.algo_arithmetic_intensity()
+        stats_path = log_dir / "stats.log"
+        stats_lines = [
+            f"cycles {state['cycles']}",
+            f"pe_mul_ops {pe_mul}",
+            f"pe_add_ops {pe_add}",
+            f"pe_mac_ops {pe_mac}",
+            f"pe_psum_adds {pe_psum_add}",
+            f"vec_total_ops {vec_total_ops}",
+            f"vec_op_counts {vec_op_counts}",
+            f"vec_reduce_ops {vec_reduce_ops}",
+            f"flops_micro {flops_micro}",
+            f"bytes_transmitted {bytes_tx}",
+            f"bytes_internal {bytes_internal}",
+            f"arithmetic_intensity_internal {arithmetic_intensity_internal}",
+            f"flops_algo {flops_algo}",
+            f"bytes_algo {bytes_algo}",
+            f"arithmetic_intensity_algo {arithmetic_intensity_algo}",
+        ]
+        mac_utilization = (sa.valid_mac_cycles / state["cycles"]) if state["cycles"] else 0.0
+        throughput = (flops_micro / state["cycles"]) if state["cycles"] else 0.0
+        external_bw = (bytes_tx / state["cycles"]) if state["cycles"] else 0.0
+        internal_bw = (bytes_internal / state["cycles"]) if state["cycles"] else 0.0
+        reuse_weight = (
+            sa.internal_bytes_valid["weight_shift"] / state["bytes_load_wgt"]
+            if state["bytes_load_wgt"]
+            else 0.0
+        )
+        reuse_act = (
+            sa.internal_bytes_valid["act_shift"] / state["bytes_load_act"]
+            if state["bytes_load_act"]
+            else 0.0
+        )
+        reuse_psum = (
+            sa.internal_bytes_valid["psum_shift"] / state["bytes_store_out"]
+            if state["bytes_store_out"]
+            else 0.0
+        )
+        ref_for_error = expected_ref if len(expected_ref) >= tile else expected_cycle
+        max_abs_error = 0.0
+        sum_abs_error = 0.0
+        count_err = 0
+        for i in range(tile):
+            for j in range(tile):
+                got_f = _fp16_from_u16(got[i][j])
+                exp_f = _fp16_from_u16(ref_for_error[i][j])
+                err = abs(got_f - exp_f)
+                if err > max_abs_error:
+                    max_abs_error = err
+                sum_abs_error += err
+                count_err += 1
+        mean_abs_error = (sum_abs_error / count_err) if count_err else 0.0
+        stats_lines.extend(
+            [
+                f"mac_utilization {mac_utilization}",
+                f"throughput_flops_per_cycle {throughput}",
+                f"external_bandwidth_bytes_per_cycle {external_bw}",
+                f"internal_bandwidth_bytes_per_cycle {internal_bw}",
+                f"reuse_weight_internal_over_external {reuse_weight}",
+                f"reuse_act_internal_over_external {reuse_act}",
+                f"reuse_psum_internal_over_external {reuse_psum}",
+                f"queue_max_depths {q_stats['max']}",
+            ]
+        )
+        if q_stats["samples"]:
+            avg_depths = {k: (v / q_stats["samples"]) for k, v in q_stats["sum"].items()}
+            stats_lines.append(f"queue_avg_depths {avg_depths}")
+        stats_lines.extend(
+            [
+                f"fp16_saturation_count {sa.saturation_count}",
+                f"fp16_overflow_count {sa.overflow_count}",
+                f"max_abs_error {max_abs_error}",
+                f"mean_abs_error {mean_abs_error}",
+            ]
+        )
+        stats_path.write_text("\n".join(stats_lines) + "\n", encoding="utf-8")
     finally:
         close_debug()
 

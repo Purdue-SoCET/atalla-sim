@@ -162,7 +162,7 @@ class TSSAReference:
                     self._pending += 1
                 self._flush_pending = self.size - 1
         elif did_flush and self._flush_pending > 0:
-            if self.sa.enqueue(self._zero_row, dtype=self.dtype):
+            if self.sa.enqueue(self._zero_row, dtype=self.dtype, count_algo=False):
                 assert self.sa.enqueue_psums([0.0] * self.size, dtype=self.dtype)
                 self.sa.set_control(weight_en=False, mac_shift=True, start=True, stall=False)
                 self._flush_pending -= 1
@@ -230,7 +230,7 @@ class GSAUTSSABridge:
                     self._pending_meta.append(dict(req.get("meta", {})))
                 self._flush_pending = self.size - 1
         elif self._flush_pending > 0:
-            if self.sa.enqueue(self._zero_row, dtype=self.sa.dtype):
+            if self.sa.enqueue(self._zero_row, dtype=self.sa.dtype, count_algo=False):
                 did_flush = True
                 assert self.sa.enqueue_psums([0.0] * self.size, dtype=self.sa.dtype)
                 self.sa.set_control(weight_en=False, mac_shift=True, start=True, stall=False)
