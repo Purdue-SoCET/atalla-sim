@@ -225,6 +225,10 @@ class VLSFrontendBridge:
         self._completed_load_ids = set()
         self.bytes_load = 0
         self.bytes_store = 0
+        self.activity_this_cycle = False
+
+    def start_cycle(self) -> None:
+        self.activity_this_cycle = False
 
     def _on_frontend_read(self, load_id: int, addr: int, lanes) -> None:
         if load_id in self._completed_load_ids:
@@ -232,6 +236,7 @@ class VLSFrontendBridge:
         self._completed_load_ids.add(load_id)
         data = _decode_lanes_u16(lanes, self.vc.vector_len)
         self.bytes_load += len(data) * 2
+        self.activity_this_cycle = True
         nz = [i for i, v in enumerate(data) if v != 0]
         if load_id < 2:
             dprintf(
@@ -251,6 +256,7 @@ class VLSFrontendBridge:
             if req["kind"] == "store":
                 dprintf("SYSARR", f"vls_req store addr={addr} len={len(req.get('data', []))}")
                 self.bytes_store += len(req.get("data", [])) * 2
+                self.activity_this_cycle = True
                 assert self.spad.frontend_write(
                     addr,
                     _encode_vector_u16(req["data"]),
@@ -515,6 +521,7 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
             "bytes_load_wgt": 0,
             "bytes_load_act": 0,
             "bytes_store_out": 0,
+            "vls_active_cycles": 0,
         }
         q_stats = {
             "samples": 0,
@@ -556,10 +563,13 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
 
         def _step(time: float):
             spad.now = time
+            vls_bridge.start_cycle()
             vc.tick()
             vls_bridge.tick()
             sysarr_bridge.tick()
             spad.tick(time)
+            if vls_bridge.activity_this_cycle:
+                state["vls_active_cycles"] += 1
 
             if vc.wb_valid and vc.last_wb is not None:
                 wb = vc.last_wb
@@ -890,8 +900,10 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
             f"arithmetic_intensity_algo {arithmetic_intensity_algo}",
         ]
         mac_utilization = (sa.valid_mac_cycles / state["cycles"]) if state["cycles"] else 0.0
+        avg_active_pes_when_active = (sa.active_pe_sum / sa.valid_mac_cycles) if sa.valid_mac_cycles else 0.0
         throughput = (flops_micro / state["cycles"]) if state["cycles"] else 0.0
         external_bw = (bytes_tx / state["cycles"]) if state["cycles"] else 0.0
+        external_bw_active = (bytes_tx / state["vls_active_cycles"]) if state["vls_active_cycles"] else 0.0
         internal_bw = (bytes_internal / state["cycles"]) if state["cycles"] else 0.0
         reuse_weight = (
             sa.internal_bytes_valid["weight_shift"] / state["bytes_load_wgt"]
@@ -925,8 +937,10 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
         stats_lines.extend(
             [
                 f"mac_utilization {mac_utilization}",
-                f"throughput_flops_per_cycle {throughput}",
-                f"external_bandwidth_bytes_per_cycle {external_bw}",
+                f"avg_active_pes_when_active {avg_active_pes_when_active}",
+                f"throughput_float_operations_per_cycle {throughput}",
+                f"external_bandwidth_avg_bytes_per_cycle {external_bw}",
+                f"external_bandwidth_active_bytes_per_cycle {external_bw_active}",
                 f"internal_bandwidth_bytes_per_cycle {internal_bw}",
                 f"reuse_weight_internal_over_external {reuse_weight}",
                 f"reuse_act_internal_over_external {reuse_act}",

@@ -90,6 +90,7 @@ class SystolicArrayTSSA(Clocked):
             "output": 0,
         }
         self.valid_mac_cycles: int = 0
+        self.active_pe_sum: int = 0
         self.saturation_count: int = 0
         self.overflow_count: int = 0
         self.psum_output_fifo_bottom: List[List[float]] = []
@@ -256,16 +257,14 @@ class SystolicArrayTSSA(Clocked):
         old_acc = [[self.array[i][j].accumulation for j in range(self.size)] for i in range(self.size)]
         old_mul = [[self.array[i][j].mul_reg for j in range(self.size)] for i in range(self.size)]
         if self.start:
-            any_active = False
+            active_pes = 0
             for i in range(self.size):
                 for j in range(self.size):
                     if old_act[i][j] != 0.0 and old_w[i][j] != 0.0:
-                        any_active = True
-                        break
-                if any_active:
-                    break
-            if any_active:
+                        active_pes += 1
+            if active_pes > 0:
                 self.valid_mac_cycles += 1
+                self.active_pe_sum += active_pes
 
         # Shared rightward pass bus is muxed between weight preload and activation shift.
         if self.weight_en:
