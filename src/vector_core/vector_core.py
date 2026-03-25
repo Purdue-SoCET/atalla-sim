@@ -38,6 +38,22 @@ class WBBuffer(Clocked):
         return len(self.entries)
 
 
+class SchedulerBacklogView:
+    def __init__(self, owner: "VectorCore"):
+        self.owner = owner
+
+    def __len__(self) -> int:
+        return self.owner.scheduler_backlog()
+
+
+class SchedulerPacketView:
+    def __init__(self, owner: "VectorCore"):
+        self.owner = owner
+
+    def __len__(self) -> int:
+        return self.owner.scheduler_packet_count()
+
+
 class GSAU(Clocked):
     """
     Global Systolic Array Unit control block.
@@ -198,7 +214,13 @@ class VectorCore(Clocked):
 
         self.wb_buffer = WBBuffer(depth=wb_depth)
         self.gsau = GSAU(max_vregs=self.max_vregs)
-        self.scheduler_q = SimQueue(max(1, scheduler_depth))
+        self.gsau_slots = 1
+        self.vlsu_slots = 4
+        self.datapath_slots = 2
+        self.vliw_q = SimQueue(max(1, scheduler_depth))
+        self._build_packet = self._empty_packet()
+        self.scheduler_q = SchedulerBacklogView(self)
+        self.scheduler_packets = SchedulerPacketView(self)
 
         self.vls_units = []
         for _ in range(vls_count):
@@ -280,7 +302,70 @@ class VectorCore(Clocked):
         - Memory:  {"unit":"vlsu", "kind":"load|store", "vls":0/1, ...}
         - GSAU:    {"unit":"gsau", ...}
         """
-        return self.scheduler_q.enqueue(dict(inst))
+        entry = dict(inst)
+        if not self._packet_append_inst(self._build_packet, entry):
+            if not self._flush_build_packet():
+                return False
+            if not self._packet_append_inst(self._build_packet, entry):
+                raise ValueError("instruction does not fit in VLIW packet: %s" % entry.get("unit", "datapath"))
+        return True
+
+    def _empty_packet(self) -> Dict[str, List[Dict]]:
+        return {"gsau": [], "vlsu": [], "datapath": []}
+
+    def _packet_has_entries(self, packet: Dict[str, List[Dict]]) -> bool:
+        return bool(packet["gsau"] or packet["vlsu"] or packet["datapath"])
+
+    def _packet_append_inst(self, packet: Dict[str, List[Dict]], inst: Dict) -> bool:
+        unit = inst.get("unit", "datapath")
+        if unit == "gsau":
+            if len(packet["gsau"]) >= self.gsau_slots:
+                return False
+            packet["gsau"].append(inst)
+            return True
+        if unit == "vlsu":
+            if len(packet["vlsu"]) >= self.vlsu_slots:
+                return False
+            packet["vlsu"].append(inst)
+            return True
+        if unit == "datapath":
+            if len(packet["datapath"]) >= self.datapath_slots:
+                return False
+            packet["datapath"].append(inst)
+            return True
+        raise ValueError("unsupported scheduler unit: %s" % unit)
+
+    def _clone_packet(self, packet: Dict[str, List[Dict]]) -> Dict[str, List[Dict]]:
+        return {
+            "gsau": [dict(x) for x in packet["gsau"]],
+            "vlsu": [dict(x) for x in packet["vlsu"]],
+            "datapath": [dict(x) for x in packet["datapath"]],
+        }
+
+    def _flush_build_packet(self) -> bool:
+        if not self._packet_has_entries(self._build_packet):
+            return True
+        if self.vliw_q.is_full():
+            return False
+        if not self.vliw_q.enqueue(self._clone_packet(self._build_packet)):
+            return False
+        self._build_packet = self._empty_packet()
+        return True
+
+    def enqueue_vliw_packet(self, packet: Dict) -> bool:
+        if not self._flush_build_packet():
+            return False
+        norm = self._empty_packet()
+        for unit in ("gsau", "vlsu", "datapath"):
+            items = packet.get(unit, [])
+            if isinstance(items, dict):
+                items = [items]
+            for inst in items:
+                if not self._packet_append_inst(norm, dict(inst)):
+                    return False
+        if not self._packet_has_entries(norm):
+            return True
+        return self.vliw_q.enqueue(norm)
 
     def enqueue_compute(
         self,
@@ -432,20 +517,22 @@ class VectorCore(Clocked):
         return self.gsau.issue(gsau_cmd)
 
     def _try_issue_scheduler(self) -> None:
-        inst = self.scheduler_q.peek()
-        if inst is None:
+        _ = self._flush_build_packet()
+        packet = self.vliw_q.peek()
+        if packet is None:
             return
-        unit = inst.get("unit", "datapath")
-        if unit == "datapath":
-            accepted = self._issue_datapath(inst)
-        elif unit == "vlsu":
-            accepted = self._issue_vlsu(inst)
-        elif unit == "gsau":
-            accepted = self._issue_gsau(inst)
-        else:
-            raise ValueError("unsupported scheduler unit: %s" % unit)
-        if accepted:
-            _ = self.scheduler_q.dequeue()
+        for issue_fn, unit in (
+            (self._issue_gsau, "gsau"),
+            (self._issue_vlsu, "vlsu"),
+            (self._issue_datapath, "datapath"),
+        ):
+            remaining = []
+            for inst in packet[unit]:
+                if not issue_fn(inst):
+                    remaining.append(inst)
+            packet[unit] = remaining
+        if not self._packet_has_entries(packet):
+            _ = self.vliw_q.dequeue()
 
     def _collect_results_to_wb(self) -> None:
         if self.datapath.result_valid:
@@ -531,7 +618,7 @@ class VectorCore(Clocked):
         self.wb_valid = True
 
     def tick(self) -> None:
-        # 1) Consume one scheduler instruction when target unit can accept it.
+        # 1) Consume one VLIW packet when target units can accept its slots.
         self._try_issue_scheduler()
 
         # 2) Advance compute and memory units.
@@ -559,7 +646,19 @@ class VectorCore(Clocked):
         return self.vls_units[vls_id].push_response(local_rsp)
 
     def scheduler_backlog(self) -> int:
-        return len(self.scheduler_q)
+        total = 0
+        if self._packet_has_entries(self._build_packet):
+            total += (
+                len(self._build_packet["gsau"])
+                + len(self._build_packet["vlsu"])
+                + len(self._build_packet["datapath"])
+            )
+        for packet in self.vliw_q.items:
+            total += len(packet["gsau"]) + len(packet["vlsu"]) + len(packet["datapath"])
+        return total
+
+    def scheduler_packet_count(self) -> int:
+        return len(self.vliw_q) + (1 if self._packet_has_entries(self._build_packet) else 0)
 
     def pop_systolic_request(self) -> Optional[Dict]:
         return self.gsau.pop_systolic_request()

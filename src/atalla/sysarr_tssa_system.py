@@ -139,6 +139,11 @@ class TSSAReference:
         self._flush_pending = 0
         self._zero_row = [0.0] * size
         self.outputs: List[List[int]] = []
+        self._input_done = False
+
+    def finish_inputs(self) -> None:
+        self._input_done = True
+        self._flush_pending = self.size - 1
 
     def tick_from_bridge(
         self,
@@ -160,8 +165,7 @@ class TSSAReference:
                 self.sa.set_control(weight_en=False, mac_shift=True, start=True, stall=False)
                 if expect_output:
                     self._pending += 1
-                self._flush_pending = self.size - 1
-        elif did_flush and self._flush_pending > 0:
+        elif did_flush and self._input_done and self._flush_pending > 0:
             if self.sa.enqueue(self._zero_row, dtype=self.dtype, count_algo=False):
                 assert self.sa.enqueue_psums([0.0] * self.size, dtype=self.dtype)
                 self.sa.set_control(weight_en=False, mac_shift=True, start=True, stall=False)
@@ -193,6 +197,13 @@ class GSAUTSSABridge:
         self._warmup = max(0, self.size - 1)
         self._flush_pending = 0
         self._zero_row = [0.0] * self.size
+        self._input_done = False
+
+    def finish_inputs(self) -> None:
+        self._input_done = True
+        self._flush_pending = self.size - 1
+        if self.mirror is not None:
+            self.mirror.finish_inputs()
 
     def _pack_rsp(self, out_row: List[float], meta: Dict) -> Dict:
         vec = [0.0] * self.vc.vector_len
@@ -228,8 +239,7 @@ class GSAUTSSABridge:
                 self.sa.set_control(weight_en=False, mac_shift=True, start=True, stall=False)
                 if expect_output:
                     self._pending_meta.append(dict(req.get("meta", {})))
-                self._flush_pending = self.size - 1
-        elif self._flush_pending > 0:
+        elif self._input_done and self._flush_pending > 0:
             if self.sa.enqueue(self._zero_row, dtype=self.sa.dtype, count_algo=False):
                 did_flush = True
                 assert self.sa.enqueue_psums([0.0] * self.size, dtype=self.sa.dtype)
@@ -325,9 +335,10 @@ class SysArrTSSASystem:
             "cycles": 0,
             "weight_row": 0,
             "act_row": 0,
+            "act_issue_row": 0,
             "next_out_row": 0,
             "pending_weight_load": False,
-            "pending_act_load": False,
+            "act_loads_inflight": 0,
             "pending_output_rows": [],
             "store_inflight": False,
             "store_row_idx": None,
@@ -352,18 +363,22 @@ class SysArrTSSASystem:
             state["pending_weight_load"] = True
 
         def _issue_act_load():
-            if state["pending_act_load"] or state["act_row"] >= self.size:
-                return
+            if state["act_issue_row"] >= self.size:
+                return False
             assert self.vc.enqueue_memory(
                 {
                     "kind": "load",
                     "vls": 0,
                     "dst": self.A_REG,
-                    "addr": self.SPAD_ACT_BASE + state["act_row"],
+                    "addr": self.SPAD_ACT_BASE + state["act_issue_row"],
                     "dtype": self.dtype,
                 }
             )
-            state["pending_act_load"] = True
+            state["act_issue_row"] += 1
+            state["act_loads_inflight"] += 1
+            if state["act_issue_row"] >= self.size:
+                self.sysarr_bridge.finish_inputs()
+            return True
 
         def _step(time: float):
             self.spad.now = time
@@ -395,8 +410,8 @@ class SysArrTSSASystem:
                     else:
                         state["weights_done"] = True
 
-                elif src == "vlsu" and dst == self.A_REG and state["pending_act_load"]:
-                    state["pending_act_load"] = False
+                elif src == "vlsu" and dst == self.A_REG and state["act_loads_inflight"] > 0:
+                    state["act_loads_inflight"] -= 1
                     self.metrics.count_act_load()
                     assert self.vc.enqueue_scheduler_instruction(
                         {
@@ -409,8 +424,6 @@ class SysArrTSSASystem:
                         }
                     )
                     state["act_row"] += 1
-                    if state["act_row"] < self.size:
-                        _issue_act_load()
 
                 elif src == "gsau" and dst == self.OUT_REG:
                     row_idx = state["next_out_row"]
@@ -426,8 +439,10 @@ class SysArrTSSASystem:
                         )
                         state["next_out_row"] += 1
 
-            if state["weights_done"] and (not state["pending_act_load"]) and state["act_row"] < self.size:
-                _issue_act_load()
+            if state["weights_done"]:
+                while state["act_issue_row"] < self.size and state["act_loads_inflight"] < self.size:
+                    if not _issue_act_load():
+                        break
 
             if (not state["store_inflight"]) and state["pending_output_rows"]:
                 next_item = state["pending_output_rows"][0]

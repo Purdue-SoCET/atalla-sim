@@ -91,6 +91,9 @@ class SystolicArrayTSSA(Clocked):
         }
         self.valid_mac_cycles: int = 0
         self.active_pe_sum: int = 0
+        self.compute_window_cycles: int = 0
+        self.compute_window_active_pe_sum: int = 0
+        self.max_active_pes_in_cycle: int = 0
         self.saturation_count: int = 0
         self.overflow_count: int = 0
         self.psum_output_fifo_bottom: List[List[float]] = []
@@ -262,6 +265,10 @@ class SystolicArrayTSSA(Clocked):
                 for j in range(self.size):
                     if old_act[i][j] != 0.0 and old_w[i][j] != 0.0:
                         active_pes += 1
+            self.compute_window_cycles += 1
+            self.compute_window_active_pe_sum += active_pes
+            if active_pes > self.max_active_pes_in_cycle:
+                self.max_active_pes_in_cycle = active_pes
             if active_pes > 0:
                 self.valid_mac_cycles += 1
                 self.active_pe_sum += active_pes

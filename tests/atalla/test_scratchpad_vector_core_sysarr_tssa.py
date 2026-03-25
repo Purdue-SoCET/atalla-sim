@@ -290,6 +290,11 @@ class TSSAReference:
         self._flush_pending = 0
         self._zero_row = [0.0] * size
         self.outputs: List[List[int]] = []
+        self._input_done = False
+
+    def finish_inputs(self) -> None:
+        self._input_done = True
+        self._flush_pending = self.size - 1
 
     def tick_from_bridge(
         self,
@@ -311,8 +316,7 @@ class TSSAReference:
                 self.sa.set_control(weight_en=False, mac_shift=True, start=True, stall=False)
                 if expect_output:
                     self._pending += 1
-                self._flush_pending = self.size - 1
-        elif did_flush and self._flush_pending > 0:
+        elif did_flush and self._input_done and self._flush_pending > 0:
             if self.sa.enqueue(self._zero_row, dtype=self.dtype, count_algo=False):
                 assert self.sa.enqueue_psums([0.0] * self.size, dtype=self.dtype)
                 self.sa.set_control(weight_en=False, mac_shift=True, start=True, stall=False)
@@ -349,6 +353,13 @@ class GSAUTSSABridge:
         self._debug_weight_count = 0
         self._debug_act_count = 0
         self._debug_out_count = 0
+        self._input_done = False
+
+    def finish_inputs(self) -> None:
+        self._input_done = True
+        self._flush_pending = self.size - 1
+        if self.mirror is not None:
+            self.mirror.finish_inputs()
 
     def _pack_rsp(self, out_row: List[float], meta: Dict) -> Dict:
         vec = [0.0] * self.vc.vector_len
@@ -391,8 +402,7 @@ class GSAUTSSABridge:
                     self._debug_act_count += 1
                 if expect_output:
                     self._pending_meta.append(dict(req.get("meta", {})))
-                self._flush_pending = self.size - 1
-        elif self._flush_pending > 0:
+        elif self._input_done and self._flush_pending > 0:
             if self.sa.enqueue(self._zero_row, dtype=self.sa.dtype, count_algo=False):
                 did_flush = True
                 assert self.sa.enqueue_psums([0.0] * self.size, dtype=self.sa.dtype)
@@ -508,9 +518,10 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
             "cycles": 0,
             "weight_row": 0,
             "act_row": 0,
+            "act_issue_row": 0,
             "next_out_row": 0,
             "pending_weight_load": False,
-            "pending_act_load": False,
+            "act_loads_inflight": 0,
             "pending_output_rows": [],
             "store_inflight": False,
             "store_row_idx": None,
@@ -547,19 +558,24 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
             state["pending_weight_load"] = True
 
         def _issue_act_load():
-            if state["pending_act_load"] or state["act_row"] >= tile:
-                return
-            dprintf("SYSARR", f"issue act load row={state['act_row']}")
+            if state["act_issue_row"] >= tile:
+                return False
+            row_idx = state["act_issue_row"]
+            dprintf("SYSARR", f"issue act load row={row_idx}")
             assert vc.enqueue_memory(
                 {
                     "kind": "load",
                     "vls": 0,
                     "dst": A_REG,
-                    "addr": SPAD_ACT_BASE + state["act_row"],
+                    "addr": SPAD_ACT_BASE + row_idx,
                     "dtype": "fp16",
                 }
             )
-            state["pending_act_load"] = True
+            state["act_issue_row"] += 1
+            state["act_loads_inflight"] += 1
+            if state["act_issue_row"] >= tile:
+                sysarr_bridge.finish_inputs()
+            return True
 
         def _step(time: float):
             spad.now = time
@@ -604,8 +620,8 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
                         state["weights_done"] = True
                         dprintf("SYSARR", "weights_done")
 
-                elif src == "vlsu" and dst == A_REG and state["pending_act_load"]:
-                    state["pending_act_load"] = False
+                elif src == "vlsu" and dst == A_REG and state["act_loads_inflight"] > 0:
+                    state["act_loads_inflight"] -= 1
                     dprintf("SYSARR", f"act load done row={state['act_row']} len={len(wb.get('data', []))}")
                     adata = list(wb.get("data", []))
                     state["bytes_load_act"] += len(adata) * 2
@@ -627,8 +643,6 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
                         }
                     )
                     state["act_row"] += 1
-                    if state["act_row"] < tile:
-                        _issue_act_load()
 
                 elif src == "gsau" and dst == OUT_REG:
                     row_idx = state["next_out_row"]
@@ -645,8 +659,10 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
                         )
                         state["next_out_row"] += 1
 
-            if state["weights_done"] and (not state["pending_act_load"]) and state["act_row"] < tile:
-                _issue_act_load()
+            if state["weights_done"]:
+                while state["act_issue_row"] < tile and state["act_loads_inflight"] < tile:
+                    if not _issue_act_load():
+                        break
 
             if (not state["store_inflight"]) and state["pending_output_rows"]:
                 next_item = state["pending_output_rows"][0]
@@ -716,7 +732,13 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
                 "gsau_from_systolic": len(vc.gsau.from_systolic),
                 "gsau_rd_queue": len(vc.gsau.rd_queue),
                 "gsau_writebacks": len(vc.gsau.writebacks),
-                "scheduler_q": len(vc.scheduler_q),
+                "scheduler_packets": len(vc.scheduler_packets),
+                "scheduler_build_gsau": len(vc._build_packet["gsau"]),
+                "scheduler_build_vlsu": len(vc._build_packet["vlsu"]),
+                "scheduler_build_datapath": len(vc._build_packet["datapath"]),
+                "scheduler_packet_gsau": sum(len(pkt["gsau"]) for pkt in vc.vliw_q.items),
+                "scheduler_packet_vlsu": sum(len(pkt["vlsu"]) for pkt in vc.vliw_q.items),
+                "scheduler_packet_datapath": sum(len(pkt["datapath"]) for pkt in vc.vliw_q.items),
                 "wb_buffer": len(vc.wb_buffer.entries),
                 "vlsu_issue_q": len(vlsu0.issue_q),
                 "vlsu_req_q": len(vlsu0.req_q),
@@ -901,6 +923,10 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
         ]
         mac_utilization = (sa.valid_mac_cycles / state["cycles"]) if state["cycles"] else 0.0
         avg_active_pes_when_active = (sa.active_pe_sum / sa.valid_mac_cycles) if sa.valid_mac_cycles else 0.0
+        avg_active_pes_during_compute_window = (
+            sa.compute_window_active_pe_sum / sa.compute_window_cycles
+        ) if sa.compute_window_cycles else 0.0
+        max_active_pes_in_any_cycle = sa.max_active_pes_in_cycle
         throughput = (flops_micro / state["cycles"]) if state["cycles"] else 0.0
         external_bw = (bytes_tx / state["cycles"]) if state["cycles"] else 0.0
         external_bw_active = (bytes_tx / state["vls_active_cycles"]) if state["vls_active_cycles"] else 0.0
@@ -938,6 +964,8 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
             [
                 f"mac_utilization {mac_utilization}",
                 f"avg_active_pes_when_active {avg_active_pes_when_active}",
+                f"avg_active_pes_during_compute_window {avg_active_pes_during_compute_window}",
+                f"max_active_pes_in_any_cycle {max_active_pes_in_any_cycle}",
                 f"throughput_float_operations_per_cycle {throughput}",
                 f"external_bandwidth_avg_bytes_per_cycle {external_bw}",
                 f"external_bandwidth_active_bytes_per_cycle {external_bw_active}",
