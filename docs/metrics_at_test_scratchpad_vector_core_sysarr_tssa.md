@@ -106,10 +106,10 @@ The system is no longer dominated by the old single scheduler backlog. The curre
   - It tracks destination tags for in-flight systolic results.
   - Interpretation: the array can generate bursts faster than the result-retirement path fully drains them.
 
-- `gsau_writebacks: max 0, avg 0.0`
+- `gsau_writebacks: max 1, avg 0.086`
   - GSAU-completed writebacks are drained immediately into the shared WB path.
 
-- `wb_buffer: max 1, avg 0.089`
+- `wb_buffer: max 1, avg 0.003`
   - Shared writeback is not currently a major bottleneck.
 
 ### Packet Scheduler

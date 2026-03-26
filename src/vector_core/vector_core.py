@@ -18,12 +18,35 @@ class WBBuffer(Clocked):
     def __init__(self, depth: int = 128):
         super().__init__()
         self.entries = SimQueue(max(1, depth))
+        self._reserved_banks = set()
 
     def can_accept(self) -> bool:
         return not self.entries.is_full()
 
+    def start_cycle(self) -> None:
+        self._reserved_banks.clear()
+
+    def can_accept_entry(self, entry: Dict) -> bool:
+        if self.entries.is_full():
+            return False
+        bank = entry.get("bank")
+        if bank is None:
+            return True
+        if bank in self._reserved_banks:
+            return False
+        for queued in self.entries.items:
+            if queued.get("bank") == bank:
+                return False
+        return True
+
     def enqueue(self, entry: Dict) -> bool:
-        return self.entries.enqueue(dict(entry))
+        if not self.can_accept_entry(entry):
+            return False
+        item = dict(entry)
+        bank = item.get("bank")
+        if bank is not None:
+            self._reserved_banks.add(bank)
+        return self.entries.enqueue(item)
 
     def has_pending(self) -> bool:
         return not self.entries.is_empty()
@@ -230,6 +253,7 @@ class VectorCore(Clocked):
         self.last_wb = None
         self.wb_valid = False
         self.last_datapath_inst_id = None
+        self._datapath_wb_hold = None
 
     def _reg_to_bank_addr(self, reg: int) -> Tuple[int, int]:
         if reg < 0:
@@ -535,31 +559,45 @@ class VectorCore(Clocked):
             _ = self.vliw_q.dequeue()
 
     def _collect_results_to_wb(self) -> None:
-        if self.datapath.result_valid:
+        candidates = []
+
+        pkt = self._datapath_wb_hold
+        if pkt is None and self.datapath.result_valid:
             pkt = self.datapath.last_result
-            if pkt is not None and self.wb_buffer.can_accept():
-                self.wb_buffer.enqueue(
+        if pkt is not None:
+            bank, _ = self._reg_to_bank_addr(int(pkt["dst"]))
+            reduction = pkt.get("reduction")
+            candidates.append(
+                (
+                    3 if reduction is not None else 4,
+                    "datapath",
                     {
                         "source": "datapath",
                         "dst": pkt["dst"],
                         "data": pkt["vector"],
                         "dtype": pkt.get("dtype"),
+                        "bank": bank,
                         "meta": {
                             "inst_id": pkt["inst_id"],
                             "op": pkt["op"],
                             "reduce_op": pkt["reduce_op"],
                             "reduce_out_mode": pkt["reduce_out_mode"],
-                            "reduction": pkt["reduction"],
+                            "reduction": reduction,
                         },
-                    }
+                    },
+                    pkt,
                 )
+            )
 
         for vls_id, vls in enumerate(self.vls_units):
-            while vls.can_pop_writeback() and self.wb_buffer.can_accept():
-                wb = vls.pop_writeback()
-                if wb is None:
-                    break
-                self.wb_buffer.enqueue(
+            wb = vls.wb_q.peek()
+            if wb is None:
+                continue
+            bank, _ = self._reg_to_bank_addr(int(wb["vd"]))
+            candidates.append(
+                (
+                    0 if vls_id == 0 else 1,
+                    ("vlsu", vls_id),
                     {
                         "source": "vlsu",
                         "vls": vls_id,
@@ -567,24 +605,47 @@ class VectorCore(Clocked):
                         "data": wb["data"],
                         "mask": wb.get("mask"),
                         "dtype": wb.get("dtype"),
+                        "bank": bank,
                         "meta": wb,
-                    }
+                    },
+                    wb,
                 )
-
-        while self.gsau.can_pop_writeback() and self.wb_buffer.can_accept():
-            wb = self.gsau.pop_writeback()
-            if wb is None:
-                break
-            self.wb_buffer.enqueue(
-                {
-                    "source": "gsau",
-                    "dst": wb["dst"],
-                    "data": wb["data"],
-                    "mask": wb.get("mask"),
-                    "dtype": wb.get("dtype"),
-                    "meta": wb.get("meta", {}),
-                }
             )
+
+        wb = self.gsau.writebacks.peek()
+        if wb is not None:
+            bank, _ = self._reg_to_bank_addr(int(wb["dst"]))
+            candidates.append(
+                (
+                    2,
+                    "gsau",
+                    {
+                        "source": "gsau",
+                        "dst": wb["dst"],
+                        "data": wb["data"],
+                        "mask": wb.get("mask"),
+                        "dtype": wb.get("dtype"),
+                        "bank": bank,
+                        "meta": wb.get("meta", {}),
+                    },
+                    wb,
+                )
+            )
+
+        accepted_datapath = False
+        for _prio, src_key, entry, raw in sorted(candidates, key=lambda x: x[0]):
+            if not self.wb_buffer.enqueue(entry):
+                continue
+            if src_key == "datapath":
+                accepted_datapath = True
+                self._datapath_wb_hold = None
+            elif src_key == "gsau":
+                _ = self.gsau.pop_writeback()
+            else:
+                _ = self.vls_units[src_key[1]].pop_writeback()
+
+        if pkt is not None and not accepted_datapath:
+            self._datapath_wb_hold = pkt
 
     def _commit_one_writeback(self) -> None:
         self.wb_valid = False
@@ -628,6 +689,7 @@ class VectorCore(Clocked):
         self.gsau.tick()
 
         # 3) Funnel unit outputs into shared writeback buffer.
+        self.wb_buffer.start_cycle()
         self._collect_results_to_wb()
 
         # 4) Commit one writeback per cycle to Veggie.
