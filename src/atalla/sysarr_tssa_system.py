@@ -100,32 +100,42 @@ class VLSFrontendBridge:
         assert self.vc.push_scratchpad_response(self.vls_id, {"addr": addr, "data": data})
 
     def tick(self) -> None:
-        while True:
+        vls = self.vc.vls_units[self.vls_id]
+        req = vls.req_q.peek()
+        if req is None:
+            return
+
+        addr = int(req.get("addr", 0))
+        if req["kind"] == "store":
+            if self.spad.frontends[self.frontend_id].writeq.is_full():
+                return
             req = self.vc.pop_scratchpad_request(self.vls_id)
             if req is None:
-                break
+                return
+            assert self.spad.frontend_write(
+                addr,
+                _encode_vector_u16(req["data"]),
+                row_idx=0,
+                tile_id=self.frontend_id,
+            )
+            return
 
-            addr = int(req.get("addr", 0))
-            if req["kind"] == "store":
-                assert self.spad.frontend_write(
-                    addr,
-                    _encode_vector_u16(req["data"]),
-                    row_idx=0,
-                    tile_id=self.frontend_id,
-                )
-                continue
+        if req["kind"] == "load":
+            if self.spad.frontends[self.frontend_id].readq.is_full():
+                return
+            req = self.vc.pop_scratchpad_request(self.vls_id)
+            if req is None:
+                return
+            load_id = self._next_load_id
+            self._next_load_id += 1
+            assert self.spad.frontends[self.frontend_id].read(
+                addr,
+                0,
+                lambda lanes, _lid=load_id, _addr=addr: self._on_frontend_read(_lid, _addr, lanes),
+            )
+            return
 
-            if req["kind"] == "load":
-                load_id = self._next_load_id
-                self._next_load_id += 1
-                assert self.spad.frontends[self.frontend_id].read(
-                    addr,
-                    0,
-                    lambda lanes, _lid=load_id, _addr=addr: self._on_frontend_read(_lid, _addr, lanes),
-                )
-                continue
-
-            raise ValueError("unsupported request kind: %s" % req["kind"])
+        raise ValueError("unsupported request kind: %s" % req["kind"])
 
 
 class TSSAReference:
@@ -334,33 +344,35 @@ class SysArrTSSASystem:
         state = {
             "cycles": 0,
             "weight_row": 0,
+            "weight_issue_row": 0,
             "act_row": 0,
             "act_issue_row": 0,
             "next_out_row": 0,
-            "pending_weight_load": False,
+            "weight_loads_inflight": 0,
             "act_loads_inflight": 0,
             "pending_output_rows": [],
-            "store_inflight": False,
-            "store_row_idx": None,
-            "store_row_data": None,
-            "store_age": 0,
+            "store_inflight": {},
             "completed_rows": set(),
             "weights_done": False,
+            "load_issue_window": self.spad.frontends[self.vls_bridge.frontend_id].readq.max_size + 1,
+            "store_issue_window": self.spad.frontends[self.vls_bridge.frontend_id].writeq.max_size + 1,
         }
 
         def _issue_weight_load():
-            if state["pending_weight_load"] or state["weight_row"] >= self.size:
-                return
+            if state["weight_issue_row"] >= self.size:
+                return False
             assert self.vc.enqueue_memory(
                 {
                     "kind": "load",
                     "vls": 0,
                     "dst": self.W_REG,
-                    "addr": self.SPAD_WGT_BASE + state["weight_row"],
+                    "addr": self.SPAD_WGT_BASE + state["weight_issue_row"],
                     "dtype": self.dtype,
                 }
             )
-            state["pending_weight_load"] = True
+            state["weight_issue_row"] += 1
+            state["weight_loads_inflight"] += 1
+            return True
 
         def _issue_act_load():
             if state["act_issue_row"] >= self.size:
@@ -392,8 +404,8 @@ class SysArrTSSASystem:
                 src = wb.get("source")
                 dst = wb.get("dst")
 
-                if src == "vlsu" and dst == self.W_REG and state["pending_weight_load"]:
-                    state["pending_weight_load"] = False
+                if src == "vlsu" and dst == self.W_REG and state["weight_loads_inflight"] > 0:
+                    state["weight_loads_inflight"] -= 1
                     self.metrics.count_weight_load()
                     assert self.vc.enqueue_scheduler_instruction(
                         {
@@ -405,9 +417,7 @@ class SysArrTSSASystem:
                         }
                     )
                     state["weight_row"] += 1
-                    if state["weight_row"] < self.size:
-                        _issue_weight_load()
-                    else:
+                    if state["weight_row"] >= self.size:
                         state["weights_done"] = True
 
                 elif src == "vlsu" and dst == self.A_REG and state["act_loads_inflight"] > 0:
@@ -439,13 +449,45 @@ class SysArrTSSASystem:
                         )
                         state["next_out_row"] += 1
 
+            while (
+                state["weight_issue_row"] < self.size
+                and state["weight_loads_inflight"] < state["load_issue_window"]
+            ):
+                if not _issue_weight_load():
+                    break
+
             if state["weights_done"]:
-                while state["act_issue_row"] < self.size and state["act_loads_inflight"] < self.size:
+                while (
+                    state["act_issue_row"] < self.size
+                    and state["act_loads_inflight"] < state["load_issue_window"]
+                ):
                     if not _issue_act_load():
                         break
 
-            if (not state["store_inflight"]) and state["pending_output_rows"]:
-                next_item = state["pending_output_rows"][0]
+            completed_store_rows = []
+            for row_idx, store_meta in list(state["store_inflight"].items()):
+                slot = int(self.SPAD_OUT_BASE + row_idx) % self.spad.bank_size
+                spad_vec = []
+                for lane in range(self.vc.vector_len):
+                    bank = _xor_bank(slot, lane, self.spad.num_banks)
+                    blob = self.spad.tiles[0].banks[bank].mem[slot]
+                    blob = bytes(blob) if blob is not None else b"\x00\x00"
+                    if len(blob) < 2:
+                        blob = blob + (b"\x00" * (2 - len(blob)))
+                    spad_vec.append(int.from_bytes(blob[:2], "little", signed=False))
+                store_meta["age"] += 1
+                if spad_vec == (store_meta["data"] or []):
+                    self.dram.write(self.DRAM_OUT + row_idx * row_bytes, _encode_row_u16(spad_vec))
+                    self.metrics.count_store_row()
+                    state["completed_rows"].add(row_idx)
+                    completed_store_rows.append(row_idx)
+                elif store_meta["age"] > 1000:
+                    raise AssertionError("store did not commit to scratchpad")
+            for row_idx in completed_store_rows:
+                state["store_inflight"].pop(row_idx, None)
+
+            while state["pending_output_rows"] and len(state["store_inflight"]) < state["store_issue_window"]:
+                next_item = state["pending_output_rows"].pop(0)
                 row_idx = next_item["row"]
                 row_data = next_item["data"]
                 assert self.vc.enqueue_memory(
@@ -457,35 +499,10 @@ class SysArrTSSASystem:
                         "dtype": self.dtype,
                     }
                 )
-                state["store_inflight"] = True
-                state["store_row_idx"] = row_idx
-                state["store_row_data"] = row_data
-                state["store_age"] = 0
-
-            if state["store_inflight"] and state["store_row_idx"] is not None:
-                row_idx = state["store_row_idx"]
-                slot = int(self.SPAD_OUT_BASE + row_idx) % self.spad.bank_size
-                spad_vec = []
-                for lane in range(self.vc.vector_len):
-                    bank = _xor_bank(slot, lane, self.spad.num_banks)
-                    blob = self.spad.tiles[0].banks[bank].mem[slot]
-                    blob = bytes(blob) if blob is not None else b"\x00\x00"
-                    if len(blob) < 2:
-                        blob = blob + (b"\x00" * (2 - len(blob)))
-                    spad_vec.append(int.from_bytes(blob[:2], "little", signed=False))
-                state["store_age"] += 1
-                if spad_vec == (state["store_row_data"] or []):
-                    self.dram.write(self.DRAM_OUT + row_idx * row_bytes, _encode_row_u16(spad_vec))
-                    self.metrics.count_store_row()
-                    state["completed_rows"].add(row_idx)
-                    state["store_inflight"] = False
-                    state["store_row_idx"] = None
-                    state["store_row_data"] = None
-                    state["store_age"] = 0
-                    if state["pending_output_rows"] and state["pending_output_rows"][0]["row"] == row_idx:
-                        state["pending_output_rows"].pop(0)
-                elif state["store_age"] > 1000:
-                    raise AssertionError("store did not commit to scratchpad")
+                state["store_inflight"][row_idx] = {
+                    "data": row_data,
+                    "age": 0,
+                }
 
             state["cycles"] += 1
             self.metrics.count_cycle()

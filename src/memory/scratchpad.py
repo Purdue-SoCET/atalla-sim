@@ -87,7 +87,6 @@ class Scratchpad(Clocked):
             slot = sp_addr % self.bank_size
         tile = self.tiles[tile_id]
         xbar = self.tile_write_xbars[tile_id]
-        self.backend_write_inflight[tile_id] = True
 
         # build lane inputs: one element per lane (NUM_BANKS). pad with zero bytes for lanes past cols.
         lanes: List[bytes] = []
@@ -126,14 +125,32 @@ class Scratchpad(Clocked):
 
         # submit to xbar (operation queued). We don't block on xbar completion here.
         try:
-            xbar.enqueue(shift_mask, lanes, callback=_xbar_cb)
+            op_id = xbar.enqueue(shift_mask, lanes, callback=_xbar_cb)
         except Exception:
             return False
+        if op_id == -1:
+            return False
+        self.backend_write_inflight[tile_id] = True
         return True
     
     def attach_backend(self, backend):
         self.backend = backend
         backend.send_sram_write = self._accept_backend_write
+        backend.send_sram_read = self.backend_read_row
+        return backend
+
+    def backend_read_row(self, sp_addr: int, row_idx: int, tx_id: int) -> bytes:
+        tile_id, slot = self._tile_and_slot(sp_addr)
+        tile = self.tiles[tile_id]
+        lanes: List[bytes] = []
+        for lane in range(self.num_banks):
+            bank = _xor_bank(slot, lane, self.num_banks)
+            blob = tile.banks[bank].mem[slot]
+            lane_bytes = bytes(blob) if blob is not None else b""
+            if len(lane_bytes) < self.elem_bytes:
+                lane_bytes = lane_bytes + (b"\x00" * (self.elem_bytes - len(lane_bytes)))
+            lanes.append(lane_bytes[: self.elem_bytes])
+        return b"".join(lanes)
 
     # minimal frontend helpers (write uses same swizzle path)
     def frontend_write(self, base_sp_addr: int, row_bytes: bytes, row_idx: int, tile_id: int = None) -> bool:
@@ -158,7 +175,6 @@ class Scratchpad(Clocked):
             slot = sp_addr % self.bank_size
         tile = self.tiles[tile_id]
         xbar = self.tile_read_xbars[tile_id]
-        self.backend_read_inflight[tile_id] = True
 
         # Gather per-bank data (bank order)
         per_bank = []
@@ -174,9 +190,12 @@ class Scratchpad(Clocked):
                 unswizzled = [routed_out[_xor_bank(slot, lane, self.num_banks)] for lane in range(self.num_banks)]
                 frontend_cb(unswizzled)
         try:
-            xbar.enqueue(list(range(self.num_banks)), per_bank, callback=_xbar_cb)
+            op_id = xbar.enqueue(list(range(self.num_banks)), per_bank, callback=_xbar_cb)
         except Exception:
             return False
+        if op_id == -1:
+            return False
+        self.backend_read_inflight[tile_id] = True
         return True
 
     # tick() to advance internal xbars and banks; call this from simulator each cycle

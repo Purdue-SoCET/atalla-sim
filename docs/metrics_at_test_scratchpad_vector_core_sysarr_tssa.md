@@ -1,178 +1,195 @@
 # TSSA GEMM Stats Report
 
-This report explains the current metrics in `stats.log` for the end-to-end path:
+This note explains the metrics emitted by `stats.log` for
+`tests/atalla/test_scratchpad_vector_core_sysarr_tssa.py`.
 
-`dram -> scratchpad -> vlsu -> veggie -> gsau -> tssa -> gsau -> veggie -> vlsu -> scratchpad -> dram`
+Current modeled path:
+
+`dram -> backend -> scratchpad -> vlsu -> veggie -> gsau -> tssa -> gsau -> veggie -> vlsu -> scratchpad -> backend -> dram`
+
+The numbers below match the current backend-wired run in
+`logs/sysarr_gemm_tssa/stats.log`.
 
 ## Summary
 
-- End-to-end latency is `359` cycles.
-- Algorithmic GEMM arithmetic intensity is `10.67`, which matches a `32x32 @ 32x32` FP16 GEMM:
-  - `flops_algo = 2 * 32^3 = 65536`
-  - `bytes_algo = 3 * 32 * 32 * 2 = 6144`
-- The array now reaches full instantaneous occupancy:
-  - `max_active_pes_in_any_cycle = 1024`
+- End-to-end latency is `574` cycles.
+- Algorithmic GEMM arithmetic intensity is `10.67` for a `32 x 32` FP16 GEMM.
 - Correctness is clean:
   - `fp16_saturation_count = 0`
   - `fp16_overflow_count = 0`
   - `max_abs_error = 0.0`
   - `mean_abs_error = 0.0`
+- The array reaches high but not full instantaneous occupancy in this run:
+  - `max_active_pes_in_any_cycle = 896`
 
 ## Compute Metrics
 
-- `flops_micro = 432128`
-  - Internal floating-point work counted in the modeled hardware.
-  - Includes PE arithmetic, not just algorithmic GEMM FLOPs.
+- `flops_micro = 652288`
+  - Modeled floating-point work performed inside the simulated machine.
+  - Includes PE arithmetic and any modeled vector-side work.
 
-- `throughput_float_operations_per_cycle = 1203.70`
-  - `flops_micro / cycles`
-  - Useful for comparing schedules or implementations.
-  - This is not the same as strict application-level FLOPs/cycle.
+- `flops_algo = 65536`
+  - Algorithmic GEMM FLOPs only.
+  - For this workload: `2 * 32^3 = 65536`.
 
-- `mac_utilization = 0.1532`
-  - Fraction of total end-to-end cycles where at least one PE had a valid MAC.
-  - This includes non-compute phases in the denominator, so it is a whole-system utilization metric.
+- `throughput_float_operations_per_cycle = 1136.39`
+  - Computed as `flops_micro / cycles`.
+  - This is a whole-run throughput metric, so preload, drain, and writeback all stay in the denominator.
 
-- `avg_active_pes_when_active = 574.84`
-  - Average number of active PEs conditioned on at least one PE being active.
-  - This says the array is reasonably well utilized during active compute windows.
+- `mac_utilization = 0.5030`
+  - Computed as:
+    - `active_pe_sum / (valid_mac_cycles * size * size)`
+  - This is now a valid-cycle metric.
+  - Interpretation: when the MAC pipeline is actually doing valid work, about `50.3%` of the `32 x 32` array is active on average.
 
-- `avg_active_pes_during_compute_window = 501.84`
-  - Average active PE count across all `start == True` cycles.
-  - Slightly lower than the conditional metric because it includes compute-window cycles with lower occupancy.
+- `avg_active_pes_when_active = 515.10`
+  - Computed as `active_pe_sum / valid_mac_cycles`.
+  - This is the average active PE count conditioned on valid MAC cycles only.
 
-- `max_active_pes_in_any_cycle = 1024`
-  - Peak observed active PE count.
-  - This confirms the `32x32` array does fully fill.
+- `avg_active_pes_during_compute_window = 506.92`
+  - Computed over all `start == True` cycles, including lower-occupancy compute-window cycles.
+
+- `max_active_pes_in_any_cycle = 896`
+  - Peak active PE count observed in a single cycle.
 
 ## Bandwidth and Intensity
 
 - `bytes_transmitted = 6144`
   - External data moved across the VLS-visible boundary.
-  - One activation tile, one weight tile, one output tile.
+  - One activation tile + one weight tile + one output tile.
 
-- `external_bandwidth_avg_bytes_per_cycle = 17.11`
-  - Average external bandwidth across the full end-to-end execution.
-  - Includes compute, warmup, drain, and store completion cycles in the denominator.
-
-- `external_bandwidth_active_bytes_per_cycle = 64.0`
-  - Average external bandwidth during actual load/store transfer cycles.
-  - `64 B/cycle` corresponds to one full `32`-element FP16 row per active transfer cycle.
-
-- `bytes_internal = 138608`
-  - Valid, non-zero internal traffic during active MAC phases.
-
-- `internal_bandwidth_bytes_per_cycle = 386.09`
-  - Internal array traffic per end-to-end cycle.
-  - Much larger than external bandwidth, which is expected in a systolic architecture because data is reused by shifting internally.
-
-- `arithmetic_intensity_internal = 3.118`
-  - “Useful internal work per useful internal byte moved.”
-  - This is a datapath-density metric, not a roofline metric.
+- `bytes_algo = 6144`
+  - Classical GEMM bytes for A, B, and C.
+  - For this workload: `3 * 32 * 32 * 2 = 6144`.
 
 - `arithmetic_intensity_algo = 10.67`
-  - Classical GEMM arithmetic intensity.
-  - Useful for algorithm-level comparison.
+  - `flops_algo / bytes_algo`
+  - This is the algorithm-level arithmetic intensity.
+
+- `bytes_internal = 154760`
+  - Valid internal array traffic only.
+  - This comes from `internal_bytes_valid_total()`, so it excludes zero/invalid movement.
+
+- `arithmetic_intensity_internal = 4.2148`
+  - `flops_micro / bytes_internal`
+  - A datapath-density metric for useful internal work per useful internal byte moved.
+
+- `external_bandwidth_avg_bytes_per_cycle = 10.70`
+  - `bytes_transmitted / cycles`
+  - Average over the full run.
+
+- `external_bandwidth_active_bytes_per_cycle = 65.36`
+  - `bytes_transmitted / vls_active_cycles`
+  - Average only over cycles where the VLS bridge saw activity.
+
+- `internal_bandwidth_bytes_per_cycle = 269.62`
+  - `bytes_internal / cycles`
+  - Average useful internal traffic over the full run.
 
 ## Reuse
 
-- `reuse_act_internal_over_external = 31.125`
-  - Activation bytes are reused internally about `31x` relative to external activation traffic.
-  - This is very close to the expected `32`-wide systolic reuse intuition.
+- `reuse_act_internal_over_external = 31.3125`
+  - `internal_bytes_valid["act_shift"] / bytes_load_act`
+  - This is close to the expected `32x` activation reuse intuition for a 32-wide systolic flow.
 
-- `reuse_psum_internal_over_external = 35.32`
-  - Partial sums move internally many times before exiting.
-  - This reflects substantial vertical psum traffic, which is normal for systolic accumulation.
+- `reuse_psum_internal_over_external = 43.1699`
+  - `internal_bytes_valid["psum_shift"] / bytes_store_out`
+  - Reflects substantial vertical partial-sum movement before output leaves the array.
 
 - `reuse_weight_internal_over_external = 0.0`
-  - This is a metric-definition artifact, not a hardware failure.
-  - Weight preload happens before `start`, while the internal-valid-byte counter only counts traffic during active MAC phases.
+  - This is a metric-definition artifact.
+  - Weight preload happens before valid MAC cycles, while `internal_bytes_valid["weight_shift"]` only counts valid movement during active compute.
 
 ## Queue and Scheduler Analysis
 
-The system is no longer dominated by the old single scheduler backlog. The current scheduler is packet-based, so the queue metrics should be read as packet occupancy plus per-FU packet contents.
+These metrics are sampled once per simulated cycle in the test harness and summarize queue depth over the whole run.
 
 ### GSAU / Writeback Side
 
 - `gsau_to_systolic: max 0, avg 0.0`
-  - No backlog at the TSSA request ingress.
-  - The bridge is consuming GSAU requests immediately.
+  - No sustained ingress backlog into TSSA.
 
-- `gsau_from_systolic: max 1, avg 0.089`
-  - Very small response accumulation.
+- `gsau_from_systolic: max 1, avg 0.0557`
+  - Response accumulation is very small.
 
-- `gsau_rd_queue: max 27, avg 2.41`
-  - This is now one of the more active queues.
-  - It tracks destination tags for in-flight systolic results.
-  - Interpretation: the array can generate bursts faster than the result-retirement path fully drains them.
+- `gsau_rd_queue: max 29, avg 3.066`
+  - One of the more active queues in the flow.
+  - This tracks outstanding result metadata while rows are being retired.
 
-- `gsau_writebacks: max 1, avg 0.086`
-  - GSAU-completed writebacks are drained immediately into the shared WB path.
+- `gsau_writebacks: max 3, avg 0.1516`
+  - Completed GSAU outputs briefly accumulate before the shared VC writeback path drains them.
 
-- `wb_buffer: max 1, avg 0.003`
-  - Shared writeback is not currently a major bottleneck.
+- `wb_buffer: max 1, avg 0.0052`
+  - Shared writeback is not a dominant bottleneck in this run.
 
 ### Packet Scheduler
 
-- `scheduler_packets: max 8, avg 0.64`
-  - Number of queued VLIW packets waiting behind the currently building packet.
+- `scheduler_packets: max 2, avg 0.176`
+  - Pending packet backlog is modest.
 
-- `scheduler_build_gsau: max 1, avg 0.175`
-  - GSAU entries sitting in the in-progress packet builder.
-  - Since the packet has only one GSAU slot, this is expected to stay small.
+- `scheduler_build_gsau: max 1, avg 0.1098`
+  - Small in-progress packet pressure on the GSAU slot.
 
-- `scheduler_build_vlsu: max 4, avg 0.187`
-  - VLSU entries sitting in the in-progress packet builder.
-  - Hitting `4` means the VLSU side fully occupies its packet slot budget in bursts.
+- `scheduler_build_vlsu: max 1, avg 0.1533`
+  - Small in-progress packet pressure on the VLSU slot.
 
 - `scheduler_build_datapath: max 0, avg 0.0`
-  - No datapath work is being issued in this workload.
+  - No vector datapath work in this GEMM flow.
 
-- `scheduler_packet_gsau: max 3, avg 0.27`
-  - Number of queued GSAU instructions already packed into pending VLIW packets.
+- `scheduler_packet_gsau: max 1, avg 0.0017`
+  - Very small queued GSAU occupancy once instructions are packetized.
 
-- `scheduler_packet_vlsu: max 28, avg 0.40`
-  - Number of queued VLSU instructions already packed into pending VLIW packets.
-  - This is the dominant packetized scheduler pressure in this workload.
+- `scheduler_packet_vlsu: max 4, avg 0.0174`
+  - Some burstiness on the VLSU side, but much lower than older direct-load/store versions of the test.
 
 - `scheduler_packet_datapath: max 0, avg 0.0`
-  - Again confirms no vector ALU pressure for this test.
+  - Confirms no datapath-issued vector ALU work here.
 
 ### VLSU Side
 
-- `vlsu_issue_q: max 24, avg 1.07`
-  - This is a clear burst absorber now.
-  - The scheduler and packetization can produce VLSU work faster than the VLSU consumes in short bursts.
+- `vlsu_issue_q: max 3, avg 0.0314`
+  - Minor burst absorption only.
 
-- `vlsu_req_q: max 0, avg 0.0`
-  - Once a VLSU op is issued, it is forwarded promptly.
+- `vlsu_req_q: max 1, avg 0.0070`
+  - Requests move through quickly.
 
-- `vlsu_rsp_q: max 1, avg 0.178`
+- `vlsu_rsp_q: max 1, avg 0.1115`
   - Small response-side buffering only.
 
 - `vlsu_wb_q: max 0, avg 0.0`
-  - No meaningful writeback congestion inside the VLSU.
+  - No meaningful VLSU writeback congestion.
 
-- `vlsu_dst_fifo: max 4, avg 0.713`
-  - A few outstanding load destinations in flight, but not excessive.
+- `vlsu_dst_fifo: max 5, avg 1.5261`
+  - A handful of outstanding loads in flight, which is expected.
 
 ## Small Architecture Readout
 
-- The `32x32` TSSA is now reaching full occupancy, so the array itself is not the obvious bottleneck.
-- External streaming is clean at one full FP16 row per active transfer cycle.
-- The dominant remaining pressures are:
-  - VLSU issue-side burst handling
-  - GSAU destination tracking / result retirement
-- The packet scheduler appears to be doing its job:
-  - packet backlog is moderate
-  - per-FU packet occupancy shows the workload is mainly VLSU + GSAU driven
-  - datapath slots are unused in this GEMM flow
+- This harness now models two distinct memory regimes:
+  - backend-driven bulk movement for DRAM <-> scratchpad traffic
+  - VLSU-driven row traffic for scratchpad <-> VRF exchanges during compute
+- The systolic array is not starved, but it is also not running at full-mesh occupancy throughout the valid compute window.
+  - `avg_active_pes_when_active = 515.10`
+  - `max_active_pes_in_any_cycle = 896`
+  - Taken together, these say the `32 x 32` mesh is meaningfully loaded, but the row-by-row feed/retire structure leaves substantial headroom below 1024 PEs.
+- Scheduler pressure is present but modest.
+  - Packet counts are low.
+  - VLSU-side issue buffering is shallow.
+  - There is no sign of a scheduler-wide traffic jam.
+- The more characteristic pressure is on the result-retirement side of the systolic path.
+  - `gsau_rd_queue` is the most consistently elevated queue in the run.
+  - `gsau_writebacks` and `vlsu_dst_fifo` show small but persistent in-flight state around result movement.
+- The whole-system latency now includes backend preload and backend storeback phases, so `cycles` should be read as a full pipeline number, not just a pure compute-window number.
 
 ## Current Bottleneck Hypothesis
 
-The present bottleneck is most likely not packet scheduling. It is more likely the combination of:
+The current bottleneck is best described as throughput mismatch across the row pipeline, not scheduler collapse.
 
-- how quickly VLSU-issued memory ops can be consumed in bursts
-- how many systolic outputs can be retired through the GSAU rd/writeback path
+- On the front side, the backend preload path adds fixed latency before compute can begin, but it does not appear to build pathological queue pressure once the run is underway.
+- During compute, the VLSU and GSAU keep the array fed well enough to maintain steady activity, but not well enough to sustain near-full occupancy across the entire valid window.
+- On the back side, output retirement is the clearest pacing point.
+  - GSAU must track and drain returning rows in order.
+  - Results pass through shared architectural writeback.
+  - Output rows are then stored to scratchpad and finally written back to DRAM through the backend.
+- That combination makes the post-compute / retire path more plausible as the limiting factor than packet formation or scheduler slot availability.
 
-That fits the queue data better than a scheduler-bound explanation.
+The machine looks retirement-limited more than issue-limited. The queue data supports a story where compute proceeds steadily. But overall progress is bounded by how quickly rows can be observed, committed, and pushed through the scratchpad-to-DRAM tail.

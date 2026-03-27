@@ -8,6 +8,8 @@ from base.queue import SimQueue
 
 import math
 
+from memory.dram import DRAM
+
 
 @dataclass
 class DRAMOperation:
@@ -72,6 +74,7 @@ class Backend(Clocked):
         self.elem_bytes = int(elem_bytes)
         self.send_sram_write = send_sram_write
         self.send_sram_read = send_sram_read
+        self.dram: Optional[DRAM] = None
 
         # outstanding DRAM bursts being serviced by the (simulated) DRAM
         self._dram_pending: SimQueue[DRAMOperation] = SimQueue(max_size=self.dram_q_depth)
@@ -95,6 +98,17 @@ class Backend(Clocked):
         self.last_op_tick = -1
         self._tick = -1
         self._pending_sram_reads = deque()
+
+    def attach_scratchpad(self, scratchpad: Any) -> Any:
+        self.send_sram_write = scratchpad._accept_backend_write
+        self.send_sram_read = scratchpad.backend_read_row
+        if getattr(scratchpad, "backend", None) is not self:
+            scratchpad.backend = self
+        return scratchpad
+
+    def attach_dram(self, dram: DRAM) -> DRAM:
+        self.dram = dram
+        return dram
 
     def is_busy(self, now: Optional[int] = None) -> bool:
         if self.delay_cycles <= 0:
@@ -292,9 +306,12 @@ class Backend(Clocked):
         For stores: check for transaction completion.
         """
         if not req.is_write:
-            # Simulate deterministic payload for loads
-            payload = bytes([req.tx_id & 0xFF, req.row & 0xFF, req.subidx & 0xFF]) * ((req.length + 2) // 3)
-            payload = payload[:req.length]
+            if self.dram is not None:
+                payload = self.dram.read(req.dram_addr, req.length)
+            else:
+                # Fallback payload for older tests that do not attach a DRAM.
+                payload = bytes([req.tx_id & 0xFF, req.row & 0xFF, req.subidx & 0xFF]) * ((req.length + 2) // 3)
+                payload = payload[:req.length]
             tx = self._active_txs.get(req.tx_id)
             if tx:
                 tx.row_bufs[req.row][req.subidx] = payload
@@ -308,6 +325,8 @@ class Backend(Clocked):
                     # Try to issue more subreqs if queue space is available
                     self.backend_to_dram_issue_row_load_subreqs(tx)
         else:
+            if self.dram is not None and req.data is not None:
+                self.dram.write(req.dram_addr, req.data)
             # DRAM write completed
             # Check for store transaction completion
             tx = self._active_txs.get(req.tx_id)

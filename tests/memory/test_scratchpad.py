@@ -7,6 +7,7 @@ from base.core import Core
 from base.sim import Sim
 
 from memory.sc_sram_banks import _xor_bank
+from memory.dram import DRAM
 from memory.scratchpad import Scratchpad
 from memory.backend import Backend
 
@@ -117,6 +118,50 @@ def test_scratchpad_full():
     assert read_data[:len(row_bytes)] == row_bytes, f"Frontend read data mismatch: {read_data[:len(row_bytes)]} vs {row_bytes}"
 
     print("Frontend read test passed.")
+
+
+def test_backend_can_attach_to_scratchpad_and_dram():
+    dram = DRAM(block_bytes=16)
+    spad = Scratchpad(num_banks=4, bank_size=16, read_latency=1, write_latency=1, xbar_delay=1, elem_bytes=2)
+    backend = Backend(dram_latency=1, dram_q_depth=8, dram_burst_bytes=4, elem_bytes=2)
+
+    spad.attach_backend(backend)
+    backend.attach_dram(dram)
+
+    assert spad.backend is backend
+    assert backend.dram is dram
+    assert backend.send_sram_write == spad._accept_backend_write
+    assert backend.send_sram_read == spad.backend_read_row
+
+    load_row = b"".join((i + 1).to_bytes(2, "little") for i in range(4))
+    dram.write(0x100, load_row)
+    tx_id = backend.driver_to_backend_start_load(base_sp_addr=3, base_dram_addr=0x100, rows=1, cols=4)
+    assert tx_id > 0
+
+    for cycle in range(8):
+        backend.tick(cycle)
+        spad.tick(cycle)
+
+    slot = 3
+    got = []
+    for lane in range(4):
+        bank = _xor_bank(slot, lane, spad.num_banks)
+        got.append(spad.tiles[0].banks[bank].mem[slot])
+    assert got == [(i + 1).to_bytes(2, "little") for i in range(4)]
+
+    store_row = b"".join((10 + i).to_bytes(2, "little") for i in range(4))
+    for lane in range(4):
+        bank = _xor_bank(5, lane, spad.num_banks)
+        spad.tiles[0].banks[bank].mem[5] = store_row[lane * 2 : lane * 2 + 2]
+
+    tx_id2 = backend.driver_to_backend_start_store(base_sp_addr=5, base_dram_addr=0x200, rows=1, cols=4)
+    assert tx_id2 > 0
+
+    for cycle in range(8, 16):
+        backend.tick(cycle)
+        spad.tick(cycle)
+
+    assert dram.read(0x200, len(store_row)) == store_row
 
 if __name__ == "__main__":
     test_scratchpad_full()
