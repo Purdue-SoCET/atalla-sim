@@ -202,7 +202,7 @@ def _busy_units_snapshot(vc: VectorCore, sa: SystolicArrayTSSA, state: Dict, spa
         busy.append(
             "driver.preload="
             f"done:{','.join(preload_done) if preload_done else 'none'}"
-            f",settle:{state.get('preload_settle', 0)}"
+            f",drain:{int(bool(state.get('preload_wait_drain', False)))}"
         )
     if state.get("pending_output_rows"):
         busy.append(f"driver.pending_output_rows={len(state['pending_output_rows'])}")
@@ -215,6 +215,8 @@ def _busy_units_snapshot(vc: VectorCore, sa: SystolicArrayTSSA, state: Dict, spa
         )
     if state.get("backend_store_rows"):
         busy.append(f"driver.backend_store_rows={len(state['backend_store_rows'])}")
+    if state.get("backend_store_tx_done"):
+        busy.append(f"driver.backend_store_done={len(state['backend_store_tx_done'])}")
 
     if backend is not None:
         bstats = backend.get_stats()
@@ -614,7 +616,7 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
         dram = DRAM(block_bytes=256)
         # Backend models the DMA-style path that moves tiles between DRAM and the
         # scratchpad outside the VLS/VRF datapath used by compute.
-        backend = Backend(dram_latency=8, dram_q_depth=32, dram_burst_bytes=32, elem_bytes=2)
+        backend = Backend(dram_latency=24, dram_q_depth=16, dram_burst_bytes=32, elem_bytes=2)
         spad.attach_backend(backend)
         backend.attach_dram(dram)
         DRAM_ACT = 0x1000
@@ -681,9 +683,11 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
             "bytes_store_out": 0,
             "vls_active_cycles": 0,
             "preload_done": False,
-            "preload_settle": 0,
+            "preload_wait_drain": False,
             "preload_tx_done": set(),
             "backend_store_rows": set(),
+            "backend_store_tx_done": set(),
+            "backend_store_txs": {},
             # The modeled memory path is narrow:
             # - VLSU accepts/advances one memory op per cycle
             # - scratchpad frontend queues are finite
@@ -708,8 +712,22 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
         def _on_preload_done(name: str):
             state["preload_tx_done"].add(name)
             if len(state["preload_tx_done"]) == 2:
-                # Allow the final backend->scratchpad write to drain through xbar and banks.
-                state["preload_settle"] = spad.tile_write_xbars[0].delay + spad.tiles[0].write_latency + 1
+                state["preload_wait_drain"] = True
+
+        def _spad_write_path_idle() -> bool:
+            if any(spad.backend_write_inflight):
+                return False
+            if any(xbar.get_stats()["pending"] > 0 for xbar in spad.tile_write_xbars):
+                return False
+            for tile_obj in spad.tiles:
+                for bank in tile_obj.banks:
+                    if len(bank._pending) > 0:
+                        return False
+            return True
+
+        def _on_backend_store_done(row_idx: int, tx_id: int) -> None:
+            state["backend_store_tx_done"].add(row_idx)
+            state["backend_store_txs"].pop(row_idx, None)
 
         # Preload activation and weight tiles through the backend, matching the
         # RTL split between bulk DRAM movement and compute-time VLS accesses.
@@ -786,10 +804,18 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
             backend.tick(time)
             spad.tick(time)
 
-            if not state["preload_done"] and len(state["preload_tx_done"]) == 2:
-                if state["preload_settle"] > 0:
-                    state["preload_settle"] -= 1
-                else:
+            if (
+                not state["preload_done"]
+                and state["preload_wait_drain"]
+                and len(state["preload_tx_done"]) == 2
+            ):
+                bstats = backend.get_stats()
+                if (
+                    bstats["queued_txs"] == 0
+                    and bstats["outstanding_txs"] == 0
+                    and bstats["dram_pending"] == 0
+                    and _spad_write_path_idle()
+                ):
                     state["preload_done"] = True
 
             busy_units = _busy_units_snapshot(vc, sa, state, spad=spad, backend=backend)
@@ -957,9 +983,11 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
                             base_dram_addr=DRAM_OUT + row_idx * row_bytes,
                             rows=1,
                             cols=tile,
+                            callback=lambda _tx, row=row_idx: _on_backend_store_done(row, _tx),
                         )
                         assert tx_id > 0
                         state["backend_store_rows"].add(row_idx)
+                        state["backend_store_txs"][row_idx] = tx_id
                     completed_store_rows.append(row_idx)
                 elif store_meta["age"] > 1000:
                     dprintf(
@@ -970,9 +998,10 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
             for row_idx in completed_store_rows:
                 state["store_inflight"].pop(row_idx, None)
 
-            # Backend store completion is observed at the architectural boundary we
-            # care about here: the output row is visible in DRAM.
-            for row_idx in sorted(state["backend_store_rows"] - state["completed_rows"]):
+            # Backend store completion is observed through the backend callback, then
+            # confirmed at the architectural boundary we care about: the row is now
+            # visible in DRAM.
+            for row_idx in sorted(state["backend_store_tx_done"] - state["completed_rows"]):
                 dram_row = _read_dram_row_u16(dram, DRAM_OUT + row_idx * row_bytes, tile)
                 expected_row = observed_rows[row_idx] if row_idx < len(observed_rows) else None
                 if expected_row is not None and dram_row == expected_row[:tile]:
