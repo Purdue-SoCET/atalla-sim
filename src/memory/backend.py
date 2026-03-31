@@ -37,6 +37,8 @@ class BackendTransaction:
     callback: Optional[Callable[[int], None]] = None
     is_store: bool = False  # store = SP->DRAM (writeback), load = DRAM->SP
     issued_subreqs: List[set] = field(default_factory=list)
+    total_subreqs: int = 0
+    completed_subreqs: int = 0
 
 
 class Backend(Clocked):
@@ -99,6 +101,24 @@ class Backend(Clocked):
         self._tick = -1
         self._pending_sram_reads = deque()
 
+    def _dram_bus_available(self) -> bool:
+        # Model a split-transaction DRAM-facing burst channel:
+        # - multiple bursts may remain in flight at once
+        # - but only one new burst may launch every delay_cycles cycles
+        # - outstanding concurrency is still bounded by dram_q_depth
+        return (not self._dram_pending.is_full()) and (not self.is_busy())
+
+    def _enqueue_dram_burst(self, req: DRAMOperation) -> bool:
+        if not self._dram_bus_available():
+            self.total_backend_stalls += 1
+            return False
+        if not self._dram_pending.enqueue(req):
+            self.total_backend_stalls += 1
+            return False
+        self.last_op_tick = self._tick
+        self.total_dram_bursts_issued += 1
+        return True
+
     def attach_scratchpad(self, scratchpad: Any) -> Any:
         self.send_sram_write = scratchpad._accept_backend_write
         self.send_sram_read = scratchpad.backend_read_row
@@ -140,13 +160,13 @@ class Backend(Clocked):
             callback=callback,
             is_store=False,
             issued_subreqs=[set() for _ in range(rows)],
+            total_subreqs=rows * subreqs,
         )
         if not self._tx_queue.enqueue(tx):
             self.total_backend_stalls += 1
             return -1
         return tx_id
 
-    #TODO queue should be a different thing, separate queue class
     def driver_to_backend_start_store(
         self, base_sp_addr: int, base_dram_addr: int, rows: int, cols: int, callback: Optional[Callable[[int], None]] = None
     ) -> int:
@@ -171,6 +191,7 @@ class Backend(Clocked):
             callback=callback,
             is_store=True,
             issued_subreqs=[set() for _ in range(rows)],
+            total_subreqs=rows * subreqs,
         )
         if not self._tx_queue.enqueue(tx):
             self.total_backend_stalls += 1
@@ -183,14 +204,9 @@ class Backend(Clocked):
         Accepts a row-worth of bytes from the Scratchpad (for STORE).
         Splits into DRAM write subrequests and enqueue them (subject to DRAM queue depth).
         """
-        if self.is_busy():
-            self.total_backend_stalls += 1
-            self._pending_sram_reads.append((tx_id, row_idx, row_bytes))
-            return
         self._accept_sram_read_response(tx_id, row_idx, row_bytes)
 
     def _accept_sram_read_response(self, tx_id: int, row_idx: int, row_bytes: bytes) -> None:
-        self.last_op_tick = self._tick
         tx = self._active_txs.get(tx_id)
         if not tx:
             # If tx not active yet, try enqueueing into tx_queue (unlikely)
@@ -214,16 +230,20 @@ class Backend(Clocked):
                             data=chunk, 
                             remaining_cycles=self.dram_latency))
 
-        # try to push them into dram_pending, if cannot, keep them in per-tx buffer and count stalls
-        pending = self._dram_pending
+        # Try to launch one burst immediately if the DRAM command channel can
+        # accept it this cycle; keep the remaining chunks parked for later retry.
         row_buf = tx.row_bufs[row_idx]
+        issued_now = False
         for req in subreqs:
-            if not pending.enqueue(req):
-                # cannot accept now; count stall and keep remaining subreqs in tx.row_bufs as pending write data
-                self.total_backend_stalls += 1
-                row_buf[req.subidx] = req.data  # store for later
+            if not issued_now and self._enqueue_dram_burst(req):
+                issued_now = True
                 continue
-            self.total_dram_bursts_issued += 1
+            if row_buf[req.subidx] is None:
+                # Cannot launch now; keep the chunk so a later tick can issue it.
+                row_buf[req.subidx] = req.data
+                self.total_backend_stalls += 1
+            else:
+                self.total_backend_stalls += 1
 
     # Internal helpers
     def backend_to_dram_issue_row_load_subreqs(self, tx: BackendTransaction) -> None:
@@ -237,11 +257,11 @@ class Backend(Clocked):
             self.backend_to_body_complete_row_load(tx, r, b"")
             return
 
-        # Issue only subreqs that have not been issued yet
+        # Issue only one new burst per call, but allow many outstanding bursts
+        # to remain in flight concurrently.
         for s in range(tx.subreqs_per_row):
             if s in tx.issued_subreqs[r]:
                 continue
-            # Try to enqueue every subrequest, count a stall for each failure
             req = DRAMOperation(
                 tx_id=tx.tx_id,
                 row=r,
@@ -252,12 +272,44 @@ class Backend(Clocked):
                 data=None,
                 remaining_cycles=self.dram_latency,
             )
-            if not self._dram_pending.enqueue(req):
-                self.total_backend_stalls += 1
-                # Do not return; keep trying to enqueue the rest
-            else:
+            if self._enqueue_dram_burst(req):
                 tx.issued_subreqs[r].add(s)
-                self.total_dram_bursts_issued += 1
+            else:
+                pass
+            return
+
+    def _retry_one_deferred_store_burst(self) -> None:
+        for tx in list(self._active_txs.values()):
+            if not tx.is_store:
+                continue
+            for row_idx, row_buf in enumerate(tx.row_bufs):
+                for subidx, chunk in enumerate(row_buf):
+                    if chunk is None:
+                        continue
+                    req = DRAMOperation(
+                        tx_id=tx.tx_id,
+                        row=row_idx,
+                        subidx=subidx,
+                        dram_addr=tx.base_dram + (row_idx * tx.cols * self.elem_bytes) + subidx * self.dram_burst_bytes,
+                        length=len(chunk),
+                        is_write=True,
+                        data=chunk,
+                        remaining_cycles=self.dram_latency,
+                    )
+                    if self._enqueue_dram_burst(req):
+                        row_buf[subidx] = None
+                    else:
+                        pass
+                    return
+
+    def _retry_one_deferred_load_burst(self) -> None:
+        for tx in list(self._active_txs.values()):
+            if tx.is_store or tx.cur_row >= tx.rows:
+                continue
+            issued_before = len(tx.issued_subreqs[tx.cur_row])
+            self.backend_to_dram_issue_row_load_subreqs(tx)
+            if len(tx.issued_subreqs[tx.cur_row]) > issued_before:
+                return
 
     def backend_to_body_complete_row_load(self, tx: BackendTransaction, row: int, row_bytes: bytes) -> None:
         """
@@ -331,12 +383,16 @@ class Backend(Clocked):
             # Check for store transaction completion
             tx = self._active_txs.get(req.tx_id)
             if tx and tx.is_store:
-                # Check if all bursts for all rows are done
-                all_done = all(
+                tx.completed_subreqs += 1
+                all_buffered_chunks_drained = all(
                     all(chunk is None for chunk in row_buf)
                     for row_buf in tx.row_bufs
                 )
-                if all_done and not self._dram_pending and tx.tx_id in self._active_txs:
+                if (
+                    tx.completed_subreqs >= tx.total_subreqs
+                    and all_buffered_chunks_drained
+                    and tx.tx_id in self._active_txs
+                ):
                     self.total_tx_completed += 1
                     if tx.callback:
                         try:
@@ -369,7 +425,7 @@ class Backend(Clocked):
             if cycle <= self._tick:
                 return
             self._tick = cycle
-        if self._pending_sram_reads and not self.is_busy():
+        if self._pending_sram_reads:
             tx_id, row_idx, row_bytes = self._pending_sram_reads.popleft()
             self._accept_sram_read_response(tx_id, row_idx, row_bytes)
         # 1) Activate queued transactions
@@ -401,7 +457,11 @@ class Backend(Clocked):
         for req in to_requeue:
             self._dram_pending.enqueue(req)
 
-        # 3) Retry handing off stalled assembled rows
+        # 3) Retry any deferred DRAM load/store bursts once the serialized bus is free.
+        self._retry_one_deferred_load_burst()
+        self._retry_one_deferred_store_burst()
+
+        # 4) Retry handing off stalled assembled rows
         for tx in list(self._active_txs.values()):
             # some rows may have been assembled and stored in row_bufs as a single-element list
             if tx.cur_row < tx.rows:

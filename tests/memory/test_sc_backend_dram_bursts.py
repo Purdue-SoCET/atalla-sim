@@ -32,7 +32,8 @@ def test_backend_stalls():
         stores.append((sp_addr, data, row_idx, tx_id))
         return data
 
-    # Set dram_q_depth=2 so we can force stalls
+    # The backend model serializes DRAM-facing bursts, so even with dram_q_depth=2
+    # we should only see one active burst at a time.
     backend = Backend(
         dram_latency=2, dram_q_depth=2, dram_burst_bytes=4, elem_bytes=1,
         send_sram_write=send_sram_write,
@@ -41,9 +42,9 @@ def test_backend_stalls():
 
     clk.add_clocked(backend)
 
-    # --- Test LOAD with guaranteed stalls ---
+    # --- Test LOAD with serialized bursts ---
     # 1 row, 32 cols, elem_bytes=1, burst_bytes=4 => 1 row * 8 subreqs/row = 8 bursts
-    # Only 2 can be pending, so 6 will stall on the first tick
+    # The DRAM-facing channel should launch those 8 bursts one at a time.
     tx_id = backend.driver_to_backend_start_load(base_sp_addr=100, base_dram_addr=200, rows=1, cols=32)
     print(f"started LOAD tx={tx_id}")
 
@@ -90,14 +91,15 @@ def test_backend_stalls():
             break
 
     stats = backend.backend_to_driver_get_stats()
-    print("Backend stats after forced stalls:", stats)
-    # There should be at least 6 stalls (8 bursts attempted, 2 accepted, 6 stalled)
-    assert stats["backend_stalls"] >= 6, f"Expected at least 6 backend stalls, got {stats['backend_stalls']}"
+    print("Backend stats after serialized bursts:", stats)
+    assert stats["backend_stalls"] == 0, f"Expected no enqueue stalls with serialized bursts, got {stats['backend_stalls']}"
 
-    # Cycle-accurate burst timing: each burst must complete after dram_latency cycles.
+    # Cycle-accurate burst timing: each burst must complete after dram_latency cycles,
+    # and the next burst may only be launched once the channel becomes free.
     total_bursts = 8
     assert len(issue_cycles) == total_bursts, f"Expected {total_bursts} bursts issued, got {len(issue_cycles)}"
     assert len(complete_cycles) == total_bursts, f"Expected {total_bursts} bursts completed, got {len(complete_cycles)}"
+    previous_issue = None
     for key, issue_info in issue_cycles.items():
         issue_cycle, issued_from_response = issue_info
         assert key in complete_cycles, f"Missing completion record for burst {key}"
@@ -107,7 +109,10 @@ def test_backend_stalls():
         assert (
             complete_cycle == expected_complete
         ), f"Burst {key} completed at cycle {complete_cycle}, expected {expected_complete}"
-    print("Backend stall test passed.")
+        if previous_issue is not None:
+            assert issue_cycle >= previous_issue + 1, "Bursts were launched concurrently instead of serially"
+        previous_issue = issue_cycle
+    print("Backend serialized-burst test passed.")
 
 if __name__ == "__main__":
     test_backend_stalls()
