@@ -1,6 +1,13 @@
+import argparse
+import json
+import os
+import sys
 from typing import Dict, List, Optional
 
 import numpy as np
+
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from base.clock_domain import ClockDomain
 from base.core import Core
@@ -10,10 +17,10 @@ from memory.backend import Backend
 from memory.dram import DRAM
 from memory.sc_sram_banks import _xor_bank
 from memory.scratchpad import Scratchpad
-from systolic_array.systolic_array_tssa import SystolicArrayTSSA
+from systolic_array.systolic_array_tpu import SystolicArrayTPU
 from vector_core.vector_core import VectorCore
 
-from atalla.sysarr_tssa_system import GSAUTSSABridge, TSSAReference
+from atalla.sysarr_tpu_system import GSAUTPUBridge, TPUReference
 
 
 PHASE_ORDER = [
@@ -143,18 +150,18 @@ def _weights_u16(size: int) -> List[List[int]]:
     return [[((i * size + j) % 8) + 1 for j in range(size)] for i in range(size)]
 
 
-def _tssa_reference_output(
+def _tpu_reference_output(
     act_rows: List[List[int]],
     weight_stream: List[List[int]],
     *,
     size: int,
     dtype: str = "fp16",
 ) -> List[List[int]]:
-    sa = SystolicArrayTSSA(size=size, dtype=dtype)
+    sa = SystolicArrayTPU(size=size, dtype=dtype)
     zero_row = [0.0] * size
     out = []
     out_read_idx = 0
-    warmup = max(0, size - 1)
+    warmup = sa.warmup_cycles()
 
     for vec in weight_stream:
         assert sa.enqueue_weights([float(x) for x in vec], dtype=dtype)
@@ -174,7 +181,7 @@ def _tssa_reference_output(
             out.append([int(float(x)) for x in buf[out_read_idx]])
             out_read_idx += 1
 
-    for _ in range(size - 1):
+    for _ in range(sa.flush_cycles()):
         assert sa.enqueue(zero_row, dtype=dtype, count_algo=False)
         assert sa.enqueue_psums(zero_row, dtype=dtype)
         sa.set_control(weight_en=False, mac_shift=True, start=True, stall=False)
@@ -192,7 +199,7 @@ def _tssa_reference_output(
     return out
 
 
-def _phase_snapshot(state: Dict, sa: SystolicArrayTSSA, tile: int) -> str:
+def _phase_snapshot(state: Dict, sa: SystolicArrayTPU, tile: int) -> str:
     if state.get("weight_row", 0) < tile:
         return "weight_preload"
     if state.get("act_issue_row", 0) < tile or state.get("act_loads_inflight", 0) > 0:
@@ -273,7 +280,7 @@ class MetricsVLSFrontendBridge:
         raise ValueError("unsupported request kind: %s" % req["kind"])
 
 
-class SysArrTSSAExperimentConfig:
+class SysArrTPUExperimentConfig:
     def __init__(
         self,
         name,
@@ -342,14 +349,14 @@ class SysArrTSSAExperimentConfig:
             "max_cycles": self.max_cycles,
         }
 
-    def normalize(self) -> "SysArrTSSAExperimentConfig":
+    def normalize(self) -> "SysArrTPUExperimentConfig":
         spad_num_banks = self.spad_num_banks if self.spad_num_banks is not None else self.tile
         spad_bank_size = self.spad_bank_size if self.spad_bank_size is not None else max(128, self.tile * 4)
         if spad_num_banks < self.tile:
             raise ValueError("spad_num_banks must be >= tile")
         if spad_bank_size < (self.tile * 3):
             raise ValueError("spad_bank_size must be >= 3 * tile for the chosen address map")
-        return SysArrTSSAExperimentConfig(
+        return SysArrTPUExperimentConfig(
             name=self.name,
             sweep=self.sweep,
             param_name=self.param_name,
@@ -373,7 +380,7 @@ class SysArrTSSAExperimentConfig:
         )
 
 
-def run_sysarr_tssa_experiment(config: SysArrTSSAExperimentConfig) -> Dict[str, object]:
+def run_sysarr_tpu_experiment(config: SysArrTPUExperimentConfig) -> Dict[str, object]:
     cfg = config.normalize()
 
     eq, _, sim = build_sim()
@@ -396,11 +403,11 @@ def run_sysarr_tssa_experiment(config: SysArrTSSAExperimentConfig) -> Dict[str, 
         elem_bytes=2,
         frontend_queue_size=cfg.spad_frontend_queue_size,
     )
-    sa = SystolicArrayTSSA(size=tile, dtype=cfg.dtype)
+    sa = SystolicArrayTPU(size=tile, dtype=cfg.dtype)
 
     vls_bridge = MetricsVLSFrontendBridge(vc, spad, vls_id=0, frontend_id=0)
-    mirror = TSSAReference(size=tile, dtype=cfg.dtype)
-    sysarr_bridge = GSAUTSSABridge(vc, sa, mirror=mirror)
+    mirror = TPUReference(size=tile, dtype=cfg.dtype)
+    sysarr_bridge = GSAUTPUBridge(vc, sa, mirror=mirror)
 
     dram = DRAM(block_bytes=cfg.dram_block_bytes)
     backend = Backend(
@@ -423,7 +430,7 @@ def run_sysarr_tssa_experiment(config: SysArrTSSAExperimentConfig) -> Dict[str, 
     act = _act_u16(tile)
     wgt = _weights_u16(tile)
     wgt_stream = [[wgt[r][c] for r in range(tile)] for c in range(tile - 1, -1, -1)]
-    expected_ref = _tssa_reference_output(act, wgt_stream, size=tile, dtype=cfg.dtype)
+    expected_ref = _tpu_reference_output(act, wgt_stream, size=tile, dtype=cfg.dtype)
 
     _write_dram_tile_u16(dram, DRAM_ACT, act)
     _write_dram_tile_u16(dram, DRAM_WGT, wgt_stream)
@@ -699,14 +706,14 @@ def run_sysarr_tssa_experiment(config: SysArrTSSAExperimentConfig) -> Dict[str, 
     sim.run()
 
     if len(state["completed_rows"]) < tile:
-        raise AssertionError("timed out waiting for DRAM->SPAD->VRF->GSAU->TSSA->VRF->SPAD->DRAM")
+        raise AssertionError("timed out waiting for DRAM->SPAD->VRF->GSAU->TPU->VRF->SPAD->DRAM")
 
     got = _read_dram_tile_u16(dram, DRAM_OUT, tile, tile)
     expected_cycle = mirror.outputs
     if len(expected_cycle) != tile:
         raise AssertionError("mirror did not produce the expected number of rows")
     if got != expected_cycle:
-        raise AssertionError("TSSA output mismatch against mirror reference")
+        raise AssertionError("TPU output mismatch against mirror reference")
 
     bytes_tx = vls_bridge.bytes_load + vls_bridge.bytes_store
     pe_mul = sum(pe.mul_ops for row in sa.array for pe in row)
@@ -829,3 +836,47 @@ def run_sysarr_tssa_experiment(config: SysArrTSSAExperimentConfig) -> Dict[str, 
         result[f"queue_avg_{queue_name}"] = avg_depths.get(queue_name, 0.0)
 
     return result
+
+
+# Compatibility aliases during the TPU naming transition.
+SysArrTPUExperimentConfig = SysArrTPUExperimentConfig
+run_sysarr_tpu_experiment = run_sysarr_tpu_experiment
+
+
+def _build_default_cli_config() -> SysArrTPUExperimentConfig:
+    return SysArrTPUExperimentConfig(
+        name="default_tpu_experiment",
+        sweep="manual",
+        param_name="none",
+        param_value="none",
+    )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run the TPU system-array experiment.")
+    parser.add_argument("--tile", type=int, default=32)
+    parser.add_argument("--dtype", default="fp16")
+    parser.add_argument("--lane-count", type=int, default=4)
+    parser.add_argument("--vls-count", type=int, default=1)
+    parser.add_argument("--max-cycles", type=int, default=20000)
+    parser.add_argument("--backend-dram-latency", type=int, default=24)
+    parser.add_argument("--backend-dram-q-depth", type=int, default=16)
+    parser.add_argument("--backend-delay-cycles", type=int, default=1)
+    args = parser.parse_args()
+
+    cfg = _build_default_cli_config()
+    cfg.tile = args.tile
+    cfg.dtype = args.dtype
+    cfg.lane_count = args.lane_count
+    cfg.vls_count = args.vls_count
+    cfg.max_cycles = args.max_cycles
+    cfg.backend_dram_latency = args.backend_dram_latency
+    cfg.backend_dram_q_depth = args.backend_dram_q_depth
+    cfg.backend_delay_cycles = args.backend_delay_cycles
+
+    result = run_sysarr_tpu_experiment(cfg)
+    print(json.dumps(result, indent=2, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()

@@ -58,7 +58,7 @@ def plot_sweep(rows: List[Dict[str, str]], sweep_name: str, output_dir: Path) ->
     labels = [_label_for_value(value) for value in x]
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 9))
-    fig.suptitle(f"sysarr TSSA sweep: {sweep_name}")
+    fig.suptitle(f"sysarr TPU sweep: {sweep_name}")
 
     axes[0, 0].plot(x, [_num(row["cycles"]) for row in ordered], marker="o", linewidth=2)
     axes[0, 0].set_title("End-to-End Cycles")
@@ -115,13 +115,13 @@ def plot_sweep(rows: List[Dict[str, str]], sweep_name: str, output_dir: Path) ->
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Plot sysarr TSSA sweep results from results.csv.")
-    parser.add_argument("--input", default=None, help="Path to the sweep CSV. Defaults to logs/sysarr_tssa_sweeps/results.csv")
+    parser = argparse.ArgumentParser(description="Plot sysarr TPU sweep results from results.csv.")
+    parser.add_argument("--input", default=None, help="Path to the sweep CSV. Defaults to logs/sysarr_tpu_sweeps/results.csv")
     parser.add_argument("--output-dir", default=None, help="Directory to write the PNG plots")
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[1]
-    input_path = Path(args.input) if args.input else repo_root / "logs" / "sysarr_tssa_sweeps" / "results.csv"
+    input_path = Path(args.input) if args.input else repo_root / "logs" / "sysarr_tpu_sweeps" / "results.csv"
     output_dir = Path(args.output_dir) if args.output_dir else input_path.parent / "plots"
     output_dir.mkdir(parents=True, exist_ok=True)
 

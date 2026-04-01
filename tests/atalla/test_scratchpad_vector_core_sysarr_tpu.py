@@ -16,9 +16,9 @@ from memory.backend import Backend
 from memory.dram import DRAM
 from memory.sc_sram_banks import _xor_bank
 from memory.scratchpad import Scratchpad
-from systolic_array.systolic_array_tssa import SystolicArrayTSSA
+from systolic_array.systolic_array_tpu import SystolicArrayTPU
 from vector_core.vector_core import VectorCore
-from atalla.sysarr_tssa_system import TSSAMetrics
+from atalla.sysarr_tpu_system import TPUMetrics
 
 
 def build_sim():
@@ -109,11 +109,11 @@ def _read_dram_tile_u16(dram: DRAM, base_addr: int, rows: int, cols: int) -> Lis
 
 
 def _act_u16(size: int) -> List[List[int]]:
-    return [[((j * size + i) % 4) + 1 for j in range(size)] for i in range(size)]
+    return [[((j * size + i) % 3) + 1 for j in range(size)] for i in range(size)]
 
 
 def _weights_u16(size: int) -> List[List[int]]:
-    return [[((i * size + j) % 8) + 1 for j in range(size)] for i in range(size)]
+    return [[((i * size + j) % 5) + 1 for j in range(size)] for i in range(size)]
 
 
 def _matmul_u16(a: List[List[int]], b: List[List[int]]) -> List[List[int]]:
@@ -132,7 +132,7 @@ def _matmul_u16(a: List[List[int]], b: List[List[int]]) -> List[List[int]]:
     return out
 
 
-def _busy_units_snapshot(vc: VectorCore, sa: SystolicArrayTSSA, state: Dict, spad: Scratchpad = None, backend=None) -> List[str]:
+def _busy_units_snapshot(vc: VectorCore, sa: SystolicArrayTPU, state: Dict, spad: Scratchpad = None, backend=None) -> List[str]:
     busy = []
 
     if getattr(vc, "vliw_q", None) is not None and len(vc.vliw_q) > 0:
@@ -235,27 +235,23 @@ def _busy_units_snapshot(vc: VectorCore, sa: SystolicArrayTSSA, state: Dict, spa
         if rd_active > 0:
             busy.append(f"spad.read_xbar_active={rd_active}")
 
-    active_pes = 0
-    for i in range(sa.size):
-        for j in range(sa.size):
-            if sa.array[i][j].activation_latch != 0.0 and sa.array[i][j].weight != 0.0:
-                active_pes += 1
+    active_pes = sa.active_lane_count()
     if sa.weight_en or sa.mac_shift or sa.start or sa.value_ready:
         busy.append(
-            "tssa.ctrl="
+            "tpu.ctrl="
             f"weight_en:{int(sa.weight_en)},mac_shift:{int(sa.mac_shift)},start:{int(sa.start)},ready:{int(sa.value_ready)}"
         )
     if active_pes > 0:
-        busy.append(f"tssa.active_pes={active_pes}")
+        busy.append(f"tpu.active_pes={active_pes}")
     if sa._algo_out_pending > 0:
-        busy.append(f"tssa.algo_out_pending={sa._algo_out_pending}")
+        busy.append(f"tpu.algo_out_pending={sa._algo_out_pending}")
     if len(sa.get_buffer()) > 0:
-        busy.append(f"tssa.out_buffer={len(sa.get_buffer())}")
+        busy.append(f"tpu.out_buffer={len(sa.get_buffer())}")
 
     return busy
 
 
-def _phase_snapshot(state: Dict, sa: SystolicArrayTSSA, tile: int) -> str:
+def _phase_snapshot(state: Dict, sa: SystolicArrayTPU, tile: int) -> str:
     if state.get("weight_row", 0) < tile:
         return "weight_preload"
     if state.get("act_issue_row", 0) < tile or state.get("act_loads_inflight", 0) > 0:
@@ -279,18 +275,18 @@ def _fp16_from_u16(value: int) -> float:
     return float(np.frombuffer(np.uint16(int(value)).tobytes(), dtype=np.float16)[0])
 
 
-def _tssa_reference_output(
+def _tpu_reference_output(
     act_rows: List[List[int]],
     weight_stream: List[List[int]],
     *,
     size: int,
     dtype: str = "fp16",
 ) -> List[List[int]]:
-    sa = SystolicArrayTSSA(size=size, dtype=dtype)
+    sa = SystolicArrayTPU(size=size, dtype=dtype)
     zero_row = [0.0] * size
     out = []
     out_read_idx = 0
-    warmup = max(0, size - 1)
+    warmup = sa.warmup_cycles()
     logged_first = False
     logged_converted = False
 
@@ -325,7 +321,7 @@ def _tssa_reference_output(
                 except Exception as exc:
                     dprintf("SYSARR", f"ref raw log failed: {exc}")
                 logged_first = True
-            converted = [int(float(x)) for x in buf[out_read_idx]]
+            converted = [_fp16_bits(float(x)) for x in buf[out_read_idx]]
             if not logged_converted:
                 dprintf("SYSARR", f"ref converted row[:8]={converted[:8]}")
                 logged_converted = True
@@ -333,7 +329,7 @@ def _tssa_reference_output(
             out_read_idx += 1
 
     # Flush pipeline.
-    for _ in range(size - 1):
+    for _ in range(sa.flush_cycles()):
         assert sa.enqueue(zero_row, dtype=dtype, count_algo=False)
         assert sa.enqueue_psums(zero_row, dtype=dtype)
         sa.set_control(weight_en=False, mac_shift=True, start=True, stall=False)
@@ -343,7 +339,7 @@ def _tssa_reference_output(
             if out_read_idx < warmup:
                 out_read_idx += 1
                 continue
-            out.append([int(float(x)) for x in buf[out_read_idx]])
+            out.append([_fp16_bits(float(x)) for x in buf[out_read_idx]])
             out_read_idx += 1
 
     # Keep last size rows (one per activation vector).
@@ -431,14 +427,14 @@ class VLSFrontendBridge:
         raise ValueError("unsupported request kind: %s" % req["kind"])
 
 
-class TSSAReference:
+class TPUReference:
     def __init__(self, size: int, dtype: str = "fp16"):
-        self.sa = SystolicArrayTSSA(size=size, dtype=dtype)
+        self.sa = SystolicArrayTPU(size=size, dtype=dtype)
         self.size = size
         self.dtype = dtype
         self._pending = 0
         self._out_read_idx = 0
-        self._warmup = max(0, size - 1)
+        self._warmup = self.sa.warmup_cycles()
         self._flush_pending = 0
         self._zero_row = [0.0] * size
         self.outputs: List[List[int]] = []
@@ -446,7 +442,7 @@ class TSSAReference:
 
     def finish_inputs(self) -> None:
         self._input_done = True
-        self._flush_pending = self.size - 1
+        self._flush_pending = self.sa.flush_cycles()
 
     def tick_from_bridge(
         self,
@@ -489,17 +485,17 @@ class TSSAReference:
             self._out_read_idx += 1
 
 
-class GSAUTSSABridge:
-    """Consumes VectorCore GSAU requests, drives TSSA model, returns responses."""
+class GSAUTPUBridge:
+    """Consumes VectorCore GSAU requests, drives TPU model, returns responses."""
 
-    def __init__(self, vc: VectorCore, sa: SystolicArrayTSSA, mirror: TSSAReference = None):
+    def __init__(self, vc: VectorCore, sa: SystolicArrayTPU, mirror: TPUReference = None):
         self.vc = vc
         self.sa = sa
         self.mirror = mirror
         self.size = sa.size
         self._pending_meta: List[Dict] = []
         self._out_read_idx = 0
-        self._warmup = max(0, self.size - 1)
+        self._warmup = self.sa.warmup_cycles()
         self._flush_pending = 0
         self._zero_row = [0.0] * self.size
         self._debug_weight_count = 0
@@ -509,7 +505,7 @@ class GSAUTSSABridge:
 
     def finish_inputs(self) -> None:
         self._input_done = True
-        self._flush_pending = self.size - 1
+        self._flush_pending = self.sa.flush_cycles()
         if self.mirror is not None:
             self.mirror.finish_inputs()
 
@@ -588,8 +584,8 @@ class GSAUTSSABridge:
             self._out_read_idx += 1
 
 
-def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
-    log_dir = Path(__file__).resolve().parents[2] / "logs" / "sysarr_gemm_tssa"
+def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
+    log_dir = Path(__file__).resolve().parents[2] / "logs" / "sysarr_gemm_tpu"
     configure_debug(flags=["DRAM", "SYSARR", "Xbar"], log_dir=str(log_dir))
 
     try:
@@ -607,11 +603,11 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
             elem_bytes=2,
             frontend_queue_size=4,
         )
-        sa = SystolicArrayTSSA(size=tile, dtype="fp16")
+        sa = SystolicArrayTPU(size=tile, dtype="fp16")
 
         vls_bridge = VLSFrontendBridge(vc, spad, vls_id=0, frontend_id=0)
-        mirror = TSSAReference(size=tile, dtype="fp16")
-        sysarr_bridge = GSAUTSSABridge(vc, sa, mirror=mirror)
+        mirror = TPUReference(size=tile, dtype="fp16")
+        sysarr_bridge = GSAUTPUBridge(vc, sa, mirror=mirror)
 
         dram = DRAM(block_bytes=256)
         # Backend models the DMA-style path that moves tiles between DRAM and the
@@ -629,9 +625,9 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
 
         act = _act_u16(tile)
         wgt = _weights_u16(tile)
-        # TSSA weight load shifts right each cycle; stream columns in reverse order.
+        # TPU weight load shifts right each cycle; stream columns in reverse order.
         wgt_stream = [[wgt[r][c] for r in range(tile)] for c in range(tile - 1, -1, -1)]
-        expected_ref = _tssa_reference_output(act, wgt_stream, size=tile, dtype="fp16")
+        expected_ref = _tpu_reference_output(act, wgt_stream, size=tile, dtype="fp16")
         dprintf("SYSARR", f"expected[0][:8]={expected_ref[0][:8]}")
         try:
             dprintf("SYSARR", f"expected[0][1] float={float(expected_ref[0][1])}")
@@ -702,7 +698,7 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
             "max": {},
             "sum": {},
         }
-        metrics = TSSAMetrics(size=tile)
+        metrics = TPUMetrics(size=tile)
         observed_rows = [None for _ in range(tile)]
         activity_path = log_dir / "pipeline_activity.log"
         activity_lines = []
@@ -794,7 +790,7 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
             spad.now = time
             # Keep the cycle order explicit:
             # 1) VC consumes prior-cycle responses and emits new requests
-            # 2) bridges translate VC/GSAU traffic into scratchpad/TSSA activity
+            # 2) bridges translate VC/GSAU traffic into scratchpad/TPU activity
             # 3) backend advances DRAM<->SPAD transfers
             # 4) scratchpad advances xbars/banks so new data becomes visible
             vls_bridge.start_cycle()
@@ -920,7 +916,7 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
                     if not _issue_weight_load():
                         break
 
-            # TSSA consumes activations only after all weights have been presented.
+            # TPU consumes activations only after all weights have been presented.
             if state["preload_done"] and state["weights_done"]:
                 while (
                     state["act_issue_row"] < tile
@@ -1059,7 +1055,7 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
         sim.run()
 
         if len(state["completed_rows"]) < tile:
-            raise AssertionError("timed out waiting for DRAM->SPAD->VRF->GSAU->TSSA->VRF->SPAD->DRAM")
+            raise AssertionError("timed out waiting for DRAM->SPAD->VRF->GSAU->TPU->VRF->SPAD->DRAM")
 
         dram.snapshot_tile(DRAM_OUT, m=tile, n=tile, elem_bytes=2)
         got = _read_dram_tile_u16(dram, DRAM_OUT, tile, tile)
@@ -1282,4 +1278,4 @@ def test_scratchpad_vector_core_sysarr_tssa_end_to_end():
 
 
 if __name__ == "__main__":
-    test_scratchpad_vector_core_sysarr_tssa_end_to_end()
+    test_scratchpad_vector_core_sysarr_tpu_end_to_end()

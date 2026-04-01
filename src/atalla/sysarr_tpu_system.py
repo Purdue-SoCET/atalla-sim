@@ -1,6 +1,13 @@
+import argparse
+import json
+import os
+import sys
 from typing import List, Dict, Optional, Tuple
 
 import numpy as np
+
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from base.clock_domain import ClockDomain
 from base.core import Core
@@ -9,7 +16,7 @@ from base.sim import Sim
 from memory.dram import DRAM
 from memory.sc_sram_banks import _xor_bank
 from memory.scratchpad import Scratchpad
-from systolic_array.systolic_array_tssa import SystolicArrayTSSA
+from systolic_array.systolic_array_tpu import SystolicArrayTPU
 from vector_core.vector_core import VectorCore
 
 
@@ -57,7 +64,7 @@ def _fp16_bits(value: float) -> int:
     return int(np.asarray(value, dtype=np.float16).view(np.uint16).item())
 
 
-class TSSAMetrics:
+class TPUMetrics:
     def __init__(self, size: int):
         self.size = int(size)
         self.cycles = 0
@@ -138,14 +145,14 @@ class VLSFrontendBridge:
         raise ValueError("unsupported request kind: %s" % req["kind"])
 
 
-class TSSAReference:
+class TPUReference:
     def __init__(self, size: int, dtype: str = "fp16"):
-        self.sa = SystolicArrayTSSA(size=size, dtype=dtype)
+        self.sa = SystolicArrayTPU(size=size, dtype=dtype)
         self.size = size
         self.dtype = dtype
         self._pending = 0
         self._out_read_idx = 0
-        self._warmup = max(0, size - 1)
+        self._warmup = self.sa.warmup_cycles()
         self._flush_pending = 0
         self._zero_row = [0.0] * size
         self.outputs: List[List[int]] = []
@@ -153,7 +160,7 @@ class TSSAReference:
 
     def finish_inputs(self) -> None:
         self._input_done = True
-        self._flush_pending = self.size - 1
+        self._flush_pending = self.sa.flush_cycles()
 
     def tick_from_bridge(
         self,
@@ -196,22 +203,22 @@ class TSSAReference:
             self._out_read_idx += 1
 
 
-class GSAUTSSABridge:
-    def __init__(self, vc: VectorCore, sa: SystolicArrayTSSA, mirror: Optional[TSSAReference] = None):
+class GSAUTPUBridge:
+    def __init__(self, vc: VectorCore, sa: SystolicArrayTPU, mirror: Optional[TPUReference] = None):
         self.vc = vc
         self.sa = sa
         self.mirror = mirror
         self.size = sa.size
         self._pending_meta: List[Dict] = []
         self._out_read_idx = 0
-        self._warmup = max(0, self.size - 1)
+        self._warmup = self.sa.warmup_cycles()
         self._flush_pending = 0
         self._zero_row = [0.0] * self.size
         self._input_done = False
 
     def finish_inputs(self) -> None:
         self._input_done = True
-        self._flush_pending = self.size - 1
+        self._flush_pending = self.sa.flush_cycles()
         if self.mirror is not None:
             self.mirror.finish_inputs()
 
@@ -280,7 +287,7 @@ class GSAUTSSABridge:
             self._out_read_idx += 1
 
 
-class SysArrTSSASystem:
+class SysArrTPUSystem:
     def __init__(self, size: int = 32, dtype: str = "fp16", mirror: bool = True):
         self.size = int(size)
         self.dtype = str(dtype)
@@ -302,7 +309,7 @@ class SysArrTSSASystem:
             elem_bytes=2,
             frontend_queue_size=4,
         )
-        self.sa = SystolicArrayTSSA(size=self.size, dtype=self.dtype)
+        self.sa = SystolicArrayTPU(size=self.size, dtype=self.dtype)
         self.dram = DRAM(block_bytes=256)
 
         self.DRAM_ACT = 0x1000
@@ -316,10 +323,10 @@ class SysArrTSSASystem:
         self.A_REG = 2
         self.OUT_REG = 3
 
-        self.mirror = TSSAReference(size=self.size, dtype=self.dtype) if mirror else None
+        self.mirror = TPUReference(size=self.size, dtype=self.dtype) if mirror else None
         self.vls_bridge = VLSFrontendBridge(self.vc, self.spad, vls_id=0, frontend_id=0)
-        self.sysarr_bridge = GSAUTSSABridge(self.vc, self.sa, mirror=self.mirror)
-        self.metrics = TSSAMetrics(size=self.size)
+        self.sysarr_bridge = GSAUTPUBridge(self.vc, self.sa, mirror=self.mirror)
+        self.metrics = TPUMetrics(size=self.size)
 
     def load_inputs(self, act: List[List[int]], wgt_stream: List[List[int]]) -> None:
         row_bytes = self.size * 2
@@ -338,7 +345,7 @@ class SysArrTSSASystem:
                 bank = _xor_bank(slot, lane, self.spad.num_banks)
                 self.spad.tiles[0].banks[bank].mem[slot] = int(value).to_bytes(2, "little", signed=False)
 
-    def run(self, max_cycles: int = 20000) -> Tuple[List[List[int]], Optional[List[List[int]]], int, "TSSAMetrics"]:
+    def run(self, max_cycles: int = 20000) -> Tuple[List[List[int]], Optional[List[List[int]]], int, "TPUMetrics"]:
         row_bytes = self.size * 2
         observed_rows: List[Optional[List[int]]] = [None for _ in range(self.size)]
         state = {
@@ -517,7 +524,7 @@ class SysArrTSSASystem:
         self.sim.run()
 
         if len(state["completed_rows"]) < self.size:
-            raise AssertionError("timed out waiting for DRAM->SPAD->VRF->GSAU->TSSA->VRF->SPAD->DRAM")
+            raise AssertionError("timed out waiting for DRAM->SPAD->VRF->GSAU->TPU->VRF->SPAD->DRAM")
 
         out = []
         for r in range(self.size):
@@ -525,3 +532,41 @@ class SysArrTSSASystem:
             out.append(_decode_row_u16(blob, self.size))
         mirror_out = self.mirror.outputs if self.mirror is not None else None
         return out, mirror_out, state["cycles"], self.metrics
+
+
+def _act_u16(size: int) -> List[List[int]]:
+    return [[((j * size + i) % 4) + 1 for j in range(size)] for i in range(size)]
+
+
+def _weights_u16(size: int) -> List[List[int]]:
+    return [[((i * size + j) % 8) + 1 for j in range(size)] for i in range(size)]
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run the TPU system end-to-end.")
+    parser.add_argument("--size", type=int, default=32)
+    parser.add_argument("--dtype", default="fp16")
+    parser.add_argument("--mirror", action="store_true", default=True)
+    args = parser.parse_args()
+
+    system = SysArrTPUSystem(size=args.size, dtype=args.dtype, mirror=args.mirror)
+    act = _act_u16(args.size)
+    wgt = _weights_u16(args.size)
+    wgt_stream = [[wgt[r][c] for r in range(args.size)] for c in range(args.size - 1, -1, -1)]
+
+    system.load_inputs(act, wgt_stream)
+    got, mirror, cycles, metrics = system.run()
+
+    result = {
+        "cycles": cycles,
+        "flops": metrics.flops,
+        "bytes_moved": metrics.bytes_moved,
+        "arithmetic_intensity": metrics.arithmetic_intensity(),
+        "match_mirror": (got == mirror) if mirror is not None else None,
+        "output_rows": len(got),
+    }
+    print(json.dumps(result, indent=2, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()

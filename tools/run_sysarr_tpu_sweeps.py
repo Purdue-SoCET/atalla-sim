@@ -19,7 +19,7 @@ if sys.version_info < (3, 7):
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from atalla.sysarr_tssa_experiment import PHASE_ORDER, SysArrTSSAExperimentConfig, run_sysarr_tssa_experiment
+from atalla.sysarr_tpu_experiment import PHASE_ORDER, SysArrTPUExperimentConfig, run_sysarr_tpu_experiment
 
 
 DEFAULT_SWEEPS = ["tile", "dram_latency", "dram_burst_bytes", "dram_q_depth", "spad_frontend_queue_size"]
@@ -62,9 +62,9 @@ def _values_for_sweep(name: str, quick: bool) -> List[int]:
     raise ValueError(f"unsupported sweep: {name}")
 
 
-def build_experiment_configs(sweeps: Iterable[str], quick: bool) -> List[SysArrTSSAExperimentConfig]:
+def build_experiment_configs(sweeps: Iterable[str], quick: bool) -> List[SysArrTPUExperimentConfig]:
     baseline = _baseline()
-    configs: List[SysArrTSSAExperimentConfig] = []
+    configs: List[SysArrTPUExperimentConfig] = []
     for sweep in sweeps:
         config_key = SWEEP_TO_CONFIG_KEY.get(sweep)
         if config_key is None:
@@ -77,7 +77,7 @@ def build_experiment_configs(sweeps: Iterable[str], quick: bool) -> List[SysArrT
                 cfg["spad_bank_size"] = max(128, value * 4)
             name = f"{sweep}_{value}"
             configs.append(
-                SysArrTSSAExperimentConfig(
+                SysArrTPUExperimentConfig(
                     name=name,
                     sweep=sweep,
                     param_name=sweep,
@@ -130,11 +130,11 @@ def _ordered_fieldnames(rows: List[Dict[str, object]]) -> List[str]:
     return leading + extras
 
 
-def _run_with_retries(config: SysArrTSSAExperimentConfig, retry_max_cycles: List[int]) -> Dict[str, object]:
+def _run_with_retries(config: SysArrTPUExperimentConfig, retry_max_cycles: List[int]) -> Dict[str, object]:
     attempts = [config.max_cycles] + [value for value in retry_max_cycles if value > config.max_cycles]
     last_error = None
     for attempt_idx, max_cycles in enumerate(attempts, start=1):
-        run_config = SysArrTSSAExperimentConfig(**dict(config.to_dict(), max_cycles=max_cycles))
+        run_config = SysArrTPUExperimentConfig(**dict(config.to_dict(), max_cycles=max_cycles))
         if attempt_idx > 1:
             print(
                 "  retrying with max_cycles=%s (attempt %s/%s)"
@@ -142,7 +142,7 @@ def _run_with_retries(config: SysArrTSSAExperimentConfig, retry_max_cycles: List
                 flush=True,
             )
         try:
-            result = run_sysarr_tssa_experiment(run_config)
+            result = run_sysarr_tpu_experiment(run_config)
             result["status"] = "ok"
             result["attempt_count"] = attempt_idx
             result["final_max_cycles"] = max_cycles
@@ -171,8 +171,8 @@ def _run_with_retries(config: SysArrTSSAExperimentConfig, retry_max_cycles: List
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run parameter sweeps for the sysarr TSSA harness.")
-    parser.add_argument("--output-dir", default=str(REPO_ROOT / "logs" / "sysarr_tssa_sweeps"))
+    parser = argparse.ArgumentParser(description="Run parameter sweeps for the sysarr TPU harness.")
+    parser.add_argument("--output-dir", default=str(REPO_ROOT / "logs" / "sysarr_tpu_sweeps"))
     parser.add_argument("--sweeps", nargs="+", default=DEFAULT_SWEEPS)
     parser.add_argument("--quick", action="store_true", help="Run a smaller sweep set for faster turnaround.")
     parser.add_argument(

@@ -3,7 +3,7 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..//..", "src")))
 
-from atalla.sysarr_tssa_system import SysArrTSSASystem
+from atalla.sysarr_tpu_system import SysArrTPUSystem
 
 
 def _act_u16(size: int):
@@ -11,12 +11,12 @@ def _act_u16(size: int):
 
 
 def _weights_u16(size: int):
-    return [[(i * size) + j + 1 for j in range(size)] for i in range(size)]
+    return [[((i * size + j) % 8) + 1 for j in range(size)] for i in range(size)]
 
 
-def test_sysarr_tssa_system_end_to_end():
+def test_sysarr_tpu_system_end_to_end():
     size = 32
-    system = SysArrTSSASystem(size=size, dtype="fp16", mirror=True)
+    system = SysArrTPUSystem(size=size, dtype="fp16", mirror=True)
 
     act = _act_u16(size)
     wgt = _weights_u16(size)
@@ -37,4 +37,4 @@ def test_sysarr_tssa_system_end_to_end():
 
 
 if __name__ == "__main__":
-    test_sysarr_tssa_system_end_to_end()
+    test_sysarr_tpu_system_end_to_end()

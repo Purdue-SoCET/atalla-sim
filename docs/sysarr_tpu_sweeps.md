@@ -1,7 +1,7 @@
-# sysarr TSSA Sweeps
+# sysarr TPU Sweeps
 
 These scripts automate the parameter sweeps for
-`tests/atalla/test_scratchpad_vector_core_sysarr_tssa.py` without modifying the
+`tests/atalla/test_scratchpad_vector_core_sysarr_tpu.py` without modifying the
 test itself.
 
 ## Runner
@@ -9,22 +9,22 @@ test itself.
 Run a quick pass:
 
 ```bash
-python3.11 tools/run_sysarr_tssa_sweeps.py --quick
+python3.11 tools/run_sysarr_tpu_sweeps.py --quick
 ```
 
 Run the full talk-oriented sweep set:
 
 ```bash
-python3.11 tools/run_sysarr_tssa_sweeps.py
+python3.11 tools/run_sysarr_tpu_sweeps.py
 ```
 
 Choose only a subset of sweeps:
 
 ```bash
-python3.11 tools/run_sysarr_tssa_sweeps.py --sweeps tile dram_latency spad_frontend_queue_size
+python3.11 tools/run_sysarr_tpu_sweeps.py --sweeps tile dram_latency spad_frontend_queue_size
 ```
 
-Outputs land in `logs/sysarr_tssa_sweeps/` by default:
+Outputs land in `logs/sysarr_tpu_sweeps/` by default:
 
 - `results.csv`
 - `results.json`
@@ -40,10 +40,10 @@ The plotter reads `results.csv` and writes one PNG per sweep.
 
 ```bash
 python3.11 -m pip install matplotlib
-python3.11 tools/plot_sysarr_tssa_sweeps.py
+python3.11 tools/plot_sysarr_tpu_sweeps.py
 ```
 
-Plots are written to `logs/sysarr_tssa_sweeps/plots/`.
+Plots are written to `logs/sysarr_tpu_sweeps/plots/`.
 The plotter ignores rows whose `status` is not `ok`.
 
 ## What Gets Graphed
