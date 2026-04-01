@@ -250,7 +250,7 @@ def plan_tiles(gm: GraphModule) -> GraphModule:
             tc = _plan_matmul(node)
         elif atalla_op == "mul":
             tc = TileConfig(kernel_type="mul", params={})
-        elif atalla_op in ("flatten", "dropout"):
+        elif atalla_op in ("flatten", "dropout", "transpose"):
             tc = _plan_flatten(node)
         elif atalla_op == "adaptive_avg_pool":
             tc = _plan_adaptive_avg_pool(node)

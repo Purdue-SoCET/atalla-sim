@@ -24,8 +24,10 @@ _OP_MAP: Dict[object, str] = {
     torch.matmul: "matmul",
     torch.mm: "matmul",
     torch.bmm: "matmul",
+    torch.ops.aten.matmul.default: "matmul",
     F.relu: "relu",
     torch.relu: "relu",
+    torch.ops.aten.relu.default: "relu",
     F.softmax: "softmax",
     F.max_pool2d: "maxpool",
     F.conv2d: "conv",
@@ -35,8 +37,16 @@ _OP_MAP: Dict[object, str] = {
     torch.flatten: "flatten",
     torch.add: "add",
     operator.add: "add",
+    torch.ops.aten.add.Tensor: "add",
+    torch.ops.aten.add_.Tensor: "add",
     operator.mul: "mul",
     torch.mul: "mul",
+    torch.ops.aten.mul.Tensor: "mul",
+    F.batch_norm: "batchnorm",
+    F.layer_norm: "layernorm",
+    F.gelu: "gelu",
+    F.avg_pool2d: "avgpool",
+    F.interpolate: "upsample",
 }
 
 _METHOD_MAP: Dict[str, str] = {
@@ -46,6 +56,8 @@ _METHOD_MAP: Dict[str, str] = {
     "matmul": "matmul",
     "view": "flatten",
     "reshape": "flatten",
+    "transpose": "transpose",
+    "mean": "avgpool",
 }
 
 _MODULE_MAP: Dict[type, str] = {

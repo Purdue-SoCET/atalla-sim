@@ -1,4 +1,5 @@
 import math
+import operator
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -9,11 +10,27 @@ from torch.fx import GraphModule, Node
 TILE_HEIGHT = 32
 TILE_WIDTH = 32
 TILE_BYTES = TILE_HEIGHT * TILE_WIDTH * 2  # 2 KB tiles, bf16 2 bytes each
-LINE_BYTES = 16 #number of bytes to display per line in dram.txt
+
+VIEW_FUNCTIONS = {operator.getitem}
+VIEW_METHODS = {"reshape", "flatten", "permute", "transpose"}
 
 
 def align(value: int, multiple: int) -> int:
     return int(math.ceil(value / multiple) * multiple)
+
+
+def _view_source(node: Node) -> Optional[Node]:
+    if node.op == "call_function" and node.target in VIEW_FUNCTIONS:
+        arg = node.args[0]
+        if isinstance(arg, Node):
+            return arg
+    if node.op == "call_method":
+        method = node.target.strip("'")
+        if method in VIEW_METHODS:
+            arg = node.args[0]
+            if isinstance(arg, Node):
+                return arg
+    return None
 
 
 def tensor_nbytes(node: Node) -> int:
@@ -95,11 +112,15 @@ def tensor_bytes(tensor: torch.Tensor, allocation_size: int) -> bytes:
     return raw + bytes(allocation_size - len(raw))
 
 
-def write_dram(file, start_addr: int, payload: bytes) -> None:
-    for offset in range(0, len(payload), LINE_BYTES):
-        chunk = payload[offset : offset + LINE_BYTES]
-        hex_bytes = " ".join(f"{byte:02x}" for byte in chunk)
-        file.write(f"0x{start_addr + offset:08x}: {hex_bytes}\n")
+def _write_binary_payload(file, current_size: int, start_addr: int, payload: bytes) -> int:
+    if start_addr < current_size:
+        raise ValueError("start_addr rewound; allocations must be monotonic")
+    gap = start_addr - current_size
+    if gap:
+        file.write(bytes(gap))
+        current_size += gap
+    file.write(payload)
+    return current_size + len(payload)
 
 
 def assign_address(node: Node, next_addr: int) -> Tuple[int, int, int]:
@@ -113,19 +134,48 @@ def assign_address(node: Node, next_addr: int) -> Tuple[int, int, int]:
     return aligned_addr, allocation_size, aligned_addr + allocation_size
 
 
-def allocate_memory(gm: GraphModule, text_path: str, placeholder_data: Optional[Dict[str, torch.Tensor]] = None) -> GraphModule:
+def allocate_memory(gm: GraphModule, bin_path: str, placeholder_data: Optional[Dict[str, torch.Tensor]] = None) -> GraphModule:
     placeholder_data = placeholder_data or {}
     next_addr = 0
+    written = 0
 
-    with open(text_path, "w") as dram_file:
+    with open(bin_path, "wb") as dram_file:
         for node in gm.graph.nodes:
-            if node.op != "output":
-                start, size, next_addr = assign_address(node, next_addr)
-                tensor_value = tensor_for_node(node, gm, placeholder_data)
-                payload = tensor_bytes(tensor_value, size) if tensor_value is not None else bytes(size)
-                write_dram(dram_file, start, payload)
+            if node.op == "output":
+                continue
+            tensor_meta = node.meta.get("tensor_meta")
+            if tensor_meta is None:
+                continue
+            if tensor_meta.dtype != torch.bfloat16:
+                # Treat non-bf16 tensors (e.g., attention bias indices) as compile-time constants.
+                continue
+            view_src = _view_source(node)
+            if view_src is not None and "dram_addr" in view_src.meta:
+                node.meta["dram_addr"] = view_src.meta["dram_addr"]
+                node.meta["bytes"] = view_src.meta["bytes"]
+                continue
+            start, size, next_addr = assign_address(node, next_addr)
+            tensor_value = tensor_for_node(node, gm, placeholder_data)
+            payload = tensor_bytes(tensor_value, size) if tensor_value is not None else bytes(size)
+            written = _write_binary_payload(dram_file, written, start, payload)
 
     gm.graph.lint()
     gm.recompile()
 
+    return gm
+
+
+def fake_allocate_memory(gm: GraphModule) -> GraphModule:
+    """Simulate memory assignment without writing a binary file."""
+    for node in gm.graph.nodes:
+        if node.op == "output":
+            continue
+        if "tensor_meta" not in node.meta:
+            continue
+        node.meta["dram_addr"] = "0x00000000"
+        # Setting bytes to zero skips the check in emit()
+        node.meta["bytes"] = 0
+
+    gm.graph.lint()
+    gm.recompile()
     return gm
