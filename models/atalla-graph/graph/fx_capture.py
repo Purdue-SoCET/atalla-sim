@@ -18,6 +18,7 @@ from torch.fx.passes.shape_prop import ShapeProp
 ATALLA_OPS = {
     "matmul", "linear", "conv", "relu", "add", "maxpool",
     "softmax", "flatten", "adaptive_avg_pool", "dropout", "bias_add",
+    "layernorm", "gelu",
 }
 
 _OP_MAP: Dict[object, str] = {
@@ -70,6 +71,8 @@ _MODULE_MAP: Dict[type, str] = {
     nn.Softmax: "softmax",
     nn.BatchNorm2d: "batchnorm",
     nn.Flatten: "flatten",
+    nn.LayerNorm: "layernorm",
+    nn.GELU: "gelu",
 }
 
 
@@ -138,6 +141,10 @@ def capture(model: nn.Module, example_input: torch.Tensor) -> GraphModule:
 
 def get_node_shape(node: Node) -> Optional[Tuple[int, ...]]:
     tm = node.meta.get("tensor_meta")
-    if tm is not None:
+    if tm is None:
+        return None
+    if hasattr(tm, "shape"):
         return tuple(int(d) for d in tm.shape)
+    if isinstance(tm, tuple):
+        return tuple(int(d) for d in tm)
     return None

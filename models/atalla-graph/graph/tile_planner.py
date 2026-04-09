@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from functools import reduce
+import operator
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -109,7 +111,11 @@ def _plan_linear(node: Node, gm: GraphModule) -> TileConfig:
             N = 1
         has_bias = len(node.args) >= 3 and node.args[2] is not None
 
-    M = 1
+    in_shape = get_node_shape(node.args[0])
+    if in_shape and len(in_shape) >= 1:
+        M = _prod(in_shape[:-1])
+    else:
+        M = 1
     return TileConfig(
         kernel_type="fc",
         params=dict(
@@ -130,6 +136,18 @@ def _plan_relu(node: Node) -> TileConfig:
     width = min(total, VL)
     return TileConfig(
         kernel_type="relu",
+        params=dict(total_elements=total, width=width),
+    )
+
+
+def _plan_gelu(node: Node) -> TileConfig:
+    shape = get_node_shape(node.args[0])
+    total = 1
+    for d in (shape or [1]):
+        total *= d
+    width = min(total, VL)
+    return TileConfig(
+        kernel_type="gelu",
         params=dict(total_elements=total, width=width),
     )
 
@@ -168,12 +186,40 @@ def _plan_maxpool(node: Node, gm: GraphModule) -> TileConfig:
     )
 
 
-def _plan_softmax(node: Node) -> TileConfig:
+def _softmax_axis(node: Node, gm: GraphModule) -> int:
+    """0-based axis index for softmax (default last dim)."""
     shape = get_node_shape(node.args[0])
-    length = shape[-1] if shape else 1
+    ndim = len(shape) if shape else 1
+    if node.op == "call_module":
+        mod = _get_module(gm, node.target)
+        if isinstance(mod, nn.Softmax):
+            dim = int(mod.dim)
+        elif len(node.args) >= 2 and isinstance(node.args[1], int):
+            dim = int(node.args[1])
+        else:
+            dim = int(node.kwargs.get("dim", -1))
+    elif len(node.args) >= 2 and isinstance(node.args[1], int):
+        dim = int(node.args[1])
+    else:
+        dim = int(node.kwargs.get("dim", -1))
+    if dim < 0:
+        dim += ndim
+    return max(0, min(dim, ndim - 1))
+
+
+def _plan_softmax(node: Node, gm: GraphModule) -> TileConfig:
+    shape = get_node_shape(node.args[0])
+    if not shape:
+        return TileConfig(
+            kernel_type="softmax",
+            params=dict(num_rows=1, row_len=1),
+        )
+    dim = _softmax_axis(node, gm)
+    row_len = int(shape[dim])
+    num_rows = _prod(shape) // row_len
     return TileConfig(
         kernel_type="softmax",
-        params=dict(length=length),
+        params=dict(num_rows=num_rows, row_len=row_len, softmax_dim=dim),
     )
 
 
@@ -215,6 +261,45 @@ def _plan_adaptive_avg_pool(node: Node) -> TileConfig:
     return TileConfig(kernel_type="adaptive_avg_pool", params=dict(channels=C))
 
 
+def _prod(xs) -> int:
+    return int(reduce(operator.mul, xs, 1))
+
+
+def _plan_layernorm(node: Node, gm: GraphModule) -> TileConfig:
+    """Layer norm over trailing dims ``normalized_shape``; M = product of leading dims."""
+    inp_shape = get_node_shape(node.args[0])
+    eps = 1e-5
+
+    if node.op == "call_module":
+        mod = _get_module(gm, node.target)
+        ns = tuple(int(x) for x in mod.normalized_shape)
+        eps = float(getattr(mod, "eps", 1e-5))
+    else:
+        ns_arg = node.args[1]
+        if isinstance(ns_arg, (tuple, list)):
+            ns = tuple(int(x) for x in ns_arg)
+        elif isinstance(ns_arg, int):
+            ns = (ns_arg,)
+        else:
+            ns = (inp_shape[-1],) if inp_shape else (1,)
+        if "eps" in node.kwargs:
+            eps = float(node.kwargs["eps"])
+        elif len(node.args) > 4 and not isinstance(node.args[4], Node):
+            eps = float(node.args[4])
+
+    d_norm = _prod(ns)
+    nd = len(ns)
+    if inp_shape is None or len(inp_shape) < nd:
+        m_groups = 1
+    else:
+        m_groups = _prod(inp_shape[:-nd])
+
+    return TileConfig(
+        kernel_type="layernorm",
+        params=dict(M=m_groups, D=d_norm, eps=eps, normalized_dims=nd),
+    )
+
+
 def _output_bytes(node: Node) -> int:
     shape = get_node_shape(node)
     if shape is None:
@@ -243,7 +328,7 @@ def plan_tiles(gm: GraphModule) -> GraphModule:
         elif atalla_op == "maxpool":
             tc = _plan_maxpool(node, gm)
         elif atalla_op == "softmax":
-            tc = _plan_softmax(node)
+            tc = _plan_softmax(node, gm)
         elif atalla_op == "add":
             tc = _plan_add(node)
         elif atalla_op == "matmul":
@@ -254,6 +339,10 @@ def plan_tiles(gm: GraphModule) -> GraphModule:
             tc = _plan_flatten(node)
         elif atalla_op == "adaptive_avg_pool":
             tc = _plan_adaptive_avg_pool(node)
+        elif atalla_op == "layernorm":
+            tc = _plan_layernorm(node, gm)
+        elif atalla_op == "gelu":
+            tc = _plan_gelu(node)
 
         if tc is not None:
             node.meta["tile_config"] = tc
