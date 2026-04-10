@@ -2,7 +2,8 @@ import argparse
 import json
 import os
 import sys
-from typing import List, Dict, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Callable, List, Dict, Optional, Tuple
 
 import numpy as np
 
@@ -13,6 +14,7 @@ from base.clock_domain import ClockDomain
 from base.core import Core
 from base.eventq import EventQueue
 from base.sim import Sim
+from memory.backend import Backend
 from memory.dram import DRAM
 from memory.sc_sram_banks import _xor_bank
 from memory.scratchpad import Scratchpad
@@ -98,13 +100,27 @@ class VLSFrontendBridge:
         self.frontend_id = int(frontend_id)
         self._next_load_id = 0
         self._completed_load_ids = set()
+        self.now = 0
+        self.trace_hook = None
 
-    def _on_frontend_read(self, load_id: int, addr: int, lanes) -> None:
+    def _on_frontend_read(self, load_id: int, addr: int, lanes, meta: Optional[Dict] = None) -> None:
         if load_id in self._completed_load_ids:
             return
         self._completed_load_ids.add(load_id)
         data = _decode_lanes_u16(lanes, self.vc.vector_len)
-        assert self.vc.push_scratchpad_response(self.vls_id, {"addr": addr, "data": data})
+        meta_dict = dict(meta or {})
+        if self.trace_hook is not None:
+            self.trace_hook(
+                {
+                    "kind": "load_rsp",
+                    "cycle": int(self.now),
+                    "vls": self.vls_id,
+                    "frontend": self.frontend_id,
+                    "addr": addr,
+                    "meta": meta_dict,
+                }
+            )
+        assert self.vc.push_scratchpad_response(self.vls_id, {"addr": addr, "data": data, "meta": meta_dict})
 
     def tick(self) -> None:
         vls = self.vc.vls_units[self.vls_id]
@@ -119,6 +135,18 @@ class VLSFrontendBridge:
             req = self.vc.pop_scratchpad_request(self.vls_id)
             if req is None:
                 return
+            meta = dict(req.get("meta", {}) or {})
+            if self.trace_hook is not None:
+                self.trace_hook(
+                    {
+                        "kind": "store_req",
+                        "cycle": int(self.now),
+                        "vls": self.vls_id,
+                        "frontend": self.frontend_id,
+                        "addr": addr,
+                        "meta": meta,
+                    }
+                )
             assert self.spad.frontend_write(
                 addr,
                 _encode_vector_u16(req["data"]),
@@ -133,12 +161,26 @@ class VLSFrontendBridge:
             req = self.vc.pop_scratchpad_request(self.vls_id)
             if req is None:
                 return
+            meta = dict(req.get("meta", {}) or {})
+            if self.trace_hook is not None:
+                self.trace_hook(
+                    {
+                        "kind": "load_req",
+                        "cycle": int(self.now),
+                        "vls": self.vls_id,
+                        "frontend": self.frontend_id,
+                        "addr": addr,
+                        "meta": meta,
+                    }
+                )
             load_id = self._next_load_id
             self._next_load_id += 1
             assert self.spad.frontends[self.frontend_id].read(
                 addr,
                 0,
-                lambda lanes, _lid=load_id, _addr=addr: self._on_frontend_read(_lid, _addr, lanes),
+                lambda lanes, _lid=load_id, _addr=addr, _meta=meta: self._on_frontend_read(
+                    _lid, _addr, lanes, _meta
+                ),
             )
             return
 
@@ -215,6 +257,8 @@ class GSAUTPUBridge:
         self._flush_pending = 0
         self._zero_row = [0.0] * self.size
         self._input_done = False
+        self.now = 0
+        self.trace_hook = None
 
     def finish_inputs(self) -> None:
         self._input_done = True
@@ -256,6 +300,16 @@ class GSAUTPUBridge:
                 self.sa.set_control(weight_en=False, mac_shift=True, start=True, stall=False)
                 if expect_output:
                     self._pending_meta.append(dict(req.get("meta", {})))
+            if self.trace_hook is not None:
+                self.trace_hook(
+                    {
+                        "stage": "request",
+                        "cycle": int(self.now),
+                        "is_weight": is_weight,
+                        "expect_output": expect_output,
+                        "meta": dict(req.get("meta", {}) or {}),
+                    }
+                )
         elif self._input_done and self._flush_pending > 0:
             if self.sa.enqueue(self._zero_row, dtype=self.sa.dtype, count_algo=False):
                 did_flush = True
@@ -283,34 +337,127 @@ class GSAUTPUBridge:
                 break
             out_row = [float(x) for x in buf[self._out_read_idx]]
             meta = self._pending_meta.pop(0)
+            if self.trace_hook is not None:
+                self.trace_hook(
+                    {
+                        "stage": "response",
+                        "cycle": int(self.now),
+                        "meta": dict(meta),
+                    }
+                )
             assert self.vc.push_systolic_response(self._pack_rsp(out_row, meta))
             self._out_read_idx += 1
+
+
+@dataclass
+class TPUPlatform:
+    eq: EventQueue
+    clk: ClockDomain
+    sim: Sim
+    vc: VectorCore
+    spad: Scratchpad
+    sa: SystolicArrayTPU
+    dram: DRAM
+    backend: Optional[Backend]
+    vls_bridge: Any
+    sysarr_bridge: GSAUTPUBridge
+    mirror: Optional[TPUReference]
+
+
+def build_tpu_compute_path(
+    *,
+    vc: VectorCore,
+    size: int = 32,
+    dtype: str = "fp16",
+    mirror: Optional[TPUReference] = None,
+) -> Tuple[SystolicArrayTPU, GSAUTPUBridge]:
+    sa = SystolicArrayTPU(size=int(size), dtype=str(dtype))
+    sysarr_bridge = GSAUTPUBridge(vc, sa, mirror=mirror)
+    return sa, sysarr_bridge
+
+
+def build_tpu_platform(
+    *,
+    size: int = 32,
+    dtype: str = "fp16",
+    lane_count: int = 4,
+    vls_count: int = 1,
+    spad_num_banks: int = 32,
+    spad_bank_size: int = 128,
+    spad_read_latency: int = 1,
+    spad_write_latency: int = 1,
+    spad_xbar_delay: int = 1,
+    spad_frontend_queue_size: int = 4,
+    dram_block_bytes: int = 256,
+    backend_dram_latency: Optional[int] = None,
+    backend_dram_q_depth: int = 16,
+    backend_dram_burst_bytes: int = 32,
+    backend_delay_cycles: int = 1,
+    mirror: bool = False,
+    vls_bridge_cls: Callable[..., Any] = VLSFrontendBridge,
+    vls_bridge_kwargs: Optional[Dict[str, Any]] = None,
+) -> TPUPlatform:
+    eq, clk, sim = build_sim()
+    vc = VectorCore(
+        veggie_size=int(size) * 16,
+        lane_count=int(lane_count),
+        vls_count=int(vls_count),
+        fu_latencies={"alu": 1},
+        dtype=str(dtype),
+    )
+    spad = Scratchpad(
+        num_banks=int(spad_num_banks),
+        bank_size=int(spad_bank_size),
+        read_latency=int(spad_read_latency),
+        write_latency=int(spad_write_latency),
+        xbar_delay=int(spad_xbar_delay),
+        elem_bytes=2,
+        frontend_queue_size=int(spad_frontend_queue_size),
+    )
+    dram = DRAM(block_bytes=int(dram_block_bytes))
+    backend = None
+    if backend_dram_latency is not None:
+        backend = Backend(
+            dram_latency=int(backend_dram_latency),
+            dram_q_depth=int(backend_dram_q_depth),
+            dram_burst_bytes=int(backend_dram_burst_bytes),
+            elem_bytes=2,
+            delay_cycles=int(backend_delay_cycles),
+        )
+        spad.attach_backend(backend)
+        backend.attach_dram(dram)
+
+    mirror_obj = TPUReference(size=int(size), dtype=str(dtype)) if mirror else None
+    bridge_kwargs = dict(vls_bridge_kwargs or {})
+    vls_bridge = vls_bridge_cls(vc, spad, vls_id=0, frontend_id=0, **bridge_kwargs)
+    sa, sysarr_bridge = build_tpu_compute_path(vc=vc, size=int(size), dtype=str(dtype), mirror=mirror_obj)
+    return TPUPlatform(
+        eq=eq,
+        clk=clk,
+        sim=sim,
+        vc=vc,
+        spad=spad,
+        sa=sa,
+        dram=dram,
+        backend=backend,
+        vls_bridge=vls_bridge,
+        sysarr_bridge=sysarr_bridge,
+        mirror=mirror_obj,
+    )
 
 
 class SysArrTPUSystem:
     def __init__(self, size: int = 32, dtype: str = "fp16", mirror: bool = True):
         self.size = int(size)
         self.dtype = str(dtype)
-        self.eq, self.clk, self.sim = build_sim()
-
-        self.vc = VectorCore(
-            veggie_size=self.size * 16,
-            lane_count=4,
-            vls_count=1,
-            fu_latencies={"alu": 1},
-            dtype=self.dtype,
-        )
-        self.spad = Scratchpad(
-            num_banks=32,
-            bank_size=128,
-            read_latency=1,
-            write_latency=1,
-            xbar_delay=1,
-            elem_bytes=2,
-            frontend_queue_size=4,
-        )
-        self.sa = SystolicArrayTPU(size=self.size, dtype=self.dtype)
-        self.dram = DRAM(block_bytes=256)
+        platform = build_tpu_platform(size=self.size, dtype=self.dtype, mirror=mirror)
+        self.eq = platform.eq
+        self.clk = platform.clk
+        self.sim = platform.sim
+        self.vc = platform.vc
+        self.spad = platform.spad
+        self.sa = platform.sa
+        self.dram = platform.dram
 
         self.DRAM_ACT = 0x1000
         self.DRAM_WGT = 0x2000
@@ -323,9 +470,9 @@ class SysArrTPUSystem:
         self.A_REG = 2
         self.OUT_REG = 3
 
-        self.mirror = TPUReference(size=self.size, dtype=self.dtype) if mirror else None
-        self.vls_bridge = VLSFrontendBridge(self.vc, self.spad, vls_id=0, frontend_id=0)
-        self.sysarr_bridge = GSAUTPUBridge(self.vc, self.sa, mirror=self.mirror)
+        self.mirror = platform.mirror
+        self.vls_bridge = platform.vls_bridge
+        self.sysarr_bridge = platform.sysarr_bridge
         self.metrics = TPUMetrics(size=self.size)
 
     def load_inputs(self, act: List[List[int]], wgt_stream: List[List[int]]) -> None:

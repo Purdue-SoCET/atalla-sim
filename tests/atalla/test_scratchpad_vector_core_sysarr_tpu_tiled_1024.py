@@ -10,19 +10,21 @@ import numpy as np
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'src')))
 
 from atalla.sysarr_tpu_experiment import MetricsVLSFrontendBridge, QUEUE_NAMES
-from atalla.sysarr_tpu_system import GSAUTPUBridge
+from atalla.sysarr_tpu_system import build_tpu_compute_path, build_tpu_platform
 from base.debug import close_debug, configure_debug, dprintf
-from memory.backend import Backend
 from memory.dram import DRAM
 from memory.sc_sram_banks import _xor_bank
 from memory.scratchpad import Scratchpad
-from systolic_array.systolic_array_tpu import SystolicArrayTPU
-from vector_core.vector_core import VectorCore
 
 
 TILE = 32
 MATRIX = 1024
 NUM_TILES = MATRIX // TILE
+SPAD_TOTAL_BYTES = 2 * 1024 * 1024
+SPAD_NUM_TILES = 2
+SPAD_NUM_BANKS = 32
+SPAD_ELEM_BYTES = 2
+SPAD_BANK_SIZE = SPAD_TOTAL_BYTES // (SPAD_NUM_TILES * SPAD_NUM_BANKS * SPAD_ELEM_BYTES)
 
 
 def _act_matrix_u16(size: int) -> np.ndarray:
@@ -139,9 +141,11 @@ class TileJob:
     tj: int
     tk: int
     slot: int
+    tag: str
     act_tile: List[List[int]]
     wgt_stream: List[List[int]]
     preload_tx_done: set = field(default_factory=set)
+    preload_launch_cycle: Optional[int] = None
     preload_ready: bool = False
     compute_started: bool = False
     weight_row: int = 0
@@ -161,6 +165,19 @@ class TileJob:
     completed_rows: set = field(default_factory=set)
     cycle_start: Optional[int] = None
     cycle_done: Optional[int] = None
+
+
+@dataclass
+class KernelPathSpan:
+    tag: str
+    ti: int
+    tj: int
+    tk: int
+    slot: int
+    path: str
+    start_cycle: Optional[int] = None
+    end_cycle: Optional[int] = None
+    touches: int = 0
 
 
 class TiledTPUCosim:
@@ -205,6 +222,8 @@ class TiledTPUCosim:
         self.queue_samples = 0
         self.queue_depth_sums = {name: 0 for name in QUEUE_NAMES}
         self.queue_depth_max = {name: 0 for name in QUEUE_NAMES}
+        self.kernel_tag_info: Dict[str, Dict[str, int]] = {}
+        self.kernel_path_spans: Dict[Tuple[str, str], KernelPathSpan] = {}
         self.sa_totals = {
             "pe_mul_ops": 0,
             "pe_add_ops": 0,
@@ -223,8 +242,126 @@ class TiledTPUCosim:
             "internal_psum_bytes": 0,
         }
 
+    def _make_kernel_tag(self, ti: int, tj: int, tk: int) -> str:
+        return f"ti{int(ti):02d}_tj{int(tj):02d}_tk{int(tk):02d}"
+
+    def _register_job_tag(self, job: TileJob) -> None:
+        self.kernel_tag_info[job.tag] = {
+            "ti": int(job.ti),
+            "tj": int(job.tj),
+            "tk": int(job.tk),
+            "slot": int(job.slot),
+        }
+
+    def _kernel_span(self, tag: str, path: str) -> KernelPathSpan:
+        key = (str(tag), str(path))
+        span = self.kernel_path_spans.get(key)
+        if span is not None:
+            return span
+        info = self.kernel_tag_info[str(tag)]
+        span = KernelPathSpan(
+            tag=str(tag),
+            ti=int(info["ti"]),
+            tj=int(info["tj"]),
+            tk=int(info["tk"]),
+            slot=int(info["slot"]),
+            path=str(path),
+        )
+        self.kernel_path_spans[key] = span
+        return span
+
+    def _mark_kernel_path_start(self, tag: str, path: str, cycle: int) -> None:
+        span = self._kernel_span(tag, path)
+        point = int(cycle)
+        if span.start_cycle is None or point < span.start_cycle:
+            span.start_cycle = point
+        if span.end_cycle is None:
+            span.end_cycle = point
+        span.touches += 1
+
+    def _mark_kernel_path_end(self, tag: str, path: str, cycle: int) -> None:
+        span = self._kernel_span(tag, path)
+        point = int(cycle)
+        if span.start_cycle is None:
+            span.start_cycle = point
+        if span.end_cycle is None or point > span.end_cycle:
+            span.end_cycle = point
+        span.touches += 1
+
+    def _cover_kernel_path(self, tag: str, path: str, start_cycle: int, end_cycle: int) -> None:
+        self._mark_kernel_path_start(tag, path, int(start_cycle))
+        self._mark_kernel_path_end(tag, path, int(end_cycle))
+
+    def _job_meta(self, job: TileJob, path: str, row: Optional[int] = None) -> Dict[str, object]:
+        meta: Dict[str, object] = {
+            "tag": job.tag,
+            "path": str(path),
+            "ti": int(job.ti),
+            "tj": int(job.tj),
+            "tk": int(job.tk),
+            "slot": int(job.slot),
+        }
+        if row is not None:
+            meta["row"] = int(row)
+        return meta
+
+    def _trace_vls_event(self, event: Dict[str, object]) -> None:
+        meta = dict(event.get("meta", {}) or {})
+        tag = meta.get("tag")
+        path = meta.get("path")
+        if tag is None or path is None:
+            return
+        cycle = int(event.get("cycle", self.global_cycle))
+        kind = str(event.get("kind", ""))
+        if kind in ("load_req", "store_req"):
+            self._mark_kernel_path_start(str(tag), str(path), cycle)
+        if kind == "load_rsp":
+            self._mark_kernel_path_end(str(tag), str(path), cycle + 1)
+
+    def _trace_sysarr_event(self, event: Dict[str, object]) -> None:
+        meta = dict(event.get("meta", {}) or {})
+        tag = meta.get("tag")
+        path = meta.get("path")
+        if tag is None:
+            return
+        cycle = int(event.get("cycle", self.global_cycle))
+        stage = str(event.get("stage", ""))
+        tag_str = str(tag)
+        if stage == "request":
+            if path is not None:
+                self._mark_kernel_path_start(tag_str, str(path), cycle)
+                self._mark_kernel_path_end(tag_str, str(path), cycle + 1)
+            if (not bool(event.get("is_weight", False))) and bool(event.get("expect_output", False)):
+                self._mark_kernel_path_start(tag_str, "systolic_array", cycle)
+        elif stage == "response":
+            self._mark_kernel_path_start(tag_str, "gsau_rsp", cycle)
+            self._mark_kernel_path_end(tag_str, "gsau_rsp", cycle + 1)
+            self._mark_kernel_path_end(tag_str, "systolic_array", cycle + 1)
+
+    def kernel_gantt_rows(self) -> List[Dict[str, object]]:
+        rows: List[Dict[str, object]] = []
+        for span in sorted(self.kernel_path_spans.values(), key=lambda item: (item.ti, item.tj, item.tk, item.path)):
+            if span.start_cycle is None or span.end_cycle is None:
+                continue
+            rows.append(
+                {
+                    "tag": span.tag,
+                    "ti": span.ti,
+                    "tj": span.tj,
+                    "tk": span.tk,
+                    "slot": span.slot,
+                    "path": span.path,
+                    "start_cycle": int(span.start_cycle),
+                    "end_cycle": int(span.end_cycle),
+                    "duration_cycles": int(span.end_cycle - span.start_cycle),
+                    "touches": int(span.touches),
+                }
+            )
+        return rows
+
     def _record_sdma_load_completion(self, job: TileJob, kind: str, launch_cycle: int) -> None:
         job.preload_tx_done.add(kind)
+        self._cover_kernel_path(job.tag, f"sdma_{kind}", int(launch_cycle), int(self.global_cycle + 1))
         self.sdma_load_cycle_records.append(
             {
                 "ti": job.ti,
@@ -302,14 +439,17 @@ class TiledTPUCosim:
         flops_micro = pe_mul + pe_add + vec_total_ops + vec_reduce_ops
         arithmetic_intensity_internal = (flops_micro / bytes_internal) if bytes_internal else 0.0
 
+        active_pe_sum = self.sa_totals["active_pe_sum"]
         valid_mac_cycles = self.sa_totals["valid_mac_cycles"]
         compute_window_cycles = self.sa_totals["compute_window_cycles"]
+        systolic_array_active_work_cycles = valid_mac_cycles
+        avg_active_pes_per_active_cycle = (
+            active_pe_sum / systolic_array_active_work_cycles
+        ) if systolic_array_active_work_cycles else 0.0
         mac_utilization = (
-            self.sa_totals["active_pe_sum"] / (valid_mac_cycles * self.tile_size * self.tile_size)
+            active_pe_sum / (valid_mac_cycles * self.tile_size * self.tile_size)
         ) if valid_mac_cycles else 0.0
-        avg_active_pes_when_active = (
-            self.sa_totals["active_pe_sum"] / valid_mac_cycles
-        ) if valid_mac_cycles else 0.0
+        avg_active_pes_when_active = avg_active_pes_per_active_cycle
         avg_active_pes_during_compute_window = (
             self.sa_totals["compute_window_active_pe_sum"] / compute_window_cycles
         ) if compute_window_cycles else 0.0
@@ -363,6 +503,9 @@ class TiledTPUCosim:
             "bytes_transmitted": bytes_transmitted,
             "bytes_internal": bytes_internal,
             "arithmetic_intensity_internal": arithmetic_intensity_internal,
+            "active_pe_sum": active_pe_sum,
+            "systolic_array_active_work_cycles": systolic_array_active_work_cycles,
+            "avg_active_pes_per_active_cycle": avg_active_pes_per_active_cycle,
             "mac_utilization": mac_utilization,
             "avg_active_pes_when_active": avg_active_pes_when_active,
             "avg_active_pes_during_compute_window": avg_active_pes_during_compute_window,
@@ -383,41 +526,52 @@ class TiledTPUCosim:
             "matrix_size": self.matrix_size,
             "tile_size": self.tile_size,
             "num_tiles": self.num_tiles,
+            "kernel_gantt_tag_count": len(self.kernel_tag_info),
+            "kernel_gantt_span_count": len(self.kernel_path_spans),
             "prefetch_slots": 2,
             "total_tile_pairs": self.total_tile_pairs,
             "total_output_tiles": self.num_tiles ** 2,
         }
 
     def _init_platform(self) -> None:
-        self.vc = VectorCore(
-            veggie_size=self.tile_size * 16,
+        platform = build_tpu_platform(
+            size=self.tile_size,
+            dtype=self.dtype,
             lane_count=4,
             vls_count=1,
-            fu_latencies={"alu": 1},
-            dtype=self.dtype,
+            spad_num_banks=SPAD_NUM_BANKS,
+            spad_bank_size=SPAD_BANK_SIZE,
+            spad_read_latency=2,
+            spad_write_latency=2,
+            spad_xbar_delay=3,
+            spad_frontend_queue_size=4,
+            dram_block_bytes=256,
+            backend_dram_latency=28,
+            backend_dram_q_depth=16,
+            backend_dram_burst_bytes=32,
+            backend_delay_cycles=1,
+            mirror=False,
+            vls_bridge_cls=MetricsVLSFrontendBridge,
         )
-        self.spad = Scratchpad(
-            num_banks=32,
-            bank_size=512,
-            read_latency=2,
-            write_latency=2,
-            xbar_delay=3,
-            elem_bytes=2,
-            frontend_queue_size=4,
-        )
-        self.backend = Backend(dram_latency=24, dram_q_depth=16, dram_burst_bytes=32, elem_bytes=2)
-        self.dram = DRAM(block_bytes=256)
-        self.spad.attach_backend(self.backend)
-        self.backend.attach_dram(self.dram)
-        self.vls_bridge = MetricsVLSFrontendBridge(self.vc, self.spad, vls_id=0, frontend_id=0)
+        self.vc = platform.vc
+        self.spad = platform.spad
+        self.backend = platform.backend
+        self.dram = platform.dram
+        self.vls_bridge = platform.vls_bridge
+        self.vls_bridge.trace_hook = self._trace_vls_event
         self.load_issue_window = self.spad.frontends[0].readq.max_size + 1
         self.store_issue_window = self.spad.frontends[0].writeq.max_size + 1
         self.tile_row_bytes = self.tile_size * 2
         self._reset_compute_pipeline()
 
     def _reset_compute_pipeline(self) -> None:
-        self.sa = SystolicArrayTPU(size=self.tile_size, dtype=self.dtype)
-        self.sysarr_bridge = GSAUTPUBridge(self.vc, self.sa, mirror=None)
+        self.sa, self.sysarr_bridge = build_tpu_compute_path(
+            vc=self.vc,
+            size=self.tile_size,
+            dtype=self.dtype,
+            mirror=None,
+        )
+        self.sysarr_bridge.trace_hook = self._trace_sysarr_event
 
     def _slot_ready(self, base_addr: int, expected_rows: List[List[int]]) -> bool:
         for row_idx, expected in enumerate(expected_rows):
@@ -437,6 +591,9 @@ class TiledTPUCosim:
 
     def _launch_prefetch(self, job: TileJob) -> None:
         launch_cycle = self.global_cycle
+        job.preload_launch_cycle = int(launch_cycle)
+        self._register_job_tag(job)
+        self._mark_kernel_path_start(job.tag, "kernel_total", launch_cycle)
         _write_dram_tile_u16(self.dram, self.DRAM_ACT_STAGE[job.slot], job.act_tile)
         _write_dram_tile_u16(self.dram, self.DRAM_WGT_STAGE[job.slot], job.wgt_stream)
         assert self.backend.driver_to_backend_start_load(
@@ -471,6 +628,7 @@ class TiledTPUCosim:
                 "dst": self.W_REG,
                 "addr": self.WGT_SLOT_BASES[job.slot] + job.weight_issue_row,
                 "dtype": self.dtype,
+                "meta": self._job_meta(job, "vls_wgt", row=job.weight_issue_row),
             }
         )
         job.weight_issue_row += 1
@@ -487,6 +645,7 @@ class TiledTPUCosim:
                 "dst": self.A_REG,
                 "addr": self.ACT_SLOT_BASES[job.slot] + job.act_issue_row,
                 "dtype": self.dtype,
+                "meta": self._job_meta(job, "vls_act", row=job.act_issue_row),
             }
         )
         job.act_issue_row += 1
@@ -497,6 +656,8 @@ class TiledTPUCosim:
 
     def _step(self) -> Optional[Dict]:
         self.spad.now = self.global_cycle
+        self.vls_bridge.now = self.global_cycle
+        self.sysarr_bridge.now = self.global_cycle
         self.vls_bridge.start_cycle()
         self.vc.tick()
         self.vls_bridge.tick()
@@ -628,6 +789,7 @@ class TiledTPUCosim:
                     tj=tj,
                     tk=next_k_to_launch,
                     slot=slot,
+                    tag=self._make_kernel_tag(ti, tj, next_k_to_launch),
                     act_tile=act[row_slice, k_slice].astype(np.int32).tolist(),
                     wgt_stream=_tile_weight_stream(wgt[k_slice, col_slice]),
                 )
@@ -641,6 +803,8 @@ class TiledTPUCosim:
                         self.WGT_SLOT_BASES[job.slot], job.wgt_stream
                     ):
                         job.preload_ready = True
+                        if job.preload_launch_cycle is not None:
+                            self._cover_kernel_path(job.tag, "prefetch_window", job.preload_launch_cycle, self.global_cycle)
                         self.timeline.append(
                             f"cycle {self.global_cycle}: preload ready ti={job.ti} tj={job.tj} tk={job.tk} slot={job.slot}"
                         )
@@ -654,6 +818,7 @@ class TiledTPUCosim:
                     current_job = ready_jobs[0]
                     current_job.compute_started = True
                     current_job.cycle_start = self.global_cycle
+                    self._mark_kernel_path_start(current_job.tag, "compute_window", self.global_cycle)
                     self.timeline.append(
                         f"cycle {self.global_cycle}: compute start ti={ti} tj={tj} tk={current_job.tk} slot={current_job.slot}"
                     )
@@ -666,6 +831,7 @@ class TiledTPUCosim:
             if wb is not None:
                 src = wb.get("source")
                 dst = wb.get("dst")
+                wb_meta = dict(wb.get("meta", {}) or {})
 
                 if src == "vlsu" and dst == self.W_REG and current_job.weight_loads_inflight > 0:
                     current_job.weight_loads_inflight -= 1
@@ -677,6 +843,7 @@ class TiledTPUCosim:
                             "is_weight": True,
                             "expect_output": False,
                             "dtype": self.dtype,
+                            "meta": self._job_meta(current_job, "gsau_wgt", row=current_job.weight_row),
                         }
                     )
                     current_job.weight_row += 1
@@ -694,17 +861,19 @@ class TiledTPUCosim:
                             "is_weight": False,
                             "expect_output": True,
                             "dtype": self.dtype,
+                            "meta": self._job_meta(current_job, "gsau_act", row=current_job.act_row),
                         }
                     )
                     current_job.act_row += 1
 
                 elif src == "vlsu" and dst == self.ACC_REG and current_job.accum_loads_inflight > 0:
                     current_job.accum_loads_inflight -= 1
-                    load_addr = int(wb.get("meta", {}).get("addr", -1))
+                    load_addr = int(wb_meta.get("addr", -1))
                     row_idx = load_addr - self.ACC_SLOT_BASE
                     if row_idx not in current_job.accum_load_rows:
                         raise AssertionError("unexpected accumulator row load")
                     partial_bits = current_job.accum_load_rows.pop(row_idx)["data"]
+                    self._mark_kernel_path_start(current_job.tag, "datapath_add", self.global_cycle)
                     assert self.vc.enqueue_compute(
                         op="add",
                         dst=self.SUM_REG,
@@ -714,12 +883,15 @@ class TiledTPUCosim:
                     current_job.sum_issue_rows.append(row_idx)
 
                 elif src == "gsau" and dst == self.OUT_REG:
+                    tag = str(wb_meta.get("tag", current_job.tag))
+                    self._mark_kernel_path_end(tag, "gsau_rsp", self.global_cycle)
                     row_idx = current_job.next_out_row
                     if row_idx < self.tile_size:
                         current_job.pending_accum_rows.append({"row": row_idx, "data": list(wb.get("data", []))})
                         current_job.next_out_row += 1
 
                 elif src == "datapath" and dst == self.SUM_REG:
+                    self._mark_kernel_path_end(current_job.tag, "datapath_add", self.global_cycle)
                     if not current_job.sum_issue_rows:
                         raise AssertionError("unexpected accumulator datapath writeback")
                     row_idx = current_job.sum_issue_rows.pop(0)
@@ -746,6 +918,7 @@ class TiledTPUCosim:
                         "dst": self.ACC_REG,
                         "addr": self.ACC_SLOT_BASE + row_idx,
                         "dtype": self.dtype,
+                        "meta": self._job_meta(current_job, "vls_acc_load", row=row_idx),
                     }
                 )
                 current_job.accum_load_rows[row_idx] = {"data": list(next_item["data"]), "age": 0}
@@ -762,6 +935,7 @@ class TiledTPUCosim:
                         "data": row_data,
                         "addr": self.ACC_SLOT_BASE + row_idx,
                         "dtype": self.dtype,
+                        "meta": self._job_meta(current_job, "vls_acc_store", row=row_idx),
                     }
                 )
                 current_job.store_inflight[row_idx] = {"data": row_data, "age": 0}
@@ -775,6 +949,7 @@ class TiledTPUCosim:
                 store_meta["age"] += 1
                 if spad_vec == list(store_meta["data"]):
                     current_job.completed_rows.add(row_idx)
+                    self._mark_kernel_path_end(current_job.tag, "vls_acc_store", self.global_cycle)
                     current_job.store_inflight.pop(row_idx, None)
                 elif store_meta["age"] > 4000:
                     raise AssertionError("store did not commit to scratchpad")
@@ -789,6 +964,8 @@ class TiledTPUCosim:
                 self._drain_compute_path()
                 gemm_end_cycle = self.global_cycle
                 current_job.cycle_done = gemm_end_cycle
+                self._mark_kernel_path_end(current_job.tag, "compute_window", gemm_end_cycle)
+                self._mark_kernel_path_end(current_job.tag, "kernel_total", gemm_end_cycle)
                 self.gemm_cycle_records.append(
                     {
                         "ti": current_job.ti,
@@ -853,11 +1030,65 @@ def run_tiled_tpu_cosim(matrix_size: int = MATRIX, tile_size: int = TILE) -> Tup
 
 
 def _write_logs(runner: TiledTPUCosim, stats: Dict[str, int], log_dir: Path) -> None:
+    log_dir.mkdir(parents=True, exist_ok=True)
     configure_debug(
-        flags=["stats", "schedule", "gemm_cycles", "sdma_load_cycles"],
+        flags=["stats", "schedule", "gemm_cycles", "sdma_load_cycles", "gantt", "harness"],
         log_dir=str(log_dir),
     )
     try:
+        dprintf("harness", "TPU tiled 1024 harness overview")
+        dprintf(
+            "harness",
+            (
+                "This harness runs a full tiled GEMM using 32x32 TPU kernels. "
+                "For each output tile (ti,tj), it walks tk across the K dimension."
+            ),
+        )
+        dprintf(
+            "harness",
+            (
+                "Two preload slots are used. While the current kernel is computing, "
+                "the next A/B tile pair is prefetched from DRAM into scratchpad through the backend."
+            ),
+        )
+        dprintf(
+            "harness",
+            (
+                "Within one kernel: VC issues VLS loads for weight rows, then activation rows; "
+                "GSAU streams them into the TPU and returns partial output rows."
+            ),
+        )
+        dprintf(
+            "harness",
+            (
+                "Accumulation is performed in the vector core datapath, not in Python: "
+                "each partial output row triggers a VLS load of the accumulator row, "
+                "a vector add, and a VLS store back into the accumulator tile in scratchpad."
+            ),
+        )
+        dprintf(
+            "harness",
+            (
+                "After all tk kernels for one output tile finish, the accumulated tile is drained "
+                "from scratchpad to DRAM and read back for final matrix assembly."
+            ),
+        )
+        dprintf(
+            "harness",
+            (
+                "Shared setup comes from atalla.sysarr_tpu_system helpers: build_tpu_platform() "
+                "constructs VC/SPAD/DRAM/backend/VLS, and build_tpu_compute_path() resets TPU+GSAU "
+                "between kernels."
+            ),
+        )
+        dprintf(
+            "harness",
+            (
+                f"Config matrix_size={runner.matrix_size} tile_size={runner.tile_size} "
+                f"num_tiles={runner.num_tiles} prefetch_slots=2 "
+                f"load_issue_window={runner.load_issue_window} store_issue_window={runner.store_issue_window}"
+            ),
+        )
         for key, value in stats.items():
             dprintf("stats", f"{key} {value}")
         for line in runner.timeline:
@@ -882,6 +1113,16 @@ def _write_logs(runner: TiledTPUCosim, stats: Dict[str, int], log_dir: Path) -> 
                 (
                     f"{record['ti']} {record['tj']} {record['tk']} {record['slot']} "
                     f"{record['kind']} {record['cycles']}"
+                ),
+            )
+        dprintf("gantt", "tag ti tj tk slot path start_cycle end_cycle duration_cycles touches")
+        for row in runner.kernel_gantt_rows():
+            dprintf(
+                "gantt",
+                (
+                    f"{row['tag']} {row['ti']} {row['tj']} {row['tk']} {row['slot']} "
+                    f"{row['path']} {row['start_cycle']} {row['end_cycle']} "
+                    f"{row['duration_cycles']} {row['touches']}"
                 ),
             )
     finally:

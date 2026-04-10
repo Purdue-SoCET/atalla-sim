@@ -145,6 +145,7 @@ class VectorLoadStoreUnit(Clocked):
                     "eew": op.get("eew"),
                     "swizzle": op.get("swizzle"),
                     "dtype": op.get("dtype"),
+                    "meta": dict(op.get("meta", {}) or {}),
                 }
             ):
                 return
@@ -159,6 +160,7 @@ class VectorLoadStoreUnit(Clocked):
                 "stride": op.get("stride"),
                 "swizzle": op.get("swizzle"),
                 "mask": op.get("mask"),
+                "meta": dict(op.get("meta", {}) or {}),
             }
             if not self.req_q.enqueue(req):
                 _ = self.load_dst_fifos[spad].dequeue()
@@ -184,6 +186,7 @@ class VectorLoadStoreUnit(Clocked):
                 "mask": op.get("mask"),
                 "data": store_data,
                 "vs": op.get("vs"),
+                "meta": dict(op.get("meta", {}) or {}),
             }
             if not self.req_q.enqueue(req):
                 return
@@ -204,6 +207,8 @@ class VectorLoadStoreUnit(Clocked):
 
         _ = self.load_dst_fifos[spad].dequeue()
         _ = self.rsp_q.dequeue()
+        merged_meta = dict(dst_tag.get("meta", {}) or {})
+        merged_meta.update(dict(rsp.get("meta", {}) or {}))
         wb = {
             "scratchpad": spad,
             "vd": dst_tag["vd"],
@@ -214,7 +219,7 @@ class VectorLoadStoreUnit(Clocked):
             "swizzle": dst_tag.get("swizzle"),
             "dtype": dst_tag.get("dtype"),
             "addr": rsp.get("addr"),
-            "meta": rsp.get("meta"),
+            "meta": merged_meta,
         }
         if not self.wb_q.enqueue(wb):
             raise RuntimeError("writeback queue overflow")

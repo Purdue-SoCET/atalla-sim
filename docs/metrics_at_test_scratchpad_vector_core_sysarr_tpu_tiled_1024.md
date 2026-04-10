@@ -12,6 +12,47 @@ Current modeled path:
 The numbers below match the current 1024 x 1024 tiled run in
 `logs/sysarr_gemm_tpu_tiled_1024/`.
 
+## Tagged Microkernel Gantt
+
+The tiled harness now assigns every `32 x 32` tile GEMM a stable tag:
+
+- `tiXX_tjXX`
+
+That tag is attached to the per-kernel traffic the harness launches through:
+
+- SDMA tile staging
+- VLS activation / weight / accumulator traffic
+- GSAU ingress and GSAU response egress
+- systolic-array compute
+- vector-datapath accumulation adds
+
+The run writes one debug log with the envelope span of each tagged path:
+
+- `logs/sysarr_gemm_tpu_tiled_1024/gantt.log`
+
+Log columns:
+
+- `tag, ti, tj, tk, slot`
+- `path`
+- `start_cycle, end_cycle, duration_cycles`
+- `touches`
+
+For poster or debug visualization, plot one output tile at a time:
+
+```bash
+/home/asicfab/a/socet149/sc_env_new/bin/python \
+/home/asicfab/a/socet149/atalla-sim/tools/plot_tiled_sysarr_tpu_gantt.py \
+  --input logs/sysarr_gemm_tpu_tiled_1024/gantt.log \
+  --ti 0 --tj 0 --include-envelopes
+```
+
+That emits a row-per-microkernel Gantt where each row is one `tk` job and each
+color is one path. It makes three things visually obvious:
+
+- how much SDMA preload overlaps across the two slots
+- where the systolic array is busy versus starved waiting for the next tagged job
+- how much accumulation traffic extends beyond the core systolic compute window
+
 ## Workload Shape
 
 - Matrix size is `1024 x 1024`.
@@ -51,6 +92,10 @@ The accumulation itself is done inside the vector core
 3. The vector datapath issues `add(partial_row, accumulator_row)` into `SUM_REG`.
 4. The summed row is stored back into the scratchpad accumulator tile.
 5. After all `32` `tk` contributions arrive, that accumulator tile is the final `C[ti, tj]` tile.
+
+For a focused explanation of the full tiled harness, see:
+
+- [harness_at_test_scratchpad_vector_core_sysarr_tpu_tiled_1024.md](/home/asicfab/a/socet149/atalla-sim/docs/harness_at_test_scratchpad_vector_core_sysarr_tpu_tiled_1024.md)
 
 Using the first output tile in `schedule.log` to make the pattern explicit:
 

@@ -226,18 +226,32 @@ class MetricsVLSFrontendBridge:
         self.bytes_load = 0
         self.bytes_store = 0
         self.activity_this_cycle = False
+        self.now = 0
+        self.trace_hook = None
 
     def start_cycle(self) -> None:
         self.activity_this_cycle = False
 
-    def _on_frontend_read(self, load_id: int, addr: int, lanes) -> None:
+    def _on_frontend_read(self, load_id: int, addr: int, lanes, meta: Optional[Dict] = None) -> None:
         if load_id in self._completed_load_ids:
             return
         self._completed_load_ids.add(load_id)
         data = _decode_lanes_u16(lanes, self.vc.vector_len)
         self.bytes_load += len(data) * 2
         self.activity_this_cycle = True
-        assert self.vc.push_scratchpad_response(self.vls_id, {"addr": addr, "data": data})
+        meta_dict = dict(meta or {})
+        if self.trace_hook is not None:
+            self.trace_hook(
+                {
+                    "kind": "load_rsp",
+                    "cycle": int(self.now),
+                    "vls": self.vls_id,
+                    "frontend": self.frontend_id,
+                    "addr": addr,
+                    "meta": meta_dict,
+                }
+            )
+        assert self.vc.push_scratchpad_response(self.vls_id, {"addr": addr, "data": data, "meta": meta_dict})
 
     def tick(self) -> None:
         vls = self.vc.vls_units[self.vls_id]
@@ -252,8 +266,20 @@ class MetricsVLSFrontendBridge:
             req = self.vc.pop_scratchpad_request(self.vls_id)
             if req is None:
                 return
+            meta = dict(req.get("meta", {}) or {})
             self.bytes_store += len(req.get("data", [])) * 2
             self.activity_this_cycle = True
+            if self.trace_hook is not None:
+                self.trace_hook(
+                    {
+                        "kind": "store_req",
+                        "cycle": int(self.now),
+                        "vls": self.vls_id,
+                        "frontend": self.frontend_id,
+                        "addr": addr,
+                        "meta": meta,
+                    }
+                )
             assert self.spad.frontend_write(
                 addr,
                 _encode_vector_u16(req["data"]),
@@ -268,12 +294,26 @@ class MetricsVLSFrontendBridge:
             req = self.vc.pop_scratchpad_request(self.vls_id)
             if req is None:
                 return
+            meta = dict(req.get("meta", {}) or {})
+            if self.trace_hook is not None:
+                self.trace_hook(
+                    {
+                        "kind": "load_req",
+                        "cycle": int(self.now),
+                        "vls": self.vls_id,
+                        "frontend": self.frontend_id,
+                        "addr": addr,
+                        "meta": meta,
+                    }
+                )
             load_id = self._next_load_id
             self._next_load_id += 1
             assert self.spad.frontends[self.frontend_id].read(
                 addr,
                 0,
-                lambda lanes, _lid=load_id, _addr=addr: self._on_frontend_read(_lid, _addr, lanes),
+                lambda lanes, _lid=load_id, _addr=addr, _meta=meta: self._on_frontend_read(
+                    _lid, _addr, lanes, _meta
+                ),
             )
             return
 

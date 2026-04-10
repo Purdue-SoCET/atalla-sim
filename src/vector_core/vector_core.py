@@ -522,15 +522,15 @@ class VectorCore(Clocked):
         vdata = cast_vector(vdata, dtype0)
 
         expects_output = bool(cmd.get("expect_output", not bool(cmd.get("is_weight", False))))
+        gsau_meta = dict(cmd.get("meta", {}) or {})
+        gsau_meta.setdefault("kind", cmd.get("kind"))
+        gsau_meta.setdefault("src", src_spec)
+        gsau_meta.setdefault("dtype", dtype0)
         gsau_cmd = {
             "vdata": vdata,
             "is_weight": bool(cmd.get("is_weight", False)),
             "expect_output": expects_output,
-            "meta": {
-                "kind": cmd.get("kind"),
-                "src": src_spec,
-                "dtype": dtype0,
-            },
+            "meta": gsau_meta,
             "dtype": dtype0,
         }
         if expects_output:
@@ -594,6 +594,10 @@ class VectorCore(Clocked):
             if wb is None:
                 continue
             bank, _ = self._reg_to_bank_addr(int(wb["vd"]))
+            meta = dict(wb.get("meta", {}) or {})
+            meta.setdefault("addr", wb.get("addr"))
+            meta.setdefault("scratchpad", wb.get("scratchpad"))
+            meta.setdefault("vd", wb.get("vd"))
             candidates.append(
                 (
                     0 if vls_id == 0 else 1,
@@ -606,7 +610,7 @@ class VectorCore(Clocked):
                         "mask": wb.get("mask"),
                         "dtype": wb.get("dtype"),
                         "bank": bank,
-                        "meta": wb,
+                        "meta": meta,
                     },
                     wb,
                 )
@@ -615,6 +619,9 @@ class VectorCore(Clocked):
         wb = self.gsau.writebacks.peek()
         if wb is not None:
             bank, _ = self._reg_to_bank_addr(int(wb["dst"]))
+            meta = dict(wb.get("meta", {}) or {})
+            meta.update(dict(meta.get("rdq_entry", {}) or {}))
+            meta.update(dict(meta.get("rsp_meta", {}) or {}))
             candidates.append(
                 (
                     2,
@@ -626,7 +633,7 @@ class VectorCore(Clocked):
                         "mask": wb.get("mask"),
                         "dtype": wb.get("dtype"),
                         "bank": bank,
-                        "meta": wb.get("meta", {}),
+                        "meta": meta,
                     },
                     wb,
                 )
