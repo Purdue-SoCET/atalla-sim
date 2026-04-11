@@ -11,6 +11,27 @@ from memory.dram import DRAM
 from memory.scratchpad import Scratchpad
 from memory.backend import Backend
 
+
+def _pack_row(values):
+    return b"".join(int(value).to_bytes(2, "little") for value in values)
+
+
+def _read_swizzled_row(spad: Scratchpad, tile_id: int, slot: int) -> bytes:
+    tile = spad.tiles[tile_id]
+    lane_bytes = []
+    for lane in range(spad.num_banks):
+        bank = _xor_bank(slot, lane, spad.num_banks)
+        lane_bytes.append(tile.banks[bank].mem[slot])
+    return b"".join(lane_bytes)
+
+
+def _write_swizzled_row(spad: Scratchpad, tile_id: int, slot: int, row_bytes: bytes) -> None:
+    tile = spad.tiles[tile_id]
+    for lane in range(spad.num_banks):
+        bank = _xor_bank(slot, lane, spad.num_banks)
+        off = lane * spad.elem_bytes
+        tile.banks[bank].mem[slot] = row_bytes[off : off + spad.elem_bytes]
+
 def build_sim():
     eq = EventQueue()
     clk = ClockDomain(eq, period=1.0)
@@ -37,35 +58,29 @@ def test_scratchpad_full():
     ok2 = spad.frontend_write(40, row_bytes2, row_idx=0)
     assert ok2, "frontend_write (tile 1) failed"
 
-    # --- Backend Write (store): tile 0 ---
-    backend_writes = []
-    def send_sram_write(sp_addr, row_bytes, row_idx, tx_id):
-        backend_writes.append((sp_addr, row_bytes, row_idx, tx_id))
-        # Actually write to the scratchpad
-        spad._accept_backend_write(sp_addr, row_bytes, row_idx, tx_id)
-        return True
+    dram = DRAM(block_bytes=16)
+    backend0 = Backend(dram_latency=2, dram_q_depth=8, dram_burst_bytes=4, elem_bytes=2)
+    backend1 = Backend(dram_latency=2, dram_q_depth=8, dram_burst_bytes=4, elem_bytes=2)
 
-    backend = Backend(
-        dram_latency=2, dram_q_depth=8, dram_burst_bytes=4, elem_bytes=2,
-        send_sram_write=send_sram_write
-    )
-    clk.add_clocked(backend)
+    spad.attach_backend(backend0, tile_id=0)
+    spad.attach_backend(backend1, tile_id=1)
+    backend0.attach_dram(dram)
+    backend1.attach_dram(dram)
+    clk.add_clocked(backend0)
+    clk.add_clocked(backend1)
 
-    # Simulate a backend load (DRAM to scratchpad)
-    tx_id = backend.driver_to_backend_start_load(base_sp_addr=20, base_dram_addr=1000, rows=1, cols=32)
-    # Simulate a backend store (scratchpad to DRAM)
-    # For store, backend will request rows from scratchpad; we must respond
-    backend_store_rows = []
-    def send_sram_read(sp_addr, row_idx, tx_id):
-        # Return a row of 0xABCD for test, 32 elements * 2 bytes = 64 bytes
-        data = (b'\xAB\xCD' * 32)
-        backend_store_rows.append((sp_addr, row_idx, tx_id, data))
-        return data
-    backend.send_sram_read = send_sram_read
-    tx_id2 = backend.driver_to_backend_start_store(base_sp_addr=24, base_dram_addr=2000, rows=1, cols=32)
+    backend0_row = _pack_row([200 + i for i in range(32)])
+    backend1_row = _pack_row([400 + i for i in range(32)])
+    dram.write(0x100, backend0_row)
+    dram.write(0x200, backend1_row)
+
+    tx_id0 = backend0.driver_to_backend_start_load(base_sp_addr=20, base_dram_addr=0x100, rows=1, cols=32)
+    tx_id1 = backend1.driver_to_backend_start_load(base_sp_addr=4, base_dram_addr=0x200, rows=1, cols=32)
+    assert tx_id0 > 0
+    assert tx_id1 > 0
 
     # --- Run simulation ---
-    sim.run(until=10)
+    sim.run(until=40)
 
     # --- Check frontend writes ---
     tile0 = spad.tiles[0]
@@ -84,20 +99,13 @@ def test_scratchpad_full():
         expected1[bank] = (100+lane).to_bytes(2, 'little')
     assert vals1 == expected1, f"Tile1 slot8 mismatch: {vals1} vs {expected1}"
 
-    # --- Check backend writes (load) ---
-    assert len(backend_writes) == 1, f"Expected 1 backend write, got {len(backend_writes)}"
-    sp_addr, row_bytes, row_idx, tx_id = backend_writes[0]
-    assert sp_addr == 20, f"Backend write sp_addr mismatch: {sp_addr}"
-    assert len(row_bytes) == 64, f"Backend write row_bytes length mismatch: {len(row_bytes)}"
-    assert row_idx == 0, f"Backend write row_idx mismatch: {row_idx}"
+    # --- Check backend writes (load) land in the correct tile-specific slot ---
+    assert backend0.get_stats()["tx_completed"] == 1
+    assert backend1.get_stats()["tx_completed"] == 1
+    assert _read_swizzled_row(spad, tile_id=0, slot=20) == backend0_row
+    assert _read_swizzled_row(spad, tile_id=1, slot=4) == backend1_row
 
-    # --- Check backend store (read) ---
-    assert len(backend_store_rows) == 1, f"Expected 1 backend store row, got {len(backend_store_rows)}"
-    sp_addr, row_idx, tx_id, data = backend_store_rows[0]
-    assert sp_addr == 24, f"Backend store sp_addr mismatch: {sp_addr}"
-    assert len(data) == 32*2, f"Backend store row length mismatch: {len(data)}"
-
-    print("Scratchpad frontend/backend arbitration and data path test passed.")
+    print("Scratchpad frontend/two-backend arbitration and data path test passed.")
     print(spad.get_stats())
 
     # --- Frontend Read: tile 0 ---
@@ -109,7 +117,7 @@ def test_scratchpad_full():
     spad.frontends[0].read(10, 0, frontend_read_cb)
 
     # --- Run simulation ---
-    sim.run(until=20)
+    sim.run(until=60)
 
     # --- Check frontend read result ---
     assert frontend_reads, "No frontend read callback received"
@@ -120,48 +128,57 @@ def test_scratchpad_full():
     print("Frontend read test passed.")
 
 
-def test_backend_can_attach_to_scratchpad_and_dram():
+def test_backends_can_attach_to_scratchpad_slots_and_dram():
     dram = DRAM(block_bytes=16)
     spad = Scratchpad(num_banks=4, bank_size=16, read_latency=1, write_latency=1, xbar_delay=1, elem_bytes=2)
-    backend = Backend(dram_latency=1, dram_q_depth=8, dram_burst_bytes=4, elem_bytes=2)
+    backend0 = Backend(dram_latency=1, dram_q_depth=8, dram_burst_bytes=4, elem_bytes=2)
+    backend1 = Backend(dram_latency=1, dram_q_depth=8, dram_burst_bytes=4, elem_bytes=2)
 
-    spad.attach_backend(backend)
-    backend.attach_dram(dram)
+    spad.attach_backend(backend0, tile_id=0)
+    spad.attach_backend(backend1, tile_id=1)
+    backend0.attach_dram(dram)
+    backend1.attach_dram(dram)
 
-    assert spad.backend is backend
-    assert backend.dram is dram
-    assert backend.send_sram_write == spad._accept_backend_write
-    assert backend.send_sram_read == spad.backend_read_row
+    assert spad.backends == [backend0, backend1]
+    assert spad.backend is backend0
+    assert backend0.dram is dram
+    assert backend1.dram is dram
 
-    load_row = b"".join((i + 1).to_bytes(2, "little") for i in range(4))
-    dram.write(0x100, load_row)
-    tx_id = backend.driver_to_backend_start_load(base_sp_addr=3, base_dram_addr=0x100, rows=1, cols=4)
-    assert tx_id > 0
+    load_row0 = _pack_row([1, 2, 3, 4])
+    load_row1 = _pack_row([11, 12, 13, 14])
+    dram.write(0x100, load_row0)
+    dram.write(0x120, load_row1)
+    tx_id0 = backend0.driver_to_backend_start_load(base_sp_addr=3, base_dram_addr=0x100, rows=1, cols=4)
+    tx_id1 = backend1.driver_to_backend_start_load(base_sp_addr=5, base_dram_addr=0x120, rows=1, cols=4)
+    assert tx_id0 > 0
+    assert tx_id1 > 0
 
     for cycle in range(8):
-        backend.tick(cycle)
+        backend0.tick(cycle)
+        backend1.tick(cycle)
         spad.tick(cycle)
 
-    slot = 3
-    got = []
-    for lane in range(4):
-        bank = _xor_bank(slot, lane, spad.num_banks)
-        got.append(spad.tiles[0].banks[bank].mem[slot])
-    assert got == [(i + 1).to_bytes(2, "little") for i in range(4)]
+    assert _read_swizzled_row(spad, tile_id=0, slot=3) == load_row0
+    assert _read_swizzled_row(spad, tile_id=1, slot=5) == load_row1
 
-    store_row = b"".join((10 + i).to_bytes(2, "little") for i in range(4))
-    for lane in range(4):
-        bank = _xor_bank(5, lane, spad.num_banks)
-        spad.tiles[0].banks[bank].mem[5] = store_row[lane * 2 : lane * 2 + 2]
+    store_row0 = _pack_row([21, 22, 23, 24])
+    store_row1 = _pack_row([31, 32, 33, 34])
+    _write_swizzled_row(spad, tile_id=0, slot=6, row_bytes=store_row0)
+    _write_swizzled_row(spad, tile_id=1, slot=7, row_bytes=store_row1)
 
-    tx_id2 = backend.driver_to_backend_start_store(base_sp_addr=5, base_dram_addr=0x200, rows=1, cols=4)
+    tx_id2 = backend0.driver_to_backend_start_store(base_sp_addr=6, base_dram_addr=0x200, rows=1, cols=4)
+    tx_id3 = backend1.driver_to_backend_start_store(base_sp_addr=7, base_dram_addr=0x220, rows=1, cols=4)
     assert tx_id2 > 0
+    assert tx_id3 > 0
 
     for cycle in range(8, 16):
-        backend.tick(cycle)
+        backend0.tick(cycle)
+        backend1.tick(cycle)
         spad.tick(cycle)
 
-    assert dram.read(0x200, len(store_row)) == store_row
+    assert dram.read(0x200, len(store_row0)) == store_row0
+    assert dram.read(0x220, len(store_row1)) == store_row1
 
 if __name__ == "__main__":
     test_scratchpad_full()
+    test_backends_can_attach_to_scratchpad_slots_and_dram()

@@ -359,9 +359,34 @@ class TPUPlatform:
     sa: SystolicArrayTPU
     dram: DRAM
     backend: Optional[Backend]
+    backends: List[Backend]
     vls_bridge: Any
     sysarr_bridge: GSAUTPUBridge
     mirror: Optional[TPUReference]
+
+
+def _build_shared_dram_backends(
+    *,
+    spad: Scratchpad,
+    dram: DRAM,
+    dram_latency: int,
+    dram_q_depth: int,
+    dram_burst_bytes: int,
+    delay_cycles: int,
+) -> List[Backend]:
+    backends: List[Backend] = []
+    for tile_id in range(len(spad.tiles)):
+        backend_obj = Backend(
+            dram_latency=int(dram_latency),
+            dram_q_depth=int(dram_q_depth),
+            dram_burst_bytes=int(dram_burst_bytes),
+            elem_bytes=2,
+            delay_cycles=int(delay_cycles),
+        )
+        spad.attach_backend(backend_obj, tile_id=tile_id)
+        backend_obj.attach_dram(dram)
+        backends.append(backend_obj)
+    return backends
 
 
 def build_tpu_compute_path(
@@ -415,17 +440,18 @@ def build_tpu_platform(
         frontend_queue_size=int(spad_frontend_queue_size),
     )
     dram = DRAM(block_bytes=int(dram_block_bytes))
+    backends: List[Backend] = []
     backend = None
     if backend_dram_latency is not None:
-        backend = Backend(
+        backends = _build_shared_dram_backends(
+            spad=spad,
+            dram=dram,
             dram_latency=int(backend_dram_latency),
             dram_q_depth=int(backend_dram_q_depth),
             dram_burst_bytes=int(backend_dram_burst_bytes),
-            elem_bytes=2,
             delay_cycles=int(backend_delay_cycles),
         )
-        spad.attach_backend(backend)
-        backend.attach_dram(dram)
+        backend = backends[0]
 
     mirror_obj = TPUReference(size=int(size), dtype=str(dtype)) if mirror else None
     bridge_kwargs = dict(vls_bridge_kwargs or {})
@@ -440,6 +466,7 @@ def build_tpu_platform(
         sa=sa,
         dram=dram,
         backend=backend,
+        backends=backends,
         vls_bridge=vls_bridge,
         sysarr_bridge=sysarr_bridge,
         mirror=mirror_obj,
@@ -458,6 +485,8 @@ class SysArrTPUSystem:
         self.spad = platform.spad
         self.sa = platform.sa
         self.dram = platform.dram
+        self.backend = platform.backend
+        self.backends = platform.backends
 
         self.DRAM_ACT = 0x1000
         self.DRAM_WGT = 0x2000

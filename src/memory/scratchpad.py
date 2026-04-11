@@ -10,9 +10,9 @@ from memory.frontend import Frontend
 class Scratchpad(Clocked):
     """
     Top-level software-managed Scratchpad composed of:
-      - two tiles of SRAM banks (each tile: NUM_BANKS x BANK_SIZE slots)
-      - per-tile crossbars for read/write (to perform swizzle / deswizzle)
-      - ability to attach a Backend instance (Backend will call send_sram_write)
+            - two tiles of SRAM banks (each tile: NUM_BANKS x BANK_SIZE slots)
+            - per-tile crossbars for read/write (to perform swizzle / deswizzle)
+            - ability to attach one Backend instance per tile/slot
 
     Notes / simplifications:
       - Backend/frontend write path: incoming logical row (sequence of elements) is
@@ -55,7 +55,9 @@ class Scratchpad(Clocked):
             Xbar(delay=xbar_delay, num_banks=self.num_banks) for _ in range(2)
         ]
 
-        # optional backend reference (set via attach_backend)
+        # Optional per-tile backend references (set via attach_backend / attach_backends).
+        self.backends: List[Optional[backend.Backend]] = [None, None]
+        # Backward-compatible alias for the first attached backend.
         self.backend: Optional[backend.Backend] = None
 
         self.frontends = [
@@ -73,6 +75,17 @@ class Scratchpad(Clocked):
         slot = sp_addr % tile_sz
         return tile, slot
 
+    def _normalize_tile_id(self, tile_id: int) -> int:
+        tile_id = int(tile_id)
+        if tile_id < 0 or tile_id >= len(self.tiles):
+            raise ValueError(f"tile_id out of range: {tile_id}")
+        return tile_id
+
+    def _refresh_backend_alias(self) -> None:
+        self.backend = self.backends[0]
+        if self.backend is None:
+            self.backend = next((be for be in self.backends if be is not None), None)
+
     def _accept_backend_write(self, sp_addr: int, row_bytes: bytes, row_idx: int, tx_id: int, tile_id: int = None, frontend_cb=None) -> bool:
         """
         Backend -> Scratchpad write path:
@@ -84,6 +97,7 @@ class Scratchpad(Clocked):
         if tile_id is None:
             tile_id, slot = self._tile_and_slot(sp_addr)
         else:
+            tile_id = self._normalize_tile_id(tile_id)
             slot = sp_addr % self.bank_size
         tile = self.tiles[tile_id]
         xbar = self.tile_write_xbars[tile_id]
@@ -133,14 +147,46 @@ class Scratchpad(Clocked):
         self.backend_write_inflight[tile_id] = True
         return True
     
-    def attach_backend(self, backend):
-        self.backend = backend
-        backend.send_sram_write = self._accept_backend_write
-        backend.send_sram_read = self.backend_read_row
-        return backend
+    def attach_backends(self, backend_objs):
+        if len(backend_objs) != len(self.tiles):
+            raise ValueError(f"expected {len(self.tiles)} backends, got {len(backend_objs)}")
+        attached = []
+        for tile_id, backend_obj in enumerate(backend_objs):
+            attached.append(self.attach_backend(backend_obj, tile_id=tile_id))
+        return attached
 
-    def backend_read_row(self, sp_addr: int, row_idx: int, tx_id: int) -> bytes:
-        tile_id, slot = self._tile_and_slot(sp_addr)
+    def attach_backend(self, backend_obj, tile_id: int = None):
+        if isinstance(backend_obj, (list, tuple)):
+            return self.attach_backends(list(backend_obj))
+
+        if tile_id is None:
+            for candidate, attached in enumerate(self.backends):
+                if attached is None:
+                    tile_id = candidate
+                    break
+            else:
+                raise ValueError("all scratchpad backend slots are already occupied")
+
+        tile_id = self._normalize_tile_id(tile_id)
+        self.backends[tile_id] = backend_obj
+
+        def _send_sram_write(sp_addr: int, row_bytes: bytes, row_idx: int, tx_id: int, _tile_id: int = tile_id) -> bool:
+            return self._accept_backend_write(sp_addr, row_bytes, row_idx, tx_id, tile_id=_tile_id)
+
+        def _send_sram_read(sp_addr: int, row_idx: int, tx_id: int, _tile_id: int = tile_id) -> bytes:
+            return self._backend_read_row_for_tile(sp_addr, row_idx, tx_id, tile_id=_tile_id)
+
+        backend_obj.send_sram_write = _send_sram_write
+        backend_obj.send_sram_read = _send_sram_read
+        self._refresh_backend_alias()
+        return backend_obj
+
+    def _backend_read_row_for_tile(self, sp_addr: int, row_idx: int, tx_id: int, tile_id: int = None) -> bytes:
+        if tile_id is None:
+            tile_id, slot = self._tile_and_slot(sp_addr)
+        else:
+            tile_id = self._normalize_tile_id(tile_id)
+            slot = sp_addr % self.bank_size
         tile = self.tiles[tile_id]
         lanes: List[bytes] = []
         for lane in range(self.num_banks):
@@ -151,6 +197,9 @@ class Scratchpad(Clocked):
                 lane_bytes = lane_bytes + (b"\x00" * (self.elem_bytes - len(lane_bytes)))
             lanes.append(lane_bytes[: self.elem_bytes])
         return b"".join(lanes)
+
+    def backend_read_row(self, sp_addr: int, row_idx: int, tx_id: int) -> bytes:
+        return self._backend_read_row_for_tile(sp_addr, row_idx, tx_id)
 
     # minimal frontend helpers (write uses same swizzle path)
     def frontend_write(self, base_sp_addr: int, row_bytes: bytes, row_idx: int, tile_id: int = None) -> bool:
@@ -172,6 +221,7 @@ class Scratchpad(Clocked):
         if tile_id is None:
             tile_id, slot = self._tile_and_slot(sp_addr)
         else:
+            tile_id = self._normalize_tile_id(tile_id)
             slot = sp_addr % self.bank_size
         tile = self.tiles[tile_id]
         xbar = self.tile_read_xbars[tile_id]
@@ -218,6 +268,10 @@ class Scratchpad(Clocked):
     def get_stats(self) -> dict:
         stats = {
             "tiles": [],
+            "backend_slots": [
+                {"tile": tid, "attached": be is not None}
+                for tid, be in enumerate(self.backends)
+            ],
             "frontend_stalls": [
                 {"tile": tid, "write_stalled": fe.write_stalled, "read_stalled": fe.read_stalled}
                 for tid, fe in enumerate(self.frontends)

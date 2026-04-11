@@ -119,7 +119,10 @@ class Backend(Clocked):
         self.total_dram_bursts_issued += 1
         return True
 
-    def attach_scratchpad(self, scratchpad: Any) -> Any:
+    def attach_scratchpad(self, scratchpad: Any, tile_id: Optional[int] = None) -> Any:
+        if hasattr(scratchpad, "attach_backend"):
+            scratchpad.attach_backend(self, tile_id=tile_id)
+            return scratchpad
         self.send_sram_write = scratchpad._accept_backend_write
         self.send_sram_read = scratchpad.backend_read_row
         if getattr(scratchpad, "backend", None) is not self:

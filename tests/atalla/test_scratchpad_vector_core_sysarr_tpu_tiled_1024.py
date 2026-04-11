@@ -555,8 +555,11 @@ class TiledTPUCosim:
         )
         self.vc = platform.vc
         self.spad = platform.spad
-        self.backend = platform.backend
         self.dram = platform.dram
+        self.backends = platform.backends
+        assert len(self.backends) == 2
+        assert all(backend.dram is self.dram for backend in self.backends)
+        self.backend = self.backends[0]
         self.vls_bridge = platform.vls_bridge
         self.vls_bridge.trace_hook = self._trace_vls_event
         self.load_issue_window = self.spad.frontends[0].readq.max_size + 1

@@ -3,7 +3,7 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..//..", "src")))
 
-from atalla.sysarr_tpu_system import SysArrTPUSystem
+from atalla.sysarr_tpu_system import SysArrTPUSystem, build_tpu_platform
 
 
 def _act_u16(size: int):
@@ -12,6 +12,17 @@ def _act_u16(size: int):
 
 def _weights_u16(size: int):
     return [[((i * size + j) % 8) + 1 for j in range(size)] for i in range(size)]
+
+
+def test_build_tpu_platform_attaches_two_backends_to_shared_dram():
+    platform = build_tpu_platform(size=32, dtype="fp16", backend_dram_latency=24)
+
+    assert len(platform.backends) == 2
+    assert platform.backend is platform.backends[0]
+    assert platform.backends[0] is not platform.backends[1]
+    assert platform.spad.backends == platform.backends
+    assert platform.spad.backend is platform.backends[0]
+    assert all(backend.dram is platform.dram for backend in platform.backends)
 
 
 def test_sysarr_tpu_system_end_to_end():
@@ -37,4 +48,5 @@ def test_sysarr_tpu_system_end_to_end():
 
 
 if __name__ == "__main__":
+    test_build_tpu_platform_attaches_two_backends_to_shared_dram()
     test_sysarr_tpu_system_end_to_end()

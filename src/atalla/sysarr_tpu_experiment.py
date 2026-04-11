@@ -20,7 +20,7 @@ from memory.scratchpad import Scratchpad
 from systolic_array.systolic_array_tpu import SystolicArrayTPU
 from vector_core.vector_core import VectorCore
 
-from atalla.sysarr_tpu_system import GSAUTPUBridge, TPUReference
+from atalla.sysarr_tpu_system import GSAUTPUBridge, TPUReference, build_tpu_platform
 
 
 PHASE_ORDER = [
@@ -423,42 +423,41 @@ class SysArrTPUExperimentConfig:
 def run_sysarr_tpu_experiment(config: SysArrTPUExperimentConfig) -> Dict[str, object]:
     cfg = config.normalize()
 
-    eq, _, sim = build_sim()
     tile = cfg.tile
     row_bytes = tile * 2
 
-    vc = VectorCore(
-        veggie_size=tile * 16,
+    platform = build_tpu_platform(
+        size=tile,
+        dtype=cfg.dtype,
         lane_count=cfg.lane_count,
         vls_count=cfg.vls_count,
-        fu_latencies={"alu": 1},
-        dtype=cfg.dtype,
+        spad_num_banks=cfg.spad_num_banks,
+        spad_bank_size=cfg.spad_bank_size,
+        spad_read_latency=cfg.spad_read_latency,
+        spad_write_latency=cfg.spad_write_latency,
+        spad_xbar_delay=cfg.spad_xbar_delay,
+        spad_frontend_queue_size=cfg.spad_frontend_queue_size,
+        dram_block_bytes=cfg.dram_block_bytes,
+        backend_dram_latency=cfg.backend_dram_latency,
+        backend_dram_q_depth=cfg.backend_dram_q_depth,
+        backend_dram_burst_bytes=cfg.backend_dram_burst_bytes,
+        backend_delay_cycles=cfg.backend_delay_cycles,
+        mirror=True,
+        vls_bridge_cls=MetricsVLSFrontendBridge,
     )
-    spad = Scratchpad(
-        num_banks=cfg.spad_num_banks,
-        bank_size=cfg.spad_bank_size,
-        read_latency=cfg.spad_read_latency,
-        write_latency=cfg.spad_write_latency,
-        xbar_delay=cfg.spad_xbar_delay,
-        elem_bytes=2,
-        frontend_queue_size=cfg.spad_frontend_queue_size,
-    )
-    sa = SystolicArrayTPU(size=tile, dtype=cfg.dtype)
-
-    vls_bridge = MetricsVLSFrontendBridge(vc, spad, vls_id=0, frontend_id=0)
-    mirror = TPUReference(size=tile, dtype=cfg.dtype)
-    sysarr_bridge = GSAUTPUBridge(vc, sa, mirror=mirror)
-
-    dram = DRAM(block_bytes=cfg.dram_block_bytes)
-    backend = Backend(
-        dram_latency=cfg.backend_dram_latency,
-        dram_q_depth=cfg.backend_dram_q_depth,
-        dram_burst_bytes=cfg.backend_dram_burst_bytes,
-        elem_bytes=2,
-        delay_cycles=cfg.backend_delay_cycles,
-    )
-    spad.attach_backend(backend)
-    backend.attach_dram(dram)
+    eq = platform.eq
+    sim = platform.sim
+    vc = platform.vc
+    spad = platform.spad
+    sa = platform.sa
+    dram = platform.dram
+    backend = platform.backend
+    backends = platform.backends
+    vls_bridge = platform.vls_bridge
+    sysarr_bridge = platform.sysarr_bridge
+    mirror = platform.mirror
+    if backend is None:
+        raise ValueError("run_sysarr_tpu_experiment requires an attached backend")
 
     DRAM_ACT = 0x1000
     DRAM_WGT = 0x2000
@@ -593,7 +592,8 @@ def run_sysarr_tpu_experiment(config: SysArrTPUExperimentConfig) -> Dict[str, ob
         vc.tick()
         vls_bridge.tick()
         sysarr_bridge.tick()
-        backend.tick(time)
+        for backend_obj in backends:
+            backend_obj.tick(time)
         spad.tick(time)
 
         if not state["preload_done"] and state["preload_wait_drain"] and len(state["preload_tx_done"]) == 2:
@@ -855,6 +855,9 @@ def run_sysarr_tpu_experiment(config: SysArrTPUExperimentConfig) -> Dict[str, ob
         "backend_dram_q_depth": cfg.backend_dram_q_depth,
         "backend_dram_burst_bytes": cfg.backend_dram_burst_bytes,
         "backend_delay_cycles": cfg.backend_delay_cycles,
+        "backend_count": len(backends),
+        "backend_shared_dram": len({id(backend_obj.dram) for backend_obj in backends}) <= 1,
+        "backend_slots_attached": sum(1 for slot in spad.get_stats()["backend_slots"] if slot["attached"]),
         "dram_block_bytes": cfg.dram_block_bytes,
         "valid_mac_cycles": sa.valid_mac_cycles,
         "compute_window_cycles": sa.compute_window_cycles,
