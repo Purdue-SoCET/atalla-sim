@@ -179,6 +179,23 @@ def test_backends_can_attach_to_scratchpad_slots_and_dram():
     assert dram.read(0x200, len(store_row0)) == store_row0
     assert dram.read(0x220, len(store_row1)) == store_row1
 
+
+def test_frontend_writes_are_not_dropped_when_write_xbar_is_pipelined():
+    spad = Scratchpad(num_banks=8, bank_size=16, read_latency=1, write_latency=2, xbar_delay=3, elem_bytes=2, frontend_queue_size=4)
+
+    row0 = _pack_row([10 + i for i in range(8)])
+    row1 = _pack_row([30 + i for i in range(8)])
+
+    assert spad.frontend_write(0, row0, row_idx=0, tile_id=0)
+    assert spad.frontend_write(1, row1, row_idx=1, tile_id=0)
+
+    for cycle in range(12):
+        spad.tick(cycle)
+
+    assert _read_swizzled_row(spad, tile_id=0, slot=0) == row0
+    assert _read_swizzled_row(spad, tile_id=0, slot=1) == row1
+
 if __name__ == "__main__":
     test_scratchpad_full()
     test_backends_can_attach_to_scratchpad_slots_and_dram()
+    test_frontend_writes_are_not_dropped_when_write_xbar_is_pipelined()

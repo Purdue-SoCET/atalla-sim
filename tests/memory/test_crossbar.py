@@ -89,5 +89,60 @@ def test_crossbar_basic():
 
     print("crossbar test passed.")
 
+
+def test_crossbar_pipeline_staggers_completions():
+    x = Xbar(delay=3, num_banks=4)
+
+    shift_mask = [0, 1, 2, 3]
+    inputs = [10, 11, 12, 13]
+
+    op1 = x.enqueue(shift_mask, inputs)
+    op2 = x.enqueue(shift_mask, inputs)
+    op3 = x.enqueue(shift_mask, inputs)
+
+    assert op1 > 0 and op2 > 0 and op3 > 0
+
+    completion_cycles = {}
+    for cycle in range(6):
+        for op_id, _out in x.tick():
+            completion_cycles[op_id] = cycle
+
+    assert completion_cycles[op1] == 3
+    assert completion_cycles[op2] == 4
+    assert completion_cycles[op3] == 5
+
+
+def test_crossbar_backpressure_stalls_tail_until_sink_accepts():
+    x = Xbar(delay=3, num_banks=4)
+
+    shift_mask = [0, 1, 2, 3]
+    inputs = [10, 11, 12, 13]
+
+    attempts = {"op1": 0, "op2": 0}
+
+    def cb1(_out):
+        attempts["op1"] += 1
+        return attempts["op1"] >= 2
+
+    def cb2(_out):
+        attempts["op2"] += 1
+        return True
+
+    op1 = x.enqueue(shift_mask, inputs, callback=cb1)
+    op2 = x.enqueue(shift_mask, inputs, callback=cb2)
+
+    completion_cycles = {}
+    for cycle in range(7):
+        for op_id, _out in x.tick():
+            completion_cycles[op_id] = cycle
+
+    assert attempts["op1"] == 2
+    assert attempts["op2"] == 1
+    assert completion_cycles[op1] == 4
+    assert completion_cycles[op2] == 5
+    assert x.get_stats()["total_retire_stalls"] == 1
+
 if __name__ == "__main__":
     test_crossbar_basic()
+    test_crossbar_pipeline_staggers_completions()
+    test_crossbar_backpressure_stalls_tail_until_sink_accepts()

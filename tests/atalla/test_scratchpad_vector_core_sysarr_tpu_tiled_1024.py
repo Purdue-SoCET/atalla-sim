@@ -74,8 +74,8 @@ def _fp16_bits(value: float) -> int:
     return int(np.asarray(value, dtype=np.float16).view(np.uint16).item())
 
 
-def _read_slot_vector_u16(spad: Scratchpad, addr: int, vector_len: int) -> List[int]:
-    tile = 0
+def _read_slot_vector_u16(spad: Scratchpad, addr: int, vector_len: int, tile_id: int = 0) -> List[int]:
+    tile = int(tile_id)
     slot = int(addr) % spad.bank_size
     out = []
     for lane in range(vector_len):
@@ -88,8 +88,8 @@ def _read_slot_vector_u16(spad: Scratchpad, addr: int, vector_len: int) -> List[
     return out
 
 
-def _write_slot_vector_u16(spad: Scratchpad, addr: int, values: List[int]) -> None:
-    tile = 0
+def _write_slot_vector_u16(spad: Scratchpad, addr: int, values: List[int], tile_id: int = 0) -> None:
+    tile = int(tile_id)
     slot = int(addr) % spad.bank_size
     padded = list(values)
     for lane in range(len(padded), spad.num_banks):
@@ -374,7 +374,6 @@ class TiledTPUCosim:
         )
 
     def _sample_queue_depths(self) -> None:
-        vlsu0 = self.vc.vls_units[0]
         q_depths = {
             "gsau_to_systolic": len(self.vc.gsau.to_systolic),
             "gsau_from_systolic": len(self.vc.gsau.from_systolic),
@@ -388,11 +387,11 @@ class TiledTPUCosim:
             "scheduler_packet_vlsu": sum(len(pkt["vlsu"]) for pkt in self.vc.vliw_q.items),
             "scheduler_packet_datapath": sum(len(pkt["datapath"]) for pkt in self.vc.vliw_q.items),
             "wb_buffer": len(self.vc.wb_buffer.entries),
-            "vlsu_issue_q": len(vlsu0.issue_q),
-            "vlsu_req_q": len(vlsu0.req_q),
-            "vlsu_rsp_q": len(vlsu0.rsp_q),
-            "vlsu_wb_q": len(vlsu0.wb_q),
-            "vlsu_dst_fifo": len(vlsu0.load_dst_fifos[0]),
+            "vlsu_issue_q": sum(len(vls.issue_q) for vls in self.vc.vls_units),
+            "vlsu_req_q": sum(len(vls.req_q) for vls in self.vc.vls_units),
+            "vlsu_rsp_q": sum(len(vls.rsp_q) for vls in self.vc.vls_units),
+            "vlsu_wb_q": sum(len(vls.wb_q) for vls in self.vc.vls_units),
+            "vlsu_dst_fifo": sum(len(vls.load_dst_fifos[0]) for vls in self.vc.vls_units),
         }
         self.queue_samples += 1
         for name, depth in q_depths.items():
@@ -446,15 +445,18 @@ class TiledTPUCosim:
         avg_active_pes_per_active_cycle = (
             active_pe_sum / systolic_array_active_work_cycles
         ) if systolic_array_active_work_cycles else 0.0
-        mac_utilization = (
+        mac_utilization_sysarr_active = (
             active_pe_sum / (valid_mac_cycles * self.tile_size * self.tile_size)
         ) if valid_mac_cycles else 0.0
+        mac_utilization = (
+            active_pe_sum / (self.global_cycle * self.tile_size * self.tile_size)
+        ) if self.global_cycle else 0.0
         avg_active_pes_when_active = avg_active_pes_per_active_cycle
         avg_active_pes_during_compute_window = (
             self.sa_totals["compute_window_active_pe_sum"] / compute_window_cycles
         ) if compute_window_cycles else 0.0
 
-        bytes_transmitted = self.vls_bridge.bytes_load + self.vls_bridge.bytes_store
+        bytes_transmitted = sum(bridge.bytes_load + bridge.bytes_store for bridge in self.vls_bridges)
         throughput = (flops_micro / self.global_cycle) if self.global_cycle else 0.0
         external_bw = (bytes_transmitted / self.global_cycle) if self.global_cycle else 0.0
         external_bw_active = (bytes_transmitted / self.vls_active_cycles) if self.vls_active_cycles else 0.0
@@ -506,6 +508,7 @@ class TiledTPUCosim:
             "active_pe_sum": active_pe_sum,
             "systolic_array_active_work_cycles": systolic_array_active_work_cycles,
             "avg_active_pes_per_active_cycle": avg_active_pes_per_active_cycle,
+            "mac_utilization_sysarr_active": mac_utilization_sysarr_active,
             "mac_utilization": mac_utilization,
             "avg_active_pes_when_active": avg_active_pes_when_active,
             "avg_active_pes_during_compute_window": avg_active_pes_during_compute_window,
@@ -538,7 +541,7 @@ class TiledTPUCosim:
             size=self.tile_size,
             dtype=self.dtype,
             lane_count=4,
-            vls_count=1,
+            vls_count=2,
             spad_num_banks=SPAD_NUM_BANKS,
             spad_bank_size=SPAD_BANK_SIZE,
             spad_read_latency=2,
@@ -560,8 +563,10 @@ class TiledTPUCosim:
         assert len(self.backends) == 2
         assert all(backend.dram is self.dram for backend in self.backends)
         self.backend = self.backends[0]
+        self.vls_bridges = platform.vls_bridges
         self.vls_bridge = platform.vls_bridge
-        self.vls_bridge.trace_hook = self._trace_vls_event
+        for bridge in self.vls_bridges:
+            bridge.trace_hook = self._trace_vls_event
         self.load_issue_window = self.spad.frontends[0].readq.max_size + 1
         self.store_issue_window = self.spad.frontends[0].writeq.max_size + 1
         self.tile_row_bytes = self.tile_size * 2
@@ -576,9 +581,9 @@ class TiledTPUCosim:
         )
         self.sysarr_bridge.trace_hook = self._trace_sysarr_event
 
-    def _slot_ready(self, base_addr: int, expected_rows: List[List[int]]) -> bool:
+    def _slot_ready(self, base_addr: int, expected_rows: List[List[int]], tile_id: int = 0) -> bool:
         for row_idx, expected in enumerate(expected_rows):
-            got = _read_slot_vector_u16(self.spad, base_addr + row_idx, self.vc.vector_len)
+            got = _read_slot_vector_u16(self.spad, base_addr + row_idx, self.vc.vector_len, tile_id=tile_id)
             if got[: self.tile_size] != list(expected):
                 return False
         return True
@@ -599,7 +604,8 @@ class TiledTPUCosim:
         self._mark_kernel_path_start(job.tag, "kernel_total", launch_cycle)
         _write_dram_tile_u16(self.dram, self.DRAM_ACT_STAGE[job.slot], job.act_tile)
         _write_dram_tile_u16(self.dram, self.DRAM_WGT_STAGE[job.slot], job.wgt_stream)
-        assert self.backend.driver_to_backend_start_load(
+        backend = self.backends[job.slot]
+        assert backend.driver_to_backend_start_load(
             base_sp_addr=self.ACT_SLOT_BASES[job.slot],
             base_dram_addr=self.DRAM_ACT_STAGE[job.slot],
             rows=self.tile_size,
@@ -608,7 +614,7 @@ class TiledTPUCosim:
                 _job, "act", _cycle
             ),
         ) > 0
-        assert self.backend.driver_to_backend_start_load(
+        assert backend.driver_to_backend_start_load(
             base_sp_addr=self.WGT_SLOT_BASES[job.slot],
             base_dram_addr=self.DRAM_WGT_STAGE[job.slot],
             rows=self.tile_size,
@@ -627,7 +633,7 @@ class TiledTPUCosim:
         assert self.vc.enqueue_memory(
             {
                 "kind": "load",
-                "vls": 0,
+                "vls": job.slot,
                 "dst": self.W_REG,
                 "addr": self.WGT_SLOT_BASES[job.slot] + job.weight_issue_row,
                 "dtype": self.dtype,
@@ -644,7 +650,7 @@ class TiledTPUCosim:
         assert self.vc.enqueue_memory(
             {
                 "kind": "load",
-                "vls": 0,
+                "vls": job.slot,
                 "dst": self.A_REG,
                 "addr": self.ACT_SLOT_BASES[job.slot] + job.act_issue_row,
                 "dtype": self.dtype,
@@ -659,15 +665,19 @@ class TiledTPUCosim:
 
     def _step(self) -> Optional[Dict]:
         self.spad.now = self.global_cycle
-        self.vls_bridge.now = self.global_cycle
+        for bridge in self.vls_bridges:
+            bridge.now = self.global_cycle
         self.sysarr_bridge.now = self.global_cycle
-        self.vls_bridge.start_cycle()
+        for bridge in self.vls_bridges:
+            bridge.start_cycle()
         self.vc.tick()
-        self.vls_bridge.tick()
+        for bridge in self.vls_bridges:
+            bridge.tick()
         self.sysarr_bridge.tick()
-        self.backend.tick(self.global_cycle)
+        for backend in self.backends:
+            backend.tick(self.global_cycle)
         self.spad.tick(self.global_cycle)
-        if self.vls_bridge.activity_this_cycle:
+        if any(bridge.activity_this_cycle for bridge in self.vls_bridges):
             self.vls_active_cycles += 1
         self._sample_queue_depths()
         wb = self.vc.last_wb if self.vc.wb_valid else None
@@ -802,8 +812,14 @@ class TiledTPUCosim:
 
             for job in list(jobs_by_slot.values()):
                 if not job.preload_ready and job.preload_tx_done == {"act", "wgt"}:
-                    if self._slot_ready(self.ACT_SLOT_BASES[job.slot], job.act_tile) and self._slot_ready(
-                        self.WGT_SLOT_BASES[job.slot], job.wgt_stream
+                    if self._slot_ready(
+                        self.ACT_SLOT_BASES[job.slot],
+                        job.act_tile,
+                        tile_id=job.slot,
+                    ) and self._slot_ready(
+                        self.WGT_SLOT_BASES[job.slot],
+                        job.wgt_stream,
+                        tile_id=job.slot,
                     ):
                         job.preload_ready = True
                         if job.preload_launch_cycle is not None:

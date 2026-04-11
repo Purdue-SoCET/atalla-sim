@@ -15,7 +15,7 @@ def _weights_u16(size: int):
 
 
 def test_build_tpu_platform_attaches_two_backends_to_shared_dram():
-    platform = build_tpu_platform(size=32, dtype="fp16", backend_dram_latency=24)
+    platform = build_tpu_platform(size=32, dtype="fp16", vls_count=2, backend_dram_latency=24)
 
     assert len(platform.backends) == 2
     assert platform.backend is platform.backends[0]
@@ -23,6 +23,10 @@ def test_build_tpu_platform_attaches_two_backends_to_shared_dram():
     assert platform.spad.backends == platform.backends
     assert platform.spad.backend is platform.backends[0]
     assert all(backend.dram is platform.dram for backend in platform.backends)
+    assert len(platform.vls_bridges) == 2
+    assert platform.vls_bridge is platform.vls_bridges[0]
+    assert [bridge.vls_id for bridge in platform.vls_bridges] == [0, 1]
+    assert [bridge.frontend_id for bridge in platform.vls_bridges] == [0, 1]
 
 
 def test_sysarr_tpu_system_end_to_end():

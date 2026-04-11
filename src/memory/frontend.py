@@ -34,30 +34,27 @@ class Frontend:
         return True
 
     def tick(self, now):
-        # Write path: only if backend is not using the crossbar
-        if not self.spad.backend_write_inflight[self.tile_id]:
-            head = self.writeq.peek()
-            if head:
-                ready_cycle, base_sp_addr, row_bytes, row_idx, cb = head
-                if ready_cycle <= now and self.spad._accept_backend_write(
-                    base_sp_addr,
-                    row_bytes,
-                    row_idx,
-                    tx_id=0,
-                    tile_id=self.tile_id,
-                    frontend_cb=cb,
-                ):
-                    self.writeq.dequeue()
-        # Read path: only if backend is not using the crossbar
-        if not self.spad.backend_read_inflight[self.tile_id]:
-            head = self.readq.peek()
-            if head:
-                ready_cycle, base_sp_addr, row_idx, cb = head
-                if ready_cycle <= now and self.spad._accept_backend_read(
-                    base_sp_addr,
-                    row_idx,
-                    tx_id=0,
-                    tile_id=self.tile_id,
-                    frontend_cb=cb,
-                ):
-                    self.readq.dequeue()
+        head = self.writeq.peek()
+        if head and self.spad._write_path_can_accept(self.tile_id):
+            ready_cycle, base_sp_addr, row_bytes, row_idx, cb = head
+            if ready_cycle <= now and self.spad._accept_backend_write(
+                base_sp_addr,
+                row_bytes,
+                row_idx,
+                tx_id=0,
+                tile_id=self.tile_id,
+                frontend_cb=cb,
+            ):
+                self.writeq.dequeue()
+
+        head = self.readq.peek()
+        if head and self.spad._read_path_can_accept(self.tile_id):
+            ready_cycle, base_sp_addr, row_idx, cb = head
+            if ready_cycle <= now and self.spad._accept_backend_read(
+                base_sp_addr,
+                row_idx,
+                tx_id=0,
+                tile_id=self.tile_id,
+                frontend_cb=cb,
+            ):
+                self.readq.dequeue()

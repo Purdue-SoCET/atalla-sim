@@ -46,15 +46,20 @@ class SRAMBank(Clocked):
         self._curr_tick: int = 0
         self._last_enqueue_tick: int = -1
 
+    def can_accept_enqueue(self) -> bool:
+        return self._last_enqueue_tick != self._curr_tick and not self._pending.is_full()
+
     def _check_bounds(self, slot: int, length: int):
         if slot < 0 or slot >= self.slots:
             raise IndexError(f"SRAMBank slot out of bounds: slot={slot} slots={self.slots}")
         # length is advisory: reads will return min(length, len(slot_data))
 
     def enqueue_read(self, slot: int, length: int, callback: Optional[Callable[[bytes], None]] = None) -> int:
-        if self._last_enqueue_tick == self._curr_tick:
+        if not self.can_accept_enqueue():
             self.enqueue_stalls += 1
-            raise RuntimeError("SRAMBank enqueue stall: multiple enqueues in same cycle")
+            if self._last_enqueue_tick == self._curr_tick:
+                raise RuntimeError("SRAMBank enqueue stall: multiple enqueues in same cycle")
+            raise RuntimeError("SRAMBank enqueue stall: pending queue full")
         self._last_enqueue_tick = self._curr_tick
         self._check_bounds(slot, length)
         if not self._pending.enqueue(SRAMOperation(
@@ -72,9 +77,11 @@ class SRAMBank(Clocked):
         return self._op_counter
 
     def enqueue_write(self, slot: int, data: bytes, callback: Optional[Callable[[None], None]] = None) -> int:
-        if self._last_enqueue_tick == self._curr_tick:
+        if not self.can_accept_enqueue():
             self.enqueue_stalls += 1
-            raise RuntimeError("SRAMBank enqueue stall: multiple enqueues in same cycle")
+            if self._last_enqueue_tick == self._curr_tick:
+                raise RuntimeError("SRAMBank enqueue stall: multiple enqueues in same cycle")
+            raise RuntimeError("SRAMBank enqueue stall: pending queue full")
         self._last_enqueue_tick = self._curr_tick
         self._check_bounds(slot, len(data))
         if not self._pending.enqueue(SRAMOperation(

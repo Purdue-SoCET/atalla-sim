@@ -100,14 +100,22 @@ class VLSFrontendBridge:
         self.frontend_id = int(frontend_id)
         self._next_load_id = 0
         self._completed_load_ids = set()
+        self.bytes_load = 0
+        self.bytes_store = 0
+        self.activity_this_cycle = False
         self.now = 0
         self.trace_hook = None
+
+    def start_cycle(self) -> None:
+        self.activity_this_cycle = False
 
     def _on_frontend_read(self, load_id: int, addr: int, lanes, meta: Optional[Dict] = None) -> None:
         if load_id in self._completed_load_ids:
             return
         self._completed_load_ids.add(load_id)
         data = _decode_lanes_u16(lanes, self.vc.vector_len)
+        self.bytes_load += len(data) * 2
+        self.activity_this_cycle = True
         meta_dict = dict(meta or {})
         if self.trace_hook is not None:
             self.trace_hook(
@@ -136,6 +144,8 @@ class VLSFrontendBridge:
             if req is None:
                 return
             meta = dict(req.get("meta", {}) or {})
+            self.bytes_store += len(req.get("data", [])) * 2
+            self.activity_this_cycle = True
             if self.trace_hook is not None:
                 self.trace_hook(
                     {
@@ -361,6 +371,7 @@ class TPUPlatform:
     backend: Optional[Backend]
     backends: List[Backend]
     vls_bridge: Any
+    vls_bridges: List[Any]
     sysarr_bridge: GSAUTPUBridge
     mirror: Optional[TPUReference]
 
@@ -387,6 +398,29 @@ def _build_shared_dram_backends(
         backend_obj.attach_dram(dram)
         backends.append(backend_obj)
     return backends
+
+
+def _build_vls_frontend_bridges(
+    *,
+    vc: VectorCore,
+    spad: Scratchpad,
+    bridge_cls: Callable[..., Any],
+    bridge_kwargs: Optional[Dict[str, Any]] = None,
+) -> List[Any]:
+    kwargs = dict(bridge_kwargs or {})
+    bridge_count = min(len(vc.vls_units), len(spad.frontends))
+    bridges: List[Any] = []
+    for bridge_id in range(bridge_count):
+        bridges.append(
+            bridge_cls(
+                vc,
+                spad,
+                vls_id=bridge_id,
+                frontend_id=bridge_id,
+                **kwargs,
+            )
+        )
+    return bridges
 
 
 def build_tpu_compute_path(
@@ -454,8 +488,13 @@ def build_tpu_platform(
         backend = backends[0]
 
     mirror_obj = TPUReference(size=int(size), dtype=str(dtype)) if mirror else None
-    bridge_kwargs = dict(vls_bridge_kwargs or {})
-    vls_bridge = vls_bridge_cls(vc, spad, vls_id=0, frontend_id=0, **bridge_kwargs)
+    vls_bridges = _build_vls_frontend_bridges(
+        vc=vc,
+        spad=spad,
+        bridge_cls=vls_bridge_cls,
+        bridge_kwargs=vls_bridge_kwargs,
+    )
+    vls_bridge = vls_bridges[0] if vls_bridges else None
     sa, sysarr_bridge = build_tpu_compute_path(vc=vc, size=int(size), dtype=str(dtype), mirror=mirror_obj)
     return TPUPlatform(
         eq=eq,
@@ -468,6 +507,7 @@ def build_tpu_platform(
         backend=backend,
         backends=backends,
         vls_bridge=vls_bridge,
+        vls_bridges=vls_bridges,
         sysarr_bridge=sysarr_bridge,
         mirror=mirror_obj,
     )
@@ -487,6 +527,8 @@ class SysArrTPUSystem:
         self.dram = platform.dram
         self.backend = platform.backend
         self.backends = platform.backends
+        self.vls_bridge = platform.vls_bridge
+        self.vls_bridges = platform.vls_bridges
 
         self.DRAM_ACT = 0x1000
         self.DRAM_WGT = 0x2000
@@ -500,7 +542,6 @@ class SysArrTPUSystem:
         self.OUT_REG = 3
 
         self.mirror = platform.mirror
-        self.vls_bridge = platform.vls_bridge
         self.sysarr_bridge = platform.sysarr_bridge
         self.metrics = TPUMetrics(size=self.size)
 

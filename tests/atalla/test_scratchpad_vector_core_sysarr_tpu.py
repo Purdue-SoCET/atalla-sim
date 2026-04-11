@@ -49,8 +49,8 @@ def _decode_lanes_u16(lanes, vector_len: int):
     return out
 
 
-def _read_slot_vector_u16(spad: Scratchpad, addr: int, vector_len: int):
-    tile = 0
+def _read_slot_vector_u16(spad: Scratchpad, addr: int, vector_len: int, tile_id: int = 0):
+    tile = int(tile_id)
     slot = int(addr) % spad.bank_size
     out = []
     for lane in range(vector_len):
@@ -63,8 +63,8 @@ def _read_slot_vector_u16(spad: Scratchpad, addr: int, vector_len: int):
     return out
 
 
-def _write_slot_vector_u16(spad: Scratchpad, addr: int, values):
-    tile = 0
+def _write_slot_vector_u16(spad: Scratchpad, addr: int, values, tile_id: int = 0):
+    tile = int(tile_id)
     slot = int(addr) % spad.bank_size
     for lane, value in enumerate(list(values)):
         bank = _xor_bank(slot, lane, spad.num_banks)
@@ -219,13 +219,21 @@ def _busy_units_snapshot(vc: VectorCore, sa: SystolicArrayTPU, state: Dict, spad
         busy.append(f"driver.backend_store_done={len(state['backend_store_tx_done'])}")
 
     if backend is not None:
-        bstats = backend.get_stats()
-        if bstats.get("queued_txs", 0) > 0:
-            busy.append(f"backend.tx_queue={bstats['queued_txs']}")
-        if bstats.get("outstanding_txs", 0) > 0:
-            busy.append(f"backend.active_txs={bstats['outstanding_txs']}")
-        if bstats.get("dram_pending", 0) > 0:
-            busy.append(f"backend.dram_pending={bstats['dram_pending']}")
+        backend_list = list(backend) if isinstance(backend, (list, tuple)) else [backend]
+        queued = 0
+        active = 0
+        dram_pending = 0
+        for backend_obj in backend_list:
+            bstats = backend_obj.get_stats()
+            queued += int(bstats.get("queued_txs", 0))
+            active += int(bstats.get("outstanding_txs", 0))
+            dram_pending += int(bstats.get("dram_pending", 0))
+        if queued > 0:
+            busy.append(f"backend.tx_queue={queued}")
+        if active > 0:
+            busy.append(f"backend.active_txs={active}")
+        if dram_pending > 0:
+            busy.append(f"backend.dram_pending={dram_pending}")
 
     if spad is not None:
         wr_active = sum(1 for x in getattr(spad, "backend_write_inflight", []) if x)
@@ -593,7 +601,7 @@ def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
 
         tile = 32
         row_bytes = tile * 2
-        vc = VectorCore(veggie_size=tile * 16, lane_count=4, vls_count=1, fu_latencies={"alu": 1}, dtype="fp16")
+        vc = VectorCore(veggie_size=tile * 16, lane_count=4, vls_count=2, fu_latencies={"alu": 1}, dtype="fp16")
         spad = Scratchpad(
             num_banks=32,
             bank_size=128,
@@ -605,23 +613,29 @@ def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
         )
         sa = SystolicArrayTPU(size=tile, dtype="fp16")
 
-        vls_bridge = VLSFrontendBridge(vc, spad, vls_id=0, frontend_id=0)
+        vls_bridges = [
+            VLSFrontendBridge(vc, spad, vls_id=0, frontend_id=0),
+            VLSFrontendBridge(vc, spad, vls_id=1, frontend_id=1),
+        ]
         mirror = TPUReference(size=tile, dtype="fp16")
         sysarr_bridge = GSAUTPUBridge(vc, sa, mirror=mirror)
 
         dram = DRAM(block_bytes=256)
-        # Backend models the DMA-style path that moves tiles between DRAM and the
-        # scratchpad outside the VLS/VRF datapath used by compute.
-        backend = Backend(dram_latency=24, dram_q_depth=16, dram_burst_bytes=32, elem_bytes=2)
-        spad.attach_backend(backend)
-        backend.attach_dram(dram)
+        # Weights live behind frontend 0 / VLS 0 and activations behind frontend 1 / VLS 1.
+        backend_wgt = Backend(dram_latency=24, dram_q_depth=16, dram_burst_bytes=32, elem_bytes=2)
+        backend_act = Backend(dram_latency=24, dram_q_depth=16, dram_burst_bytes=32, elem_bytes=2)
+        spad.attach_backend(backend_wgt, tile_id=0)
+        spad.attach_backend(backend_act, tile_id=1)
+        backend_wgt.attach_dram(dram)
+        backend_act.attach_dram(dram)
+        backends = [backend_wgt, backend_act]
         DRAM_ACT = 0x1000
         DRAM_WGT = 0x2000
         DRAM_OUT = 0x3000
 
+        SPAD_WGT_BASE = 0
         SPAD_ACT_BASE = 0
-        SPAD_WGT_BASE = tile
-        SPAD_OUT_BASE = tile * 2
+        SPAD_OUT_BASE = tile
 
         act = _act_u16(tile)
         wgt = _weights_u16(tile)
@@ -666,10 +680,12 @@ def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
             "weight_row": 0,
             "weight_issue_row": 0,
             "act_row": 0,
+            "act_loaded_rows": 0,
             "act_issue_row": 0,
             "next_out_row": 0,
             "weight_loads_inflight": 0,
             "act_loads_inflight": 0,
+            "ready_act_rows": [],
             "pending_output_rows": [],
             "store_inflight": {},
             "completed_rows": set(),
@@ -691,7 +707,7 @@ def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
             # Use frontend queue depth + the currently serviceable in-flight slot
             # instead of an unbounded tile-wide window.
             "load_issue_window": spad.frontends[0].readq.max_size + 1,
-            "store_issue_window": spad.frontends[0].writeq.max_size + 1,
+            "store_issue_window": spad.frontends[1].writeq.max_size + 1,
         }
         q_stats = {
             "samples": 0,
@@ -725,10 +741,21 @@ def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
             state["backend_store_tx_done"].add(row_idx)
             state["backend_store_txs"].pop(row_idx, None)
 
+        def _all_backends_idle() -> bool:
+            for backend_obj in backends:
+                bstats = backend_obj.get_stats()
+                if (
+                    bstats["queued_txs"] > 0
+                    or bstats["outstanding_txs"] > 0
+                    or bstats["dram_pending"] > 0
+                ):
+                    return False
+            return True
+
         # Preload activation and weight tiles through the backend, matching the
         # RTL split between bulk DRAM movement and compute-time VLS accesses.
         assert (
-            backend.driver_to_backend_start_load(
+            backend_act.driver_to_backend_start_load(
                 base_sp_addr=SPAD_ACT_BASE,
                 base_dram_addr=DRAM_ACT,
                 rows=tile,
@@ -738,7 +765,7 @@ def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
             > 0
         )
         assert (
-            backend.driver_to_backend_start_load(
+            backend_wgt.driver_to_backend_start_load(
                 base_sp_addr=SPAD_WGT_BASE,
                 base_dram_addr=DRAM_WGT,
                 rows=tile,
@@ -774,7 +801,7 @@ def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
             assert vc.enqueue_memory(
                 {
                     "kind": "load",
-                    "vls": 0,
+                    "vls": 1,
                     "dst": A_REG,
                     "addr": SPAD_ACT_BASE + row_idx,
                     "dtype": "fp16",
@@ -782,8 +809,6 @@ def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
             )
             state["act_issue_row"] += 1
             state["act_loads_inflight"] += 1
-            if state["act_issue_row"] >= tile:
-                sysarr_bridge.finish_inputs()
             return True
 
         def _step(time: float):
@@ -793,11 +818,14 @@ def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
             # 2) bridges translate VC/GSAU traffic into scratchpad/TPU activity
             # 3) backend advances DRAM<->SPAD transfers
             # 4) scratchpad advances xbars/banks so new data becomes visible
-            vls_bridge.start_cycle()
+            for bridge in vls_bridges:
+                bridge.start_cycle()
             vc.tick()
-            vls_bridge.tick()
+            for bridge in vls_bridges:
+                bridge.tick()
             sysarr_bridge.tick()
-            backend.tick(time)
+            for backend_obj in backends:
+                backend_obj.tick(time)
             spad.tick(time)
 
             if (
@@ -805,23 +833,17 @@ def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
                 and state["preload_wait_drain"]
                 and len(state["preload_tx_done"]) == 2
             ):
-                bstats = backend.get_stats()
-                if (
-                    bstats["queued_txs"] == 0
-                    and bstats["outstanding_txs"] == 0
-                    and bstats["dram_pending"] == 0
-                    and _spad_write_path_idle()
-                ):
+                if _all_backends_idle() and _spad_write_path_idle():
                     state["preload_done"] = True
 
-            busy_units = _busy_units_snapshot(vc, sa, state, spad=spad, backend=backend)
+            busy_units = _busy_units_snapshot(vc, sa, state, spad=spad, backend=backends)
             phase = _phase_snapshot(state, sa, tile)
             if busy_units:
                 activity_lines.append(f"cycle {state['cycles']} [{phase}]: " + ", ".join(busy_units))
             else:
                 activity_lines.append(f"cycle {state['cycles']} [{phase}]: idle")
             phase_lines.append(f"cycle {state['cycles']}: {phase}")
-            if vls_bridge.activity_this_cycle:
+            if any(bridge.activity_this_cycle for bridge in vls_bridges):
                 state["vls_active_cycles"] += 1
 
             # Consume at most one architectural writeback per cycle from the VC.
@@ -867,27 +889,21 @@ def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
                 # has completed. Each activation row generates one output row later.
                 elif src == "vlsu" and dst == A_REG and state["act_loads_inflight"] > 0:
                     state["act_loads_inflight"] -= 1
-                    dprintf("SYSARR", f"act load done row={state['act_row']} len={len(wb.get('data', []))}")
+                    dprintf(
+                        "SYSARR",
+                        f"act load done row={state['act_loaded_rows']} len={len(wb.get('data', []))}",
+                    )
                     adata = list(wb.get("data", []))
                     state["bytes_load_act"] += len(adata) * 2
                     metrics.count_act_load()
                     nz = [i for i, v in enumerate(adata) if v != 0]
-                    if state["act_row"] < 2:
+                    if state["act_loaded_rows"] < 2:
                         dprintf(
                             "SYSARR",
                             f"act data head={adata[:8]} nz_count={len(nz)} nz_idx_head={nz[:8]}",
                         )
-                    assert vc.enqueue_scheduler_instruction(
-                        {
-                            "unit": "gsau",
-                            "vdata": adata,
-                            "dst": OUT_REG,
-                            "is_weight": False,
-                            "expect_output": True,
-                            "dtype": "fp16",
-                        }
-                    )
-                    state["act_row"] += 1
+                    state["ready_act_rows"].append(adata)
+                    state["act_loaded_rows"] += 1
 
                 # GSAU writebacks are the architectural outputs of the systolic
                 # pipeline. Hold them in order until the store side can accept them.
@@ -925,6 +941,25 @@ def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
                     if not _issue_act_load():
                         break
 
+            while state["weights_done"] and state["ready_act_rows"]:
+                adata = state["ready_act_rows"][0]
+                if not vc.enqueue_scheduler_instruction(
+                    {
+                        "unit": "gsau",
+                        "vdata": adata,
+                        "dst": OUT_REG,
+                        "is_weight": False,
+                        "expect_output": True,
+                        "dtype": "fp16",
+                    }
+                ):
+                    break
+                state["ready_act_rows"].pop(0)
+                state["act_row"] += 1
+                if state["act_row"] >= tile:
+                    sysarr_bridge.finish_inputs()
+                    break
+
             # Once a row comes back from GSAU, turn it into a VLS store targeting
             # the output region of the scratchpad. This mirrors the VRF->SPAD path
             # before the backend later writes the row back to DRAM.
@@ -953,7 +988,7 @@ def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
                 assert vc.enqueue_memory(
                     {
                         "kind": "store",
-                        "vls": 0,
+                        "vls": 1,
                         "data": row_data,
                         "addr": SPAD_OUT_BASE + row_idx,
                         "dtype": "fp16",
@@ -969,12 +1004,12 @@ def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
                 # First wait for the VLS store to land in the scratchpad. Once the
                 # row is resident, kick a backend store so DRAM writeback uses the
                 # same path as the RTL bulk-memory engine.
-                spad_vec = _read_slot_vector_u16(spad, SPAD_OUT_BASE + row_idx, vc.vector_len)
+                spad_vec = _read_slot_vector_u16(spad, SPAD_OUT_BASE + row_idx, vc.vector_len, tile_id=1)
                 store_meta["age"] += 1
                 if spad_vec == (store_meta["data"] or []):
                     dprintf("SYSARR", f"store complete row={row_idx}")
                     if row_idx not in state["backend_store_rows"]:
-                        tx_id = backend.driver_to_backend_start_store(
+                        tx_id = backend_act.driver_to_backend_start_store(
                             base_sp_addr=SPAD_OUT_BASE + row_idx,
                             base_dram_addr=DRAM_OUT + row_idx * row_bytes,
                             rows=1,
@@ -1008,7 +1043,6 @@ def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
             metrics.count_cycle()
             state["cycles"] += 1
             # Queue backpressure tracking (max + average depth).
-            vlsu0 = vc.vls_units[0]
             q_depths = {
                 "gsau_to_systolic": len(vc.gsau.to_systolic),
                 "gsau_from_systolic": len(vc.gsau.from_systolic),
@@ -1022,11 +1056,11 @@ def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
                 "scheduler_packet_vlsu": sum(len(pkt["vlsu"]) for pkt in vc.vliw_q.items),
                 "scheduler_packet_datapath": sum(len(pkt["datapath"]) for pkt in vc.vliw_q.items),
                 "wb_buffer": len(vc.wb_buffer.entries),
-                "vlsu_issue_q": len(vlsu0.issue_q),
-                "vlsu_req_q": len(vlsu0.req_q),
-                "vlsu_rsp_q": len(vlsu0.rsp_q),
-                "vlsu_wb_q": len(vlsu0.wb_q),
-                "vlsu_dst_fifo": len(vlsu0.load_dst_fifos[0]),
+                "vlsu_issue_q": sum(len(vls.issue_q) for vls in vc.vls_units),
+                "vlsu_req_q": sum(len(vls.req_q) for vls in vc.vls_units),
+                "vlsu_rsp_q": sum(len(vls.rsp_q) for vls in vc.vls_units),
+                "vlsu_wb_q": sum(len(vls.wb_q) for vls in vc.vls_units),
+                "vlsu_dst_fifo": sum(len(vls.load_dst_fifos[0]) for vls in vc.vls_units),
             }
             q_stats["samples"] += 1
             for name, depth in q_depths.items():
@@ -1167,7 +1201,7 @@ def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
             dprintf("SYSARR", f"act[-1][:8]={act[-1][:8]}")
         expected = expected_cycle
         assert got == expected
-        bytes_tx = vls_bridge.bytes_load + vls_bridge.bytes_store
+        bytes_tx = sum(bridge.bytes_load + bridge.bytes_store for bridge in vls_bridges)
         pe_mul = sum(pe.mul_ops for row in sa.array for pe in row)
         pe_add = sum(pe.add_ops for row in sa.array for pe in row)
         pe_mac = sum(pe.mac_ops for row in sa.array for pe in row)
@@ -1202,9 +1236,12 @@ def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
             f"bytes_algo {bytes_algo}",
             f"arithmetic_intensity_algo {arithmetic_intensity_algo}",
         ]
-        mac_utilization = (
+        mac_utilization_sysarr_active = (
             sa.active_pe_sum / (sa.valid_mac_cycles * tile * tile)
         ) if sa.valid_mac_cycles else 0.0
+        mac_utilization = (
+            sa.active_pe_sum / (state["cycles"] * tile * tile)
+        ) if state["cycles"] else 0.0
         avg_active_pes_when_active = (sa.active_pe_sum / sa.valid_mac_cycles) if sa.valid_mac_cycles else 0.0
         avg_active_pes_during_compute_window = (
             sa.compute_window_active_pe_sum / sa.compute_window_cycles
@@ -1245,6 +1282,7 @@ def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
         mean_abs_error = (sum_abs_error / count_err) if count_err else 0.0
         stats_lines.extend(
             [
+                f"mac_utilization_sysarr_active {mac_utilization_sysarr_active}",
                 f"mac_utilization {mac_utilization}",
                 f"avg_active_pes_when_active {avg_active_pes_when_active}",
                 f"avg_active_pes_during_compute_window {avg_active_pes_during_compute_window}",
