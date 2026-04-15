@@ -14,7 +14,7 @@ from base.clock_domain import ClockDomain
 from base.core import Core
 from base.eventq import EventQueue
 from base.sim import Sim
-from memory.backend import Backend
+from memory.backend import Backend, SharedDRAMBurstChannel
 from memory.dram import DRAM
 from memory.sc_sram_banks import _xor_bank
 from memory.scratchpad import Scratchpad
@@ -386,6 +386,7 @@ def _build_shared_dram_backends(
     delay_cycles: int,
 ) -> List[Backend]:
     backends: List[Backend] = []
+    shared_burst_channel = SharedDRAMBurstChannel()
     for tile_id in range(len(spad.tiles)):
         backend_obj = Backend(
             dram_latency=int(dram_latency),
@@ -393,6 +394,7 @@ def _build_shared_dram_backends(
             dram_burst_bytes=int(dram_burst_bytes),
             elem_bytes=2,
             delay_cycles=int(delay_cycles),
+            shared_burst_channel=shared_burst_channel,
         )
         spad.attach_backend(backend_obj, tile_id=tile_id)
         backend_obj.attach_dram(dram)

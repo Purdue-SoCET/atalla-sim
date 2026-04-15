@@ -41,6 +41,19 @@ class BackendTransaction:
     completed_subreqs: int = 0
 
 
+@dataclass
+class SharedDRAMBurstChannel:
+    """One shared DRAM-facing burst launch slot across multiple backends."""
+
+    last_issue_tick: int = -1
+
+    def can_issue(self, tick: int) -> bool:
+        return int(tick) != int(self.last_issue_tick)
+
+    def reserve(self, tick: int) -> None:
+        self.last_issue_tick = int(tick)
+
+
 class Backend(Clocked):
     """
     Responsibilities:
@@ -66,6 +79,7 @@ class Backend(Clocked):
         dram_burst_bytes: int = 8,
         elem_bytes: int = 2,
         delay_cycles: int = 1,
+        shared_burst_channel: Optional[SharedDRAMBurstChannel] = None,
         send_sram_write: Optional[Callable[[int, bytes, int, int], bool]] = None,
         send_sram_read: Optional[Callable[[int, int, int], bytes]] = None,
     ):
@@ -77,6 +91,7 @@ class Backend(Clocked):
         self.send_sram_write = send_sram_write
         self.send_sram_read = send_sram_read
         self.dram: Optional[DRAM] = None
+        self.shared_burst_channel = shared_burst_channel
 
         # outstanding DRAM bursts being serviced by the (simulated) DRAM
         self._dram_pending: SimQueue[DRAMOperation] = SimQueue(max_size=self.dram_q_depth)
@@ -106,7 +121,11 @@ class Backend(Clocked):
         # - multiple bursts may remain in flight at once
         # - but only one new burst may launch every delay_cycles cycles
         # - outstanding concurrency is still bounded by dram_q_depth
-        return (not self._dram_pending.is_full()) and (not self.is_busy())
+        if self._dram_pending.is_full() or self.is_busy():
+            return False
+        if self.shared_burst_channel is not None and not self.shared_burst_channel.can_issue(self._tick):
+            return False
+        return True
 
     def _enqueue_dram_burst(self, req: DRAMOperation) -> bool:
         if not self._dram_bus_available():
@@ -116,6 +135,8 @@ class Backend(Clocked):
             self.total_backend_stalls += 1
             return False
         self.last_op_tick = self._tick
+        if self.shared_burst_channel is not None:
+            self.shared_burst_channel.reserve(self._tick)
         self.total_dram_bursts_issued += 1
         return True
 

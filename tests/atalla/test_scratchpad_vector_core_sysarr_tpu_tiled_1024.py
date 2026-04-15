@@ -181,12 +181,19 @@ class KernelPathSpan:
 
 
 class TiledTPUCosim:
-    def __init__(self, matrix_size: int = MATRIX, tile_size: int = TILE, dtype: str = "fp16"):
+    def __init__(
+        self,
+        matrix_size: int = MATRIX,
+        tile_size: int = TILE,
+        dtype: str = "fp16",
+        spad_frontend_queue_size: int = 4,
+    ):
         self.matrix_size = int(matrix_size)
         self.tile_size = int(tile_size)
         self.num_tiles = self.matrix_size // self.tile_size
         assert self.matrix_size % self.tile_size == 0
         self.dtype = str(dtype)
+        self.spad_frontend_queue_size = max(1, int(spad_frontend_queue_size))
 
         self.W_REG = 1
         self.A_REG = 2
@@ -529,6 +536,7 @@ class TiledTPUCosim:
             "matrix_size": self.matrix_size,
             "tile_size": self.tile_size,
             "num_tiles": self.num_tiles,
+            "spad_frontend_queue_size": self.spad_frontend_queue_size,
             "kernel_gantt_tag_count": len(self.kernel_tag_info),
             "kernel_gantt_span_count": len(self.kernel_path_spans),
             "prefetch_slots": 2,
@@ -547,7 +555,7 @@ class TiledTPUCosim:
             spad_read_latency=2,
             spad_write_latency=2,
             spad_xbar_delay=3,
-            spad_frontend_queue_size=4,
+            spad_frontend_queue_size=self.spad_frontend_queue_size,
             dram_block_bytes=256,
             backend_dram_latency=28,
             backend_dram_q_depth=16,
@@ -674,7 +682,10 @@ class TiledTPUCosim:
         for bridge in self.vls_bridges:
             bridge.tick()
         self.sysarr_bridge.tick()
-        for backend in self.backends:
+        backend_count = len(self.backends)
+        start_backend = self.global_cycle % backend_count if backend_count else 0
+        for offset in range(backend_count):
+            backend = self.backends[(start_backend + offset) % backend_count]
             backend.tick(self.global_cycle)
         self.spad.tick(self.global_cycle)
         if any(bridge.activity_this_cycle for bridge in self.vls_bridges):

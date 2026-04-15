@@ -12,7 +12,7 @@ from base.core import Core
 from base.debug import close_debug, configure_debug, dprintf
 from base.eventq import EventQueue
 from base.sim import Sim
-from memory.backend import Backend
+from memory.backend import Backend, SharedDRAMBurstChannel
 from memory.dram import DRAM
 from memory.sc_sram_banks import _xor_bank
 from memory.scratchpad import Scratchpad
@@ -622,8 +622,21 @@ def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
 
         dram = DRAM(block_bytes=256)
         # Weights live behind frontend 0 / VLS 0 and activations behind frontend 1 / VLS 1.
-        backend_wgt = Backend(dram_latency=24, dram_q_depth=16, dram_burst_bytes=32, elem_bytes=2)
-        backend_act = Backend(dram_latency=24, dram_q_depth=16, dram_burst_bytes=32, elem_bytes=2)
+        shared_burst_channel = SharedDRAMBurstChannel()
+        backend_wgt = Backend(
+            dram_latency=24,
+            dram_q_depth=16,
+            dram_burst_bytes=32,
+            elem_bytes=2,
+            shared_burst_channel=shared_burst_channel,
+        )
+        backend_act = Backend(
+            dram_latency=24,
+            dram_q_depth=16,
+            dram_burst_bytes=32,
+            elem_bytes=2,
+            shared_burst_channel=shared_burst_channel,
+        )
         spad.attach_backend(backend_wgt, tile_id=0)
         spad.attach_backend(backend_act, tile_id=1)
         backend_wgt.attach_dram(dram)
@@ -824,7 +837,10 @@ def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
             for bridge in vls_bridges:
                 bridge.tick()
             sysarr_bridge.tick()
-            for backend_obj in backends:
+            backend_count = len(backends)
+            start_backend = int(time) % backend_count if backend_count else 0
+            for offset in range(backend_count):
+                backend_obj = backends[(start_backend + offset) % backend_count]
                 backend_obj.tick(time)
             spad.tick(time)
 
