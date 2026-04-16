@@ -35,6 +35,9 @@ It also reuses pieces from
 
 So the tiled flow shares the same machine blocks and tracing style as the single-tile TPU experiment path.
 
+For a high-level class view of the assembled simulator stack, see
+[sysarr_tpu_system_uml.md](sysarr_tpu_system_uml.md).
+
 ## Dataflow
 
 Modeled path:
@@ -155,6 +158,22 @@ Use:
 ```
 
 That reads `gantt.log` directly and renders one output-tile Gantt.
+
+For the slide-oriented presentation plots, use:
+
+```bash
+/home/asicfab/a/socet149/sc_env_new/bin/python \
+/home/asicfab/a/socet149/atalla-sim/tools/plot_tiled_sysarr_tpu_gantt.py \
+  --input /home/asicfab/a/socet149/atalla-sim/logs/tiled_1024_m8_n32/gantt.log \
+  --tj 0 --tk 0 --presentation-set
+```
+
+That writes the block overview, one-weight flow, compute-detail, and reuse
+balance PNGs next to the input log.
+
+See
+[presentation_graphs_at_test_scratchpad_vector_core_sysarr_tpu_tiled_1024_blocked_mn.md](presentation_graphs_at_test_scratchpad_vector_core_sysarr_tpu_tiled_1024_blocked_mn.md)
+for notes on what each presentation graph is meant to communicate.
 
 ## What Is Still Simplified
 

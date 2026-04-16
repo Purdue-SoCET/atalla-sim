@@ -46,6 +46,43 @@ python3.11 tools/plot_sysarr_tpu_sweeps.py
 Plots are written to `logs/sysarr_tpu_sweeps/plots/`.
 The plotter ignores rows whose `status` is not `ok`.
 
+## Blocked M/N Queue Sweep
+
+For the blocked tiled TPU harness, there is a dedicated runner for the
+`M=8, N=32` frontend-queue sweep:
+
+```bash
+python3.11 tools/run_blocked_mn_spad_frontend_queue_sweep.py
+```
+
+By default it runs `weight_reuse_m=8`, `activation_reuse_n=32`, and sweeps
+`spad_frontend_queue_size` from `1` through `8`.
+
+Outputs land in `logs/blocked_m8_n32_spad_frontend_queue_sweep/`:
+
+- `results.csv`
+- `results.json`
+- one JSON file per queue-size point
+
+If you also want the per-run harness logs and PNGs, add:
+
+```bash
+python3.11 tools/run_blocked_mn_spad_frontend_queue_sweep.py --write-run-logs
+```
+
+To graph total cycles and GSAU RD queue depth versus frontend queue size, use:
+
+```bash
+python3.11 tools/plot_blocked_mn_spad_frontend_queue_sweep.py \
+	--input-dir logs/blocked_m8_n32_spad_frontend_queue_sweep
+```
+
+This writes three PNGs under `logs/blocked_m8_n32_spad_frontend_queue_sweep/plots/`:
+
+- `cycles_vs_spad_frontend_queue_size.png`
+- `gsau_rd_queue_vs_spad_frontend_queue_size.png`
+- `blocked_mn_spad_frontend_queue_sweep_summary.png`
+
 ## What Gets Graphed
 
 Each sweep plot includes:
