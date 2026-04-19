@@ -2,6 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple, Any
 from collections import deque
+import heapq
 
 from base.clocked_object import Clocked
 from base.queue import SimQueue
@@ -11,7 +12,7 @@ import math
 from memory.dram import DRAM
 
 
-@dataclass
+@dataclass(slots=True)
 class DRAMOperation:
     tx_id: int
     row: int
@@ -21,9 +22,10 @@ class DRAMOperation:
     is_write: bool
     data: Optional[bytes]
     remaining_cycles: int
+    due_cycle: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class BackendTransaction:
     tx_id: int
     base_sp: int
@@ -95,6 +97,7 @@ class Backend(Clocked):
 
         # outstanding DRAM bursts being serviced by the (simulated) DRAM
         self._dram_pending: SimQueue[DRAMOperation] = SimQueue(max_size=self.dram_q_depth)
+        self._dram_ready_heap: List[Tuple[int, int, int, int, DRAMOperation]] = []
 
         # queue of transactions waiting to be started
         self._tx_queue: SimQueue[BackendTransaction] = SimQueue(max_size=self.dram_q_depth)
@@ -115,6 +118,7 @@ class Backend(Clocked):
         self.last_op_tick = -1
         self._tick = -1
         self._pending_sram_reads = deque()
+        self._in_tick = False
 
     def _dram_bus_available(self) -> bool:
         # Model a split-transaction DRAM-facing burst channel:
@@ -134,9 +138,15 @@ class Backend(Clocked):
         if not self._dram_pending.enqueue(req):
             self.total_backend_stalls += 1
             return False
+        reference_cycle = self._tick if self._in_tick else (self._tick + 1)
+        req.due_cycle = reference_cycle + self.dram_latency - 1
         self.last_op_tick = self._tick
         if self.shared_burst_channel is not None:
             self.shared_burst_channel.reserve(self._tick)
+        heapq.heappush(
+            self._dram_ready_heap,
+            (req.due_cycle, req.tx_id, req.row, req.subidx, req),
+        )
         self.total_dram_bursts_issued += 1
         return True
 
@@ -449,52 +459,46 @@ class Backend(Clocked):
             if cycle <= self._tick:
                 return
             self._tick = cycle
-        if self._pending_sram_reads:
-            tx_id, row_idx, row_bytes = self._pending_sram_reads.popleft()
-            self._accept_sram_read_response(tx_id, row_idx, row_bytes)
-        # 1) Activate queued transactions
-        while not self._tx_queue.is_empty():
-            tx = self._tx_queue.dequeue()
-            self._active_txs[tx.tx_id] = tx
-            if not tx.is_store:
-                self.backend_to_dram_issue_row_load_subreqs(tx)
-            else:
-                # For store: request all rows from scratchpad if not present
-                if self.send_sram_read:
-                    for row_idx in range(tx.rows):
-                        if all(x is None for x in tx.row_bufs[row_idx]):
-                            row_bytes = self.send_sram_read(tx.base_sp + row_idx, row_idx, tx.tx_id)
-                            self.body_to_backend_sram_read_response(tx.tx_id, row_idx, row_bytes)
+        self._in_tick = True
+        try:
+            if self._pending_sram_reads:
+                tx_id, row_idx, row_bytes = self._pending_sram_reads.popleft()
+                self._accept_sram_read_response(tx_id, row_idx, row_bytes)
+            # 1) Activate queued transactions
+            while not self._tx_queue.is_empty():
+                tx = self._tx_queue.dequeue()
+                self._active_txs[tx.tx_id] = tx
+                if not tx.is_store:
+                    self.backend_to_dram_issue_row_load_subreqs(tx)
+                else:
+                    # For store: request all rows from scratchpad if not present
+                    if self.send_sram_read:
+                        for row_idx in range(tx.rows):
+                            if all(x is None for x in tx.row_bufs[row_idx]):
+                                row_bytes = self.send_sram_read(tx.base_sp + row_idx, row_idx, tx.tx_id)
+                                self.body_to_backend_sram_read_response(tx.tx_id, row_idx, row_bytes)
 
-        # 2) Progress DRAM pending bursts
-        n = len(self._dram_pending._raw_items)
-        to_requeue = []
-        for _ in range(n):
-            req = self._dram_pending.dequeue()
-            req.remaining_cycles -= 1
-            if req.remaining_cycles <= 0:
-                # DRAM response arrives this cycle
+            # 2) Progress only the bursts whose due cycle has arrived.
+            while self._dram_ready_heap and self._dram_ready_heap[0][0] <= self._tick:
+                _due, _tx_id, _row, _subidx, req = heapq.heappop(self._dram_ready_heap)
+                if not self._dram_pending.remove(req):
+                    continue
                 self.dram_to_backend_on_response(req)
                 self.total_dram_bursts_completed += 1
-            else:
-                to_requeue.append(req)
-        for req in to_requeue:
-            self._dram_pending.enqueue(req)
 
-        # 3) Retry any deferred DRAM load/store bursts once the serialized bus is free.
-        self._retry_one_deferred_load_burst()
-        self._retry_one_deferred_store_burst()
+            # 3) Retry any deferred DRAM load/store bursts once the serialized bus is free.
+            self._retry_one_deferred_load_burst()
+            self._retry_one_deferred_store_burst()
 
-        # 4) Retry handing off stalled assembled rows
-        for tx in list(self._active_txs.values()):
-            # some rows may have been assembled and stored in row_bufs as a single-element list
-            if tx.cur_row < tx.rows:
-                buf_entry = tx.row_bufs[tx.cur_row]
-                # case where we stored assembled row as single element for a stalled handoff
-                if len(buf_entry) == 1 and isinstance(buf_entry[0], (bytes, bytearray)):
-                    assembled = buf_entry[0]
-                    # try to hand off again
-                    self.backend_to_body_complete_row_load(tx, tx.cur_row, assembled)
+            # 4) Retry handing off stalled assembled rows.
+            for tx in list(self._active_txs.values()):
+                if tx.cur_row < tx.rows:
+                    buf_entry = tx.row_bufs[tx.cur_row]
+                    if len(buf_entry) == 1 and isinstance(buf_entry[0], (bytes, bytearray)):
+                        assembled = buf_entry[0]
+                        self.backend_to_body_complete_row_load(tx, tx.cur_row, assembled)
+        finally:
+            self._in_tick = False
 
     def get_stats(self) -> Dict[str, Any]:
         """

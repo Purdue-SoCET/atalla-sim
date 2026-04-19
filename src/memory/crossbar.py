@@ -1,6 +1,7 @@
 from base.clocked_object import Clocked
 from base.debug import dprintf
 from base.queue import SimQueue
+from collections import deque
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
@@ -37,10 +38,12 @@ class Xbar(Clocked):
         self.delay = max(1, int(delay))
         self.num_banks = int(num_banks)
         self.max_size = max(1, int(max_size)) if max_size is not None else self.delay
+        self._tick = -1
 
         self._op_counter = 0
         self._issue_q: SimQueue[Dict[str, Any]] = SimQueue(self.max_size)
-        self._pipeline: List[Optional[Dict[str, Any]]] = [None for _ in range(self.delay)]
+        self._inflight = deque()
+        self._blocked_tail: Optional[Dict[str, Any]] = None
 
         # stats
         self.total_submitted = 0
@@ -48,7 +51,7 @@ class Xbar(Clocked):
         self.total_retire_stalls = 0
 
     def inflight(self) -> int:
-        return len(self._issue_q) + sum(1 for stage in self._pipeline if stage is not None)
+        return len(self._issue_q) + len(self._inflight) + (1 if self._blocked_tail is not None else 0)
 
     def can_accept(self) -> bool:
         return self.inflight() < self.max_size
@@ -63,10 +66,11 @@ class Xbar(Clocked):
         assert len(input_vals) == self.num_banks
         self._op_counter += 1
         entry = {
-            "shift": list(shift_mask),
-            "vals": list(input_vals),
+            "shift": tuple(shift_mask),
+            "vals": tuple(input_vals),
             "cb": callback,
             "op": self._op_counter,
+            "due_cycle": -1,
         }
         if not self.can_accept() or not self._issue_q.enqueue(entry):
             # Queue is full, optionally call callback with False or handle overflow
@@ -78,34 +82,54 @@ class Xbar(Clocked):
         dprintf("Xbar", f"enqueue op={self._op_counter} delay={self.delay} inflight={self.inflight()}")
         return self._op_counter
 
-    def tick(self) -> List[Tuple[int, List[Any]]]:
+    def tick(self, time: Optional[float] = None) -> List[Tuple[int, List[Any]]]:
         """
         Returns list of completed operations as (op_id, routed_output).
         Callbacks are invoked before returning.
         """
+        cycle = self._consume_tick(time, attr_name="_tick")
+        if cycle is None:
+            return []
+
         completed: List[Tuple[int, List[Any]]] = []
 
-        tail = self._pipeline[-1]
-        tail_accepted = True
-        if tail is not None:
+        if self._blocked_tail is not None:
+            tail = self._blocked_tail
             out = Xbar.route(tail["shift"], tail["vals"], self.num_banks)
-            if tail["cb"]:
-                tail_accepted = tail["cb"](out) is not False
+            tail_accepted = tail["cb"](out) is not False if tail["cb"] else True
             if tail_accepted:
                 completed.append((tail["op"], out))
                 dprintf("Xbar", f"complete op={tail['op']}")
+                self._blocked_tail = None
             else:
                 self.total_retire_stalls += 1
+                for entry in self._inflight:
+                    entry["due_cycle"] += 1
                 dprintf("Xbar", f"retire stalled op={tail['op']}")
+                self.total_completed += len(completed)
+                return completed
+        elif self._inflight and self._inflight[0]["due_cycle"] <= cycle:
+            tail = self._inflight[0]
+            out = Xbar.route(tail["shift"], tail["vals"], self.num_banks)
+            tail_accepted = tail["cb"](out) is not False if tail["cb"] else True
+            if tail_accepted:
+                self._inflight.popleft()
+                completed.append((tail["op"], out))
+                dprintf("Xbar", f"complete op={tail['op']}")
+            else:
+                self._blocked_tail = self._inflight.popleft()
+                self.total_retire_stalls += 1
+                for entry in self._inflight:
+                    entry["due_cycle"] += 1
+                dprintf("Xbar", f"retire stalled op={tail['op']}")
+                self.total_completed += len(completed)
+                return completed
 
-        if tail_accepted:
-            for idx in range(self.delay - 1, 0, -1):
-                self._pipeline[idx] = self._pipeline[idx - 1]
-            self._pipeline[0] = None
-
+        if len(self._inflight) + (1 if self._blocked_tail is not None else 0) < self.max_size:
             next_entry = self._issue_q.dequeue()
             if next_entry is not None:
-                self._pipeline[0] = next_entry
+                next_entry["due_cycle"] = cycle + self.delay
+                self._inflight.append(next_entry)
 
         self.total_completed += len(completed)
         return completed
@@ -117,7 +141,7 @@ class Xbar(Clocked):
             "capacity": self.max_size,
             "pending": self.inflight(),
             "issue_queue": len(self._issue_q),
-            "pipeline_occupancy": sum(1 for stage in self._pipeline if stage is not None),
+            "pipeline_occupancy": len(self._inflight) + (1 if self._blocked_tail is not None else 0),
             "total_submitted": self.total_submitted,
             "total_completed": self.total_completed,
             "total_retire_stalls": self.total_retire_stalls,

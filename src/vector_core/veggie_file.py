@@ -1,5 +1,6 @@
 from base.clocked_object import Clocked
 from collections import defaultdict
+from typing import Optional
 
 Time = float
 
@@ -39,7 +40,7 @@ class Veggie(Clocked):
         self.inp = inp
         self.out = out
 
-    def tick(self):
+    def tick(self, time: Optional[Time] = None):
         if not self.inp:
             return
 
@@ -96,7 +97,7 @@ class OpBuffer(Clocked):
         self.inp = inp
         self.out = out
 
-    def tick(self):
+    def tick(self, time: Optional[Time] = None):
         if not self.inp:
             return
 

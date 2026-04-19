@@ -1,11 +1,12 @@
 import os
 import sys
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..//..", "src")))
 
 from base.clock_domain import ClockDomain
+from base.clocked_object import Clocked
 from base.core import Core
 from base.debug import close_debug, configure_debug, dprintf
 from base.eventq import EventQueue
@@ -128,8 +129,9 @@ def _matmul_u16(a: List[List[int]], b: List[List[int]]) -> List[List[int]]:
     return out
 
 
-class VLSFrontendBridge:
+class VLSFrontendBridge(Clocked):
     def __init__(self, vc: VectorCore, spad: Scratchpad, vls_id: int = 0, frontend_id: int = 0):
+        super().__init__()
         self.vc = vc
         self.spad = spad
         self.vls_id = int(vls_id)
@@ -145,7 +147,7 @@ class VLSFrontendBridge:
         dprintf("SYSARR", f"vls_rsp load_id={load_id} addr={addr} len={len(data)}")
         assert self.vc.push_scratchpad_response(self.vls_id, {"addr": addr, "data": data})
 
-    def tick(self) -> None:
+    def tick(self, time: Optional[float] = None) -> None:
         while True:
             req = self.vc.pop_scratchpad_request(self.vls_id)
             if req is None:
@@ -176,10 +178,11 @@ class VLSFrontendBridge:
             raise ValueError("unsupported request kind: %s" % req["kind"])
 
 
-class GSAUMEISSABridge:
+class GSAUMEISSABridge(Clocked):
     """Consumes VectorCore GSAU requests, drives MEISSA blackbox, returns responses."""
 
     def __init__(self, vc: VectorCore, sa: SystolicArrayMEISSABlackbox):
+        super().__init__()
         self.vc = vc
         self.sa = sa
 
@@ -189,7 +192,7 @@ class GSAUMEISSABridge:
             vec[i] = float(val)
         return {"vdata": vec, "meta": dict(meta), "dtype": meta.get("dtype")}
 
-    def tick(self) -> None:
+    def tick(self, time: Optional[float] = None) -> None:
         req = self.vc.pop_systolic_request()
         if req is not None:
             vdata = [float(x) for x in req.get("vdata", [])]
@@ -212,7 +215,7 @@ class GSAUMEISSABridge:
                 }
             )
 
-        self.sa.tick()
+        self.sa.tick(time)
 
         while self.sa.has_response():
             rsp = self.sa.pop_response()
@@ -319,131 +322,138 @@ def test_scratchpad_vector_core_sysarr_meissa_bb_end_to_end():
             )
             state["pending_act_load"] = True
 
-        def _step(time: float):
-            spad.now = time
-            vc.tick()
-            vls_bridge.tick()
-            sysarr_bridge.tick()
-            spad.tick(time)
+        class MeissaHarness(Clocked):
+            def __init__(self):
+                super().__init__()
+                self.done = False
 
-            if vc.wb_valid and vc.last_wb is not None:
-                wb = vc.last_wb
-                src = wb.get("source")
-                dst = wb.get("dst")
+            def _finish(self) -> None:
+                self.done = True
+                clk.stop()
 
-                if src == "vlsu" and dst == W_REG and state["pending_weight_load"]:
-                    state["pending_weight_load"] = False
-                    dprintf("SYSARR", f"weight load done row={state['weight_row']} len={len(wb.get('data', []))}")
-                    assert vc.enqueue_scheduler_instruction(
-                        {
-                            "unit": "gsau",
-                            "vdata": list(wb.get("data", [])),
-                            "is_weight": True,
-                            "expect_output": False,
-                            "dtype": "fp16",
-                        }
-                    )
-                    state["weight_row"] += 1
-                    if state["weight_row"] < tile:
-                        _issue_weight_load()
-                    else:
-                        state["weights_done"] = True
-                        dprintf("SYSARR", "weights_done")
+            def tick(self, time: float) -> None:
+                if self.done:
+                    return
 
-                elif src == "vlsu" and dst == A_REG and state["pending_act_load"]:
-                    state["pending_act_load"] = False
-                    dprintf("SYSARR", f"act load done row={state['act_row']} len={len(wb.get('data', []))}")
-                    assert vc.enqueue_scheduler_instruction(
-                        {
-                            "unit": "gsau",
-                            "vdata": list(wb.get("data", [])),
-                            "dst": OUT_REG,
-                            "is_weight": False,
-                            "expect_output": True,
-                            "dtype": "fp16",
-                        }
-                    )
-                    state["act_row"] += 1
-                    if state["act_row"] < tile:
-                        _issue_act_load()
+                if vc.wb_valid and vc.last_wb is not None:
+                    wb = vc.last_wb
+                    src = wb.get("source")
+                    dst = wb.get("dst")
 
-                elif src == "gsau" and dst == OUT_REG:
-                    row_idx = state["next_out_row"]
-                    if row_idx < tile:
-                        dprintf("SYSARR", f"gsau output row={row_idx} len={len(wb.get('data', []))}")
-                        state["pending_output_rows"].append(
+                    if src == "vlsu" and dst == W_REG and state["pending_weight_load"]:
+                        state["pending_weight_load"] = False
+                        dprintf("SYSARR", f"weight load done row={state['weight_row']} len={len(wb.get('data', []))}")
+                        assert vc.enqueue_scheduler_instruction(
                             {
-                                "row": row_idx,
-                                "data": list(wb.get("data", [])),
+                                "unit": "gsau",
+                                "vdata": list(wb.get("data", [])),
+                                "is_weight": True,
+                                "expect_output": False,
+                                "dtype": "fp16",
                             }
                         )
-                        state["next_out_row"] += 1
+                        state["weight_row"] += 1
+                        if state["weight_row"] < tile:
+                            _issue_weight_load()
+                        else:
+                            state["weights_done"] = True
+                            dprintf("SYSARR", "weights_done")
 
-            if state["weights_done"] and (not state["pending_act_load"]) and state["act_row"] < tile:
-                _issue_act_load()
+                    elif src == "vlsu" and dst == A_REG and state["pending_act_load"]:
+                        state["pending_act_load"] = False
+                        dprintf("SYSARR", f"act load done row={state['act_row']} len={len(wb.get('data', []))}")
+                        assert vc.enqueue_scheduler_instruction(
+                            {
+                                "unit": "gsau",
+                                "vdata": list(wb.get("data", [])),
+                                "dst": OUT_REG,
+                                "is_weight": False,
+                                "expect_output": True,
+                                "dtype": "fp16",
+                            }
+                        )
+                        state["act_row"] += 1
+                        if state["act_row"] < tile:
+                            _issue_act_load()
 
-            if (not state["store_inflight"]) and state["pending_output_rows"]:
-                next_item = state["pending_output_rows"][0]
-                row_idx = next_item["row"]
-                row_data = next_item["data"]
-                dprintf("SYSARR", f"issue store row={row_idx}")
-                assert vc.enqueue_memory(
-                    {
-                        "kind": "store",
-                        "vls": 0,
-                        "data": row_data,
-                        "addr": SPAD_OUT_BASE + row_idx,
-                        "dtype": "fp16",
-                    }
-                )
-                state["store_inflight"] = True
-                state["store_row_idx"] = row_idx
-                state["store_row_data"] = row_data
-                state["store_age"] = 0
+                    elif src == "gsau" and dst == OUT_REG:
+                        row_idx = state["next_out_row"]
+                        if row_idx < tile:
+                            dprintf("SYSARR", f"gsau output row={row_idx} len={len(wb.get('data', []))}")
+                            state["pending_output_rows"].append(
+                                {
+                                    "row": row_idx,
+                                    "data": list(wb.get("data", [])),
+                                }
+                            )
+                            state["next_out_row"] += 1
 
-            if state["store_inflight"] and state["store_row_idx"] is not None:
-                row_idx = state["store_row_idx"]
-                spad_vec = _read_slot_vector_u16(spad, SPAD_OUT_BASE + row_idx, vc.vector_len)
-                state["store_age"] += 1
-                if spad_vec == (state["store_row_data"] or []):
-                    dprintf("SYSARR", f"store complete row={row_idx}")
-                    dram.write(DRAM_OUT + row_idx * row_bytes, _encode_row_u16(spad_vec))
-                    state["completed_rows"].add(row_idx)
-                    state["store_inflight"] = False
-                    state["store_row_idx"] = None
-                    state["store_row_data"] = None
+                if state["weights_done"] and (not state["pending_act_load"]) and state["act_row"] < tile:
+                    _issue_act_load()
+
+                if (not state["store_inflight"]) and state["pending_output_rows"]:
+                    next_item = state["pending_output_rows"][0]
+                    row_idx = next_item["row"]
+                    row_data = next_item["data"]
+                    dprintf("SYSARR", f"issue store row={row_idx}")
+                    assert vc.enqueue_memory(
+                        {
+                            "kind": "store",
+                            "vls": 0,
+                            "data": row_data,
+                            "addr": SPAD_OUT_BASE + row_idx,
+                            "dtype": "fp16",
+                        }
+                    )
+                    state["store_inflight"] = True
+                    state["store_row_idx"] = row_idx
+                    state["store_row_data"] = row_data
                     state["store_age"] = 0
-                    if state["pending_output_rows"] and state["pending_output_rows"][0]["row"] == row_idx:
-                        state["pending_output_rows"].pop(0)
-                elif state["store_age"] > 1000:
+
+                if state["store_inflight"] and state["store_row_idx"] is not None:
+                    row_idx = state["store_row_idx"]
+                    spad_vec = _read_slot_vector_u16(spad, SPAD_OUT_BASE + row_idx, vc.vector_len)
+                    state["store_age"] += 1
+                    if spad_vec == (state["store_row_data"] or []):
+                        dprintf("SYSARR", f"store complete row={row_idx}")
+                        dram.write(DRAM_OUT + row_idx * row_bytes, _encode_row_u16(spad_vec))
+                        state["completed_rows"].add(row_idx)
+                        state["store_inflight"] = False
+                        state["store_row_idx"] = None
+                        state["store_row_data"] = None
+                        state["store_age"] = 0
+                        if state["pending_output_rows"] and state["pending_output_rows"][0]["row"] == row_idx:
+                            state["pending_output_rows"].pop(0)
+                    elif state["store_age"] > 1000:
+                        dprintf(
+                            "SYSARR",
+                            f"store stuck row={row_idx} spad_head={spad_vec[:4]} data_head={(state['store_row_data'] or [])[:4]}",
+                        )
+                        raise AssertionError("store did not commit to scratchpad")
+
+                state["cycles"] += 1
+                if state["cycles"] % 500 == 0:
                     dprintf(
                         "SYSARR",
-                        f"store stuck row={row_idx} spad_head={spad_vec[:4]} data_head={(state['store_row_data'] or [])[:4]}",
+                        "cycle=%d weight_row=%d act_row=%d out_row=%d completed=%d pending_out=%d"
+                        % (
+                            state["cycles"],
+                            state["weight_row"],
+                            state["act_row"],
+                            state["next_out_row"],
+                            len(state["completed_rows"]),
+                            len(state["pending_output_rows"]),
+                        ),
                     )
-                    raise AssertionError("store did not commit to scratchpad")
-
-            state["cycles"] += 1
-            if state["cycles"] % 500 == 0:
-                dprintf(
-                    "SYSARR",
-                    "cycle=%d weight_row=%d act_row=%d out_row=%d completed=%d pending_out=%d"
-                    % (
-                        state["cycles"],
-                        state["weight_row"],
-                        state["act_row"],
-                        state["next_out_row"],
-                        len(state["completed_rows"]),
-                        len(state["pending_output_rows"]),
-                    ),
-                )
-            if len(state["completed_rows"]) >= tile:
-                return
-            if state["cycles"] >= 20000:
-                return
-            eq.schedule(time + 1.0, _step, time + 1.0)
+                if len(state["completed_rows"]) >= tile:
+                    self._finish()
+                    return
+                if state["cycles"] >= 20000:
+                    self._finish()
 
         _issue_weight_load()
-        eq.schedule(0.0, _step, 0.0)
+        clk.objects = [vc, vls_bridge, sysarr_bridge, spad, MeissaHarness()]
+        clk.schedule_next(0.0)
         sim.run()
 
         if len(state["completed_rows"]) < tile:

@@ -3,11 +3,28 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..//..", "src")))
 
+from base.clock_domain import ClockDomain
+from base.core import Core
+from base.eventq import EventQueue
+from base.sim import Sim
 from systolic_array.systolic_array_meissa_blackbox import SystolicArrayMEISSABlackbox
 
 
+def build_sim():
+    eq = EventQueue()
+    clk = ClockDomain(eq, period=1.0)
+    core = Core(eq)
+    core.add_clock_domain(clk)
+    sim = Sim()
+    sim.init(eq, core)
+    return eq, clk, sim
+
+
 def test_meissa_blackbox_latency_and_matmul():
+    eq, clk, sim = build_sim()
     sa = SystolicArrayMEISSABlackbox(n=2, m=3, p=2)
+    clk.add_clocked(sa)
+    clk.schedule_next(0.0)
 
     # B (m x p) loaded top-to-bottom as m rows.
     assert sa.issue({"vdata": [1.0, 2.0], "is_weight": True, "expect_output": False, "dtype": "fp16"})
@@ -20,17 +37,16 @@ def test_meissa_blackbox_latency_and_matmul():
 
     # t_total = n + m + ceil(log2(m)) + p - 1 = 2 + 3 + 2 + 2 - 1 = 8.
     # Since outputs stream one row/cycle, first output appears at t_total - (n-1) = 7.
-    for _ in range(6):
-        sa.tick()
-        assert sa.pop_response() is None
+    sim.run(until=6.0)
+    assert sa.pop_response() is None
 
-    sa.tick()  # cycle 7
+    sim.run(until=7.0)
     rsp0 = sa.pop_response()
     assert rsp0 is not None
     assert rsp0["vdata"] == [6.0, 8.0]
     assert rsp0["meta"]["dst"] == 10
 
-    sa.tick()  # cycle 8
+    sim.run(until=8.0)
     rsp1 = sa.pop_response()
     assert rsp1 is not None
     assert rsp1["vdata"] == [5.0, 8.0]
@@ -38,7 +54,10 @@ def test_meissa_blackbox_latency_and_matmul():
 
 
 def test_meissa_blackbox_gsau_packet_shape():
+    eq, clk, sim = build_sim()
     sa = SystolicArrayMEISSABlackbox(n=1, m=2, p=1)
+    clk.add_clocked(sa)
+    clk.schedule_next(0.0)
 
     # One weight row for m=2? No, B is (m x p), so 2 rows of length 1.
     assert sa.issue({"vdata": [2.0], "is_weight": True, "expect_output": False, "dtype": "fp16"})
@@ -46,8 +65,7 @@ def test_meissa_blackbox_gsau_packet_shape():
     assert sa.issue({"vdata": [4.0, 5.0], "is_weight": False, "expect_output": True, "meta": {"tag": "req0"}, "dtype": "fp16"})
 
     # Total latency: 1 + 2 + ceil(log2(2)) + 1 - 1 = 4 cycles.
-    for _ in range(4):
-        sa.tick()
+    sim.run(until=4.0)
     rsp = sa.pop_response()
     assert rsp is not None
     assert rsp["vdata"] == [23.0]

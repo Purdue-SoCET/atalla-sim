@@ -38,6 +38,7 @@ class Scratchpad(Clocked):
         self.num_banks = int(num_banks)
         self.bank_size = int(bank_size)    # slots per bank (rows)
         self.elem_bytes = int(elem_bytes)
+        self.now = 0
         self.backend_write_inflight = [0, 0]
         self.backend_read_inflight = [0, 0]
 
@@ -262,15 +263,16 @@ class Scratchpad(Clocked):
     # tick() to advance internal xbars and banks; call this from simulator each cycle
     def tick(self, time=None) -> None:
         now = time if time is not None else getattr(self, 'now', 0)
+        self.now = now
         try:
             for tid, fe in enumerate(self.frontends):
                 fe.tick(now)
             for xb in self.tile_write_xbars + self.tile_read_xbars:
-                xb.tick()
+                xb.tick(now)
             for tile in self.tiles:
                 for b in getattr(tile, "banks", []):
                     try:
-                        b.tick()
+                        b.tick(now)
                     except Exception as e:
                         pass
         except Exception as e:

@@ -31,7 +31,7 @@ def _run_core_until(
     state = {"cycles": 0}
 
     def _step(time: float):
-        vc.tick()
+        vc.tick(time)
         if done_cb():
             return
         state["cycles"] += 1
@@ -61,7 +61,7 @@ def _run_core_with_scratchpad(
         for e in due:
             assert vc.push_scratchpad_response(0, e["rsp"])
 
-        vc.tick()
+        vc.tick(time)
 
         while True:
             req = vc.pop_scratchpad_request(0)
@@ -111,7 +111,7 @@ def _run_core_with_systolic(
         for e in due:
             assert vc.push_systolic_response(e["rsp"])
 
-        vc.tick()
+        vc.tick(time)
 
         while True:
             req = vc.pop_systolic_request()

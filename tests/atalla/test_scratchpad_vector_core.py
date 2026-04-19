@@ -5,6 +5,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..//
 
 from base.eventq import EventQueue
 from base.clock_domain import ClockDomain
+from base.clocked_object import Clocked
 from base.core import Core
 from base.sim import Sim
 
@@ -40,8 +41,9 @@ def _decode_lanes_u16(lanes, vector_len: int):
     return out
 
 
-class VLSFrontendBridge:
+class VLSFrontendBridge(Clocked):
     def __init__(self, vc: VectorCore, spad: Scratchpad, vls_id: int = 0, frontend_id: int = 0):
+        super().__init__()
         self.vc = vc
         self.spad = spad
         self.vls_id = int(vls_id)
@@ -58,7 +60,7 @@ class VLSFrontendBridge:
         data = _decode_lanes_u16(lanes, self.vc.vector_len)
         assert self.vc.push_scratchpad_response(self.vls_id, {"addr": addr, "data": data})
 
-    def tick(self) -> None:
+    def tick(self, time: float = None) -> None:
         while True:
             req = self.vc.pop_scratchpad_request(self.vls_id)
             if req is None:
@@ -142,35 +144,42 @@ def test_scratchpad_vector_core_load_compute_store_back():
         "store_committed": False,
     }
 
-    def _step(time: float):
-        vc.tick()
-        bridge.tick()
-        spad.tick(time)
+    class LoadComputeStoreHarness(Clocked):
+        def __init__(self):
+            super().__init__()
+            self.done = False
 
-        if vc.wb_valid and vc.last_wb is not None:
-            source = vc.last_wb.get("source")
-            dst = vc.last_wb.get("dst")
-            if source == "vlsu" and dst == 5:
-                state["load_wb_seen"] = True
-            if state["load_wb_seen"] and (not state["compute_issued"]):
-                assert vc.enqueue_compute("add", dst=6, src0=5, src1=[1] * vc.vector_len)
-                state["compute_issued"] = True
-            if state["compute_issued"] and (not state["store_issued"]) and source == "datapath" and dst == 6:
-                assert vc.enqueue_memory({"kind": "store", "vls": 0, "src": 6, "addr": dst_addr, "dtype": "fp16"})
-                state["store_issued"] = True
-
-        if state["store_issued"]:
-            written = _read_slot_vector_u16(spad, dst_addr, vc.vector_len)
-            if written == computed:
-                state["store_committed"] = True
+        def tick(self, time: float) -> None:
+            if self.done:
                 return
 
-        state["cycles"] += 1
-        if state["cycles"] >= 256:
-            return
-        eq.schedule(time + 1.0, _step, time + 1.0)
+            if vc.wb_valid and vc.last_wb is not None:
+                source = vc.last_wb.get("source")
+                dst = vc.last_wb.get("dst")
+                if source == "vlsu" and dst == 5:
+                    state["load_wb_seen"] = True
+                if state["load_wb_seen"] and (not state["compute_issued"]):
+                    assert vc.enqueue_compute("add", dst=6, src0=5, src1=[1] * vc.vector_len)
+                    state["compute_issued"] = True
+                if state["compute_issued"] and (not state["store_issued"]) and source == "datapath" and dst == 6:
+                    assert vc.enqueue_memory({"kind": "store", "vls": 0, "src": 6, "addr": dst_addr, "dtype": "fp16"})
+                    state["store_issued"] = True
 
-    eq.schedule(0.0, _step, 0.0)
+            if state["store_issued"]:
+                written = _read_slot_vector_u16(spad, dst_addr, vc.vector_len)
+                if written == computed:
+                    state["store_committed"] = True
+                    self.done = True
+                    clk.stop()
+                    return
+
+            state["cycles"] += 1
+            if state["cycles"] >= 256:
+                self.done = True
+                clk.stop()
+
+    clk.objects = [vc, bridge, spad, LoadComputeStoreHarness()]
+    clk.schedule_next(0.0)
     sim.run()
 
     if not state["store_committed"]:

@@ -23,14 +23,21 @@ def test_crossbar_basic():
     # Set a small queue size for overflow testing
     x = Xbar(delay=3, num_banks=8, max_size=2)
 
-    # try registering with clock domain if supported by the model
-    try:
-        clk.add_clocked(x)
-    except Exception:
-        pass
-
     results = []
     completions = []
+
+    orig_tick = x.tick
+
+    def tick_and_collect(time=None):
+        comp = orig_tick(time)
+        if comp:
+            completions.extend(comp)
+            print(f"[{time}] Completed: {comp}")
+        return comp
+
+    x.tick = tick_and_collect
+    clk.add_clocked(x)
+    clk.schedule_next(0.0)
 
     def cb(out):
         results.append(out)
@@ -53,18 +60,6 @@ def test_crossbar_basic():
     print("submitted xbar ops", op_id1, op_id2, op_id3)
     assert op_id1 > 0 and op_id2 > 0, "First two ops should succeed"
     assert op_id3 == -1, "Third op should fail due to queue overflow"
-
-    def tick_and_collect(time):
-        comp = x.tick()
-        if comp:
-            completions.extend(comp)
-            print(f"[{time}] Completed: {comp}")
-
-    eq.schedule(0.1, tick_and_collect, 0.1)
-    eq.schedule(1.1, tick_and_collect, 1.1)
-    eq.schedule(2.1, tick_and_collect, 2.1)
-    eq.schedule(3.1, tick_and_collect, 3.1)
-    eq.schedule(4.1, tick_and_collect, 4.1)
 
     sim.run(until=5.0)
 

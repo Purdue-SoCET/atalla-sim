@@ -34,7 +34,7 @@ class WBBuffer(Clocked):
             return True
         if bank in self._reserved_banks:
             return False
-        for queued in self.entries.items:
+        for queued in self.entries._raw_items:
             if queued.get("bank") == bank:
                 return False
         return True
@@ -42,11 +42,10 @@ class WBBuffer(Clocked):
     def enqueue(self, entry: Dict) -> bool:
         if not self.can_accept_entry(entry):
             return False
-        item = dict(entry)
-        bank = item.get("bank")
+        bank = entry.get("bank")
         if bank is not None:
             self._reserved_banks.add(bank)
-        return self.entries.enqueue(item)
+        return self.entries.enqueue(entry)
 
     def has_pending(self) -> bool:
         return not self.entries.is_empty()
@@ -99,6 +98,7 @@ class GSAU(Clocked):
         self.max_vregs = max(1, int(max_vregs))
         self.instruction_latency_mac = max(1, int(instruction_latency_mac))
         self.clocks_per_mac_cycle = max(1, int(clocks_per_mac_cycle))
+        self._tick = -1
         # Formula-driven destination queue depth in entries.
         self.rd_queue_depth = max(1, self.instruction_latency_mac * self.clocks_per_mac_cycle)
 
@@ -113,6 +113,7 @@ class GSAU(Clocked):
         if dtype is None:
             raise ValueError("gsau command missing dtype")
         expects_output = bool(entry.get("expect_output", not bool(entry.get("is_weight", False))))
+        meta = entry.get("meta", {})
         if self.to_systolic.is_full():
             return False
         if expects_output:
@@ -125,17 +126,18 @@ class GSAU(Clocked):
                 {
                     "dst": int(dst),
                     "dtype": dtype,
-                    "meta": dict(entry.get("meta", {})),
+                    "meta": meta,
                 }
             ):
                 return False
 
+        vdata = entry["vdata"] if isinstance(entry["vdata"], list) else list(entry["vdata"])
         return self.to_systolic.enqueue(
             {
-                "vdata": list(entry["vdata"]),
+                "vdata": vdata,
                 "is_weight": bool(entry.get("is_weight", False)),
                 "dtype": dtype,
-                "meta": dict(entry.get("meta", {})),
+                "meta": meta,
                 "expect_output": expects_output,
             }
         )
@@ -144,12 +146,15 @@ class GSAU(Clocked):
         return self.to_systolic.dequeue()
 
     def push_systolic_response(self, rsp: Dict) -> bool:
-        packet = dict(rsp)
+        packet = rsp
         if "vdata" not in packet and "data" in packet:
+            packet = dict(rsp)
             packet["vdata"] = packet["data"]
         if "vdata" not in packet:
             raise ValueError("gsau response missing vdata")
-        packet["vdata"] = list(packet["vdata"])
+        if not isinstance(packet["vdata"], list):
+            packet = dict(packet)
+            packet["vdata"] = list(packet["vdata"])
         return self.from_systolic.enqueue(packet)
 
     def can_pop_writeback(self) -> bool:
@@ -161,7 +166,11 @@ class GSAU(Clocked):
     def has_pending(self) -> bool:
         return (not self.to_systolic.is_empty()) or (not self.from_systolic.is_empty())
 
-    def tick(self) -> None:
+    def tick(self, time: Optional[Time] = None) -> None:
+        cycle = self._consume_tick(time, attr_name="_tick")
+        if cycle is None:
+            return
+
         while (not self.from_systolic.is_empty()) and (not self.rd_queue.is_empty()) and (not self.writebacks.is_full()):
             rsp = self.from_systolic.dequeue()
             rd = self.rd_queue.dequeue()
@@ -218,6 +227,7 @@ class VectorCore(Clocked):
         super().__init__()
         if vls_count <= 0:
             raise ValueError("vls_count must be > 0")
+        self._tick = -1
 
         self.dtype_default = normalize_dtype(dtype, default=None)
         self.datapath = VectorDatapath(
@@ -359,21 +369,16 @@ class VectorCore(Clocked):
             return True
         raise ValueError("unsupported scheduler unit: %s" % unit)
 
-    def _clone_packet(self, packet: Dict[str, List[Dict]]) -> Dict[str, List[Dict]]:
-        return {
-            "gsau": [dict(x) for x in packet["gsau"]],
-            "vlsu": [dict(x) for x in packet["vlsu"]],
-            "datapath": [dict(x) for x in packet["datapath"]],
-        }
-
     def _flush_build_packet(self) -> bool:
         if not self._packet_has_entries(self._build_packet):
             return True
         if self.vliw_q.is_full():
             return False
-        if not self.vliw_q.enqueue(self._clone_packet(self._build_packet)):
-            return False
+        packet = self._build_packet
         self._build_packet = self._empty_packet()
+        if not self.vliw_q.enqueue(packet):
+            self._build_packet = packet
+            return False
         return True
 
     def enqueue_vliw_packet(self, packet: Dict) -> bool:
@@ -685,15 +690,19 @@ class VectorCore(Clocked):
         self.last_wb = wb
         self.wb_valid = True
 
-    def tick(self) -> None:
+    def tick(self, time: Optional[Time] = None) -> None:
+        cycle = self._consume_tick(time, attr_name="_tick")
+        if cycle is None:
+            return
+
         # 1) Consume one VLIW packet when target units can accept its slots.
         self._try_issue_scheduler()
 
         # 2) Advance compute and memory units.
-        self.datapath.tick()
+        self.datapath.tick(cycle)
         for vls in self.vls_units:
-            vls.tick()
-        self.gsau.tick()
+            vls.tick(cycle)
+        self.gsau.tick(cycle)
 
         # 3) Funnel unit outputs into shared writeback buffer.
         self.wb_buffer.start_cycle()
@@ -722,7 +731,7 @@ class VectorCore(Clocked):
                 + len(self._build_packet["vlsu"])
                 + len(self._build_packet["datapath"])
             )
-        for packet in self.vliw_q.items:
+        for packet in self.vliw_q._raw_items:
             total += len(packet["gsau"]) + len(packet["vlsu"]) + len(packet["datapath"])
         return total
 

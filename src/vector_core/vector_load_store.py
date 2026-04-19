@@ -34,6 +34,7 @@ class VectorLoadStoreUnit(Clocked):
             raise ValueError("scratchpad_count must be > 0")
 
         self.scratchpad_count = scratchpad_count
+        self._tick = -1
         self.load_response_latency = max(1, load_response_latency)
         self.read_vreg_cb = read_vreg_cb
         self.write_vreg_cb = write_vreg_cb
@@ -241,7 +242,11 @@ class VectorLoadStoreUnit(Clocked):
         self.rsp_valid = self.last_rsp is not None
         self.wb_valid = self.last_wb is not None
 
-    def tick(self) -> None:
+    def tick(self, time: Optional[float] = None) -> None:
+        cycle = self._consume_tick(time, attr_name="_tick")
+        if cycle is None:
+            return
+
         # One issue and one response are processed per cycle.
         self._issue_one()
         self._handle_one_response()

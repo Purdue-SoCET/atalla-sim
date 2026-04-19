@@ -262,6 +262,9 @@ class SystolicArrayTPU(Clocked):
                 self.array[g][col].weight = [cast_scalar(v, dtype_norm) for v in groups[g]]
 
     def tick(self, time: Optional[float] = None) -> None:
+        if self._consume_tick(time) is None:
+            return
+
         if self.stall:
             return
 

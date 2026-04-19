@@ -39,7 +39,7 @@ class SystolicArrayMEISSABlackbox(Clocked):
         self.to_array = SimQueue(max(1, int(req_depth)))
         self.from_array = SimQueue(max(1, int(rsp_depth)))
 
-        self._cycle = 0
+        self._cycle = -1
         self._pending_ready: List[Dict] = []
 
         self._reset_job()
@@ -211,11 +211,16 @@ class SystolicArrayMEISSABlackbox(Clocked):
             self._reset_job()
 
     def tick(self, time: Optional[float] = None) -> None:
+        cycle = self._consume_tick(time, attr_name="_cycle")
+        if cycle is None:
+            return
+
+        self._cycle = cycle
+
         # Consume at most one ingress packet per cycle (hardware-like input port).
         self._consume_one_request()
         self._schedule_outputs_if_ready()
         self._flush_ready_responses()
-        self._cycle += 1
 
 
 MEISSABlackbox = SystolicArrayMEISSABlackbox

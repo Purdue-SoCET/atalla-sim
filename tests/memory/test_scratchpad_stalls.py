@@ -62,14 +62,15 @@ def test_scratchpad_stalls():
     spad.backend_write_inflight[0] = spad.tile_write_xbars[0].max_size
     ok4 = spad.frontend_write(6, row_bytes, row_idx=3, tile_id=0)
     assert ok4, "Frontend write should enqueue (queue not full)"
+    ready_cycle, *_ = spad.frontends[0].writeq.peek()
     # But tick will not process it until xbar capacity is made available
-    spad.frontends[0].tick(2)
+    spad.frontends[0].tick(ready_cycle)
     # The request should remain in the queue
     assert len(spad.frontends[0].writeq.items) == 1, "Frontend write should be blocked by backend inflight"
 
     # Now clear the synthetic occupancy and tick again
     spad.backend_write_inflight[0] = 0
-    spad.frontends[0].tick(10)
+    spad.frontends[0].tick(ready_cycle + 1)
     # The request should be processed
     assert len(spad.frontends[0].writeq.items) == 0, "Frontend write should be processed after backend inflight cleared"
 

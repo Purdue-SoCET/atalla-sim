@@ -129,10 +129,16 @@ def test_scratchpad_full():
 
 
 def test_backends_can_attach_to_scratchpad_slots_and_dram():
+    eq, clk, sim = build_sim()
     dram = DRAM(block_bytes=16)
     spad = Scratchpad(num_banks=4, bank_size=16, read_latency=1, write_latency=1, xbar_delay=1, elem_bytes=2)
     backend0 = Backend(dram_latency=1, dram_q_depth=8, dram_burst_bytes=4, elem_bytes=2)
     backend1 = Backend(dram_latency=1, dram_q_depth=8, dram_burst_bytes=4, elem_bytes=2)
+
+    clk.add_clocked(spad)
+    clk.add_clocked(backend0)
+    clk.add_clocked(backend1)
+    clk.schedule_next(0.0)
 
     spad.attach_backend(backend0, tile_id=0)
     spad.attach_backend(backend1, tile_id=1)
@@ -153,10 +159,7 @@ def test_backends_can_attach_to_scratchpad_slots_and_dram():
     assert tx_id0 > 0
     assert tx_id1 > 0
 
-    for cycle in range(8):
-        backend0.tick(cycle)
-        backend1.tick(cycle)
-        spad.tick(cycle)
+    sim.run(until=8.0)
 
     assert _read_swizzled_row(spad, tile_id=0, slot=3) == load_row0
     assert _read_swizzled_row(spad, tile_id=1, slot=5) == load_row1
@@ -171,17 +174,18 @@ def test_backends_can_attach_to_scratchpad_slots_and_dram():
     assert tx_id2 > 0
     assert tx_id3 > 0
 
-    for cycle in range(8, 16):
-        backend0.tick(cycle)
-        backend1.tick(cycle)
-        spad.tick(cycle)
+    sim.run(until=16.0)
 
     assert dram.read(0x200, len(store_row0)) == store_row0
     assert dram.read(0x220, len(store_row1)) == store_row1
 
 
 def test_frontend_writes_are_not_dropped_when_write_xbar_is_pipelined():
+    eq, clk, sim = build_sim()
     spad = Scratchpad(num_banks=8, bank_size=16, read_latency=1, write_latency=2, xbar_delay=3, elem_bytes=2, frontend_queue_size=4)
+
+    clk.add_clocked(spad)
+    clk.schedule_next(0.0)
 
     row0 = _pack_row([10 + i for i in range(8)])
     row1 = _pack_row([30 + i for i in range(8)])
@@ -189,8 +193,7 @@ def test_frontend_writes_are_not_dropped_when_write_xbar_is_pipelined():
     assert spad.frontend_write(0, row0, row_idx=0, tile_id=0)
     assert spad.frontend_write(1, row1, row_idx=1, tile_id=0)
 
-    for cycle in range(12):
-        spad.tick(cycle)
+    sim.run(until=12.0)
 
     assert _read_swizzled_row(spad, tile_id=0, slot=0) == row0
     assert _read_swizzled_row(spad, tile_id=0, slot=1) == row1

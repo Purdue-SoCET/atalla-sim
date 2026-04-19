@@ -23,6 +23,8 @@ def test_sram_staggered_and_stall():
     banks = SRAMBanks(bank_count=2, bank_size=8, read_latency=2, write_latency=1)
     for b in banks.banks:
         b._pending = b._pending.__class__(max_size=1)
+    clk.add_clocked(banks)
+    clk.schedule_next(0.0)
 
     # --- Staggered ops, no stalls ---
     staggered_results = []
@@ -32,14 +34,6 @@ def test_sram_staggered_and_stall():
     # Write at t=0, read at t=1 (no overlap, so no stall)
     eq.schedule(0.0, lambda t: banks.enqueue_write(2, b"staggered", callback=lambda _: None), 0.0)
     eq.schedule(1.0, lambda t: banks.enqueue_read(2, 9, callback=staggered_cb), 1.0)
-
-    def tick_and_collect(time):
-        banks.tick()
-
-    eq.schedule(0.1, tick_and_collect, 0.1)
-    eq.schedule(1.1, tick_and_collect, 1.1)
-    eq.schedule(2.1, tick_and_collect, 2.1)
-    eq.schedule(3.1, tick_and_collect, 3.1)
 
     sim.run(until=4.0)
 
@@ -60,6 +54,8 @@ def test_sram_staggered_and_stall():
 
     # Write and read at t=0 (same bank/address), expect enqueue conflict
     eq, clk, sim = build_sim()
+    clk.add_clocked(banks)
+    clk.schedule_next(0.0)
     eq.schedule(0.0, lambda t: banks.enqueue_write(2, b"stalltest", callback=lambda _: None), 0.0)
     def expect_conflict(_t):
         try:
@@ -68,11 +64,6 @@ def test_sram_staggered_and_stall():
             return
         assert False, "Stall: Expected enqueue conflict RuntimeError"
     eq.schedule(0.0, expect_conflict, 0.0)
-
-    eq.schedule(0.1, tick_and_collect, 0.1)
-    eq.schedule(1.1, tick_and_collect, 1.1)
-    eq.schedule(2.1, tick_and_collect, 2.1)
-    eq.schedule(3.1, tick_and_collect, 3.1)
 
     sim.run(until=4.0)
 

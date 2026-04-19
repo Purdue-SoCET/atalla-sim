@@ -1,13 +1,14 @@
 import os
 import sys
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 import numpy as np
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..//..", "src")))
 
 from base.clock_domain import ClockDomain
+from base.clocked_object import Clocked
 from base.core import Core
 from base.debug import close_debug, configure_debug, dprintf
 from base.eventq import EventQueue
@@ -18,7 +19,7 @@ from memory.sc_sram_banks import _xor_bank
 from memory.scratchpad import Scratchpad
 from systolic_array.systolic_array_tpu import SystolicArrayTPU
 from vector_core.vector_core import VectorCore
-from atalla.sysarr_tpu_system import TPUMetrics
+from atalla.sysarr_tpu_system import RoundRobinBackendTicker, TPUMetrics
 
 
 def build_sim():
@@ -295,6 +296,7 @@ def _tpu_reference_output(
     out = []
     out_read_idx = 0
     warmup = sa.warmup_cycles()
+    cycle = 0
     logged_first = False
     logged_converted = False
 
@@ -302,14 +304,16 @@ def _tpu_reference_output(
     for vec in weight_stream:
         assert sa.enqueue_weights([float(x) for x in vec], dtype=dtype)
         sa.set_control(weight_en=True, mac_shift=False, start=False, stall=False)
-        sa.tick()
+        sa.tick(cycle)
+        cycle += 1
 
     # Stream activations (one vector per cycle).
     for vec in act_rows:
         assert sa.enqueue([float(x) for x in vec], dtype=dtype)
         assert sa.enqueue_psums(zero_row, dtype=dtype)
         sa.set_control(weight_en=False, mac_shift=True, start=True, stall=False)
-        sa.tick()
+        sa.tick(cycle)
+        cycle += 1
         buf = sa.get_buffer()
         while out_read_idx < len(buf):
             if out_read_idx < warmup:
@@ -341,7 +345,8 @@ def _tpu_reference_output(
         assert sa.enqueue(zero_row, dtype=dtype, count_algo=False)
         assert sa.enqueue_psums(zero_row, dtype=dtype)
         sa.set_control(weight_en=False, mac_shift=True, start=True, stall=False)
-        sa.tick()
+        sa.tick(cycle)
+        cycle += 1
         buf = sa.get_buffer()
         while out_read_idx < len(buf):
             if out_read_idx < warmup:
@@ -359,10 +364,11 @@ def _tpu_reference_output(
     return out
 
 
-class VLSFrontendBridge:
+class VLSFrontendBridge(Clocked):
     # Adapts the VectorCore's abstract scratchpad request/response interface onto
     # the scratchpad frontend model used in this simulator.
     def __init__(self, vc: VectorCore, spad: Scratchpad, vls_id: int = 0, frontend_id: int = 0):
+        super().__init__()
         self.vc = vc
         self.spad = spad
         self.vls_id = int(vls_id)
@@ -392,7 +398,8 @@ class VLSFrontendBridge:
         dprintf("SYSARR", f"vls_rsp load_id={load_id} addr={addr} len={len(data)}")
         assert self.vc.push_scratchpad_response(self.vls_id, {"addr": addr, "data": data})
 
-    def tick(self) -> None:
+    def tick(self, time: Optional[float] = None) -> None:
+        self.activity_this_cycle = False
         vls = self.vc.vls_units[self.vls_id]
         req = vls.req_q.peek()
         if req is None:
@@ -460,6 +467,7 @@ class TPUReference:
         is_weight: bool,
         expect_output: bool,
         did_flush: bool,
+        time: Optional[float] = None,
     ) -> None:
         self.sa.set_control(weight_en=False, mac_shift=False, start=False, stall=False)
         if did_req:
@@ -478,7 +486,7 @@ class TPUReference:
                 self.sa.set_control(weight_en=False, mac_shift=True, start=True, stall=False)
                 self._flush_pending -= 1
 
-        self.sa.tick()
+        self.sa.tick(time)
 
         buf = self.sa.get_buffer()
         while self._out_read_idx < len(buf):
@@ -493,10 +501,11 @@ class TPUReference:
             self._out_read_idx += 1
 
 
-class GSAUTPUBridge:
+class GSAUTPUBridge(Clocked):
     """Consumes VectorCore GSAU requests, drives TPU model, returns responses."""
 
     def __init__(self, vc: VectorCore, sa: SystolicArrayTPU, mirror: TPUReference = None):
+        super().__init__()
         self.vc = vc
         self.sa = sa
         self.mirror = mirror
@@ -523,7 +532,7 @@ class GSAUTPUBridge:
             vec[i] = _fp16_bits(val)
         return {"vdata": vec, "meta": dict(meta), "dtype": meta.get("dtype")}
 
-    def tick(self) -> None:
+    def tick(self, time: Optional[float] = None) -> None:
         # Default: idle compute controls.
         self.sa.set_control(weight_en=False, mac_shift=False, start=False, stall=False)
 
@@ -572,9 +581,10 @@ class GSAUTPUBridge:
                 is_weight=is_weight,
                 expect_output=expect_output,
                 did_flush=did_flush,
+                time=time,
             )
 
-        self.sa.tick()
+        self.sa.tick(time)
 
         buf = self.sa.get_buffer()
         while self._out_read_idx < len(buf):
@@ -824,284 +834,255 @@ def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
             state["act_loads_inflight"] += 1
             return True
 
-        def _step(time: float):
-            spad.now = time
-            # Keep the cycle order explicit:
-            # 1) VC consumes prior-cycle responses and emits new requests
-            # 2) bridges translate VC/GSAU traffic into scratchpad/TPU activity
-            # 3) backend advances DRAM<->SPAD transfers
-            # 4) scratchpad advances xbars/banks so new data becomes visible
-            for bridge in vls_bridges:
-                bridge.start_cycle()
-            vc.tick()
-            for bridge in vls_bridges:
-                bridge.tick()
-            sysarr_bridge.tick()
-            backend_count = len(backends)
-            start_backend = int(time) % backend_count if backend_count else 0
-            for offset in range(backend_count):
-                backend_obj = backends[(start_backend + offset) % backend_count]
-                backend_obj.tick(time)
-            spad.tick(time)
 
-            if (
-                not state["preload_done"]
-                and state["preload_wait_drain"]
-                and len(state["preload_tx_done"]) == 2
-            ):
-                if _all_backends_idle() and _spad_write_path_idle():
-                    state["preload_done"] = True
+        class TPUEndToEndHarness(Clocked):
+            def __init__(self):
+                super().__init__()
+                self.done = False
 
-            busy_units = _busy_units_snapshot(vc, sa, state, spad=spad, backend=backends)
-            phase = _phase_snapshot(state, sa, tile)
-            if busy_units:
-                activity_lines.append(f"cycle {state['cycles']} [{phase}]: " + ", ".join(busy_units))
-            else:
-                activity_lines.append(f"cycle {state['cycles']} [{phase}]: idle")
-            phase_lines.append(f"cycle {state['cycles']}: {phase}")
-            if any(bridge.activity_this_cycle for bridge in vls_bridges):
-                state["vls_active_cycles"] += 1
+            def _finish(self) -> None:
+                self.done = True
+                clk.stop()
 
-            # Consume at most one architectural writeback per cycle from the VC.
-            # In this harness those writebacks are the control points that advance
-            # the high-level flow:
-            # - VLSU -> weight register: feed a weight row into the systolic path
-            # - VLSU -> activation register: feed an activation row into the systolic path
-            # - GSAU -> output register: queue a completed output row for storeback
-            if vc.wb_valid and vc.last_wb is not None:
-                wb = vc.last_wb
-                src = wb.get("source")
-                dst = wb.get("dst")
+            def tick(self, time: float) -> None:
+                if self.done:
+                    return
 
-                # Weight rows are only used to program the systolic array state, so
-                # the follow-on scheduler instruction does not expect an output row.
-                if src == "vlsu" and dst == W_REG and state["weight_loads_inflight"] > 0:
-                    state["weight_loads_inflight"] -= 1
-                    dprintf("SYSARR", f"weight load done row={state['weight_row']} len={len(wb.get('data', []))}")
-                    wdata = list(wb.get("data", []))
-                    state["bytes_load_wgt"] += len(wdata) * 2
-                    metrics.count_weight_load()
-                    nz = [i for i, v in enumerate(wdata) if v != 0]
-                    if state["weight_row"] < 2:
+                if (
+                    not state["preload_done"]
+                    and state["preload_wait_drain"]
+                    and len(state["preload_tx_done"]) == 2
+                ):
+                    if _all_backends_idle() and _spad_write_path_idle():
+                        state["preload_done"] = True
+
+                busy_units = _busy_units_snapshot(vc, sa, state, spad=spad, backend=backends)
+                phase = _phase_snapshot(state, sa, tile)
+                if busy_units:
+                    activity_lines.append(f"cycle {state['cycles']} [{phase}]: " + ", ".join(busy_units))
+                else:
+                    activity_lines.append(f"cycle {state['cycles']} [{phase}]: idle")
+                phase_lines.append(f"cycle {state['cycles']}: {phase}")
+                if any(bridge.activity_this_cycle for bridge in vls_bridges):
+                    state["vls_active_cycles"] += 1
+
+                if vc.wb_valid and vc.last_wb is not None:
+                    wb = vc.last_wb
+                    src = wb.get("source")
+                    dst = wb.get("dst")
+
+                    if src == "vlsu" and dst == W_REG and state["weight_loads_inflight"] > 0:
+                        state["weight_loads_inflight"] -= 1
+                        dprintf("SYSARR", f"weight load done row={state['weight_row']} len={len(wb.get('data', []))}")
+                        wdata = list(wb.get("data", []))
+                        state["bytes_load_wgt"] += len(wdata) * 2
+                        metrics.count_weight_load()
+                        nz = [i for i, v in enumerate(wdata) if v != 0]
+                        if state["weight_row"] < 2:
+                            dprintf(
+                                "SYSARR",
+                                f"weight data head={wdata[:8]} nz_count={len(nz)} nz_idx_head={nz[:8]}",
+                            )
+                        assert vc.enqueue_scheduler_instruction(
+                            {
+                                "unit": "gsau",
+                                "vdata": wdata,
+                                "is_weight": True,
+                                "expect_output": False,
+                                "dtype": "fp16",
+                            }
+                        )
+                        state["weight_row"] += 1
+                        if state["weight_row"] >= tile:
+                            state["weights_done"] = True
+                            dprintf("SYSARR", "weights_done")
+
+                    elif src == "vlsu" and dst == A_REG and state["act_loads_inflight"] > 0:
+                        state["act_loads_inflight"] -= 1
                         dprintf(
                             "SYSARR",
-                            f"weight data head={wdata[:8]} nz_count={len(nz)} nz_idx_head={nz[:8]}",
+                            f"act load done row={state['act_loaded_rows']} len={len(wb.get('data', []))}",
                         )
-                    assert vc.enqueue_scheduler_instruction(
+                        adata = list(wb.get("data", []))
+                        state["bytes_load_act"] += len(adata) * 2
+                        metrics.count_act_load()
+                        nz = [i for i, v in enumerate(adata) if v != 0]
+                        if state["act_loaded_rows"] < 2:
+                            dprintf(
+                                "SYSARR",
+                                f"act data head={adata[:8]} nz_count={len(nz)} nz_idx_head={nz[:8]}",
+                            )
+                        state["ready_act_rows"].append(adata)
+                        state["act_loaded_rows"] += 1
+
+                    elif src == "gsau" and dst == OUT_REG:
+                        row_idx = state["next_out_row"]
+                        if row_idx < tile:
+                            dprintf("SYSARR", f"gsau output row={row_idx} len={len(wb.get('data', []))}")
+                            if observed_rows[row_idx] is None:
+                                observed_rows[row_idx] = [int(x) for x in list(wb.get("data", []))[:tile]]
+                            metrics.count_output_row()
+                            state["pending_output_rows"].append(
+                                {
+                                    "row": row_idx,
+                                    "data": list(wb.get("data", [])),
+                                }
+                            )
+                            state["next_out_row"] += 1
+
+                if state["preload_done"]:
+                    while (
+                        state["weight_issue_row"] < tile
+                        and state["weight_loads_inflight"] < state["load_issue_window"]
+                    ):
+                        if not _issue_weight_load():
+                            break
+
+                if state["preload_done"] and state["weights_done"]:
+                    while (
+                        state["act_issue_row"] < tile
+                        and state["act_loads_inflight"] < state["load_issue_window"]
+                    ):
+                        if not _issue_act_load():
+                            break
+
+                while state["weights_done"] and state["ready_act_rows"]:
+                    adata = state["ready_act_rows"][0]
+                    if not vc.enqueue_scheduler_instruction(
                         {
                             "unit": "gsau",
-                            "vdata": wdata,
-                            "is_weight": True,
-                            "expect_output": False,
+                            "vdata": adata,
+                            "dst": OUT_REG,
+                            "is_weight": False,
+                            "expect_output": True,
+                            "dtype": "fp16",
+                        }
+                    ):
+                        break
+                    state["ready_act_rows"].pop(0)
+                    state["act_row"] += 1
+                    if state["act_row"] >= tile:
+                        sysarr_bridge.finish_inputs()
+                        break
+
+                while state["pending_output_rows"] and len(state["store_inflight"]) < state["store_issue_window"]:
+                    next_item = state["pending_output_rows"].pop(0)
+                    row_idx = next_item["row"]
+                    row_data = next_item["data"]
+                    dprintf("SYSARR", f"issue store row={row_idx}")
+                    if row_idx < 2:
+                        try:
+                            dprintf("SYSARR", f"store row_data head={row_data[:8]}")
+                            dprintf(
+                                "SYSARR",
+                                f"store row_data types head={[type(x) for x in row_data[:4]]}",
+                            )
+                            dprintf(
+                                "SYSARR",
+                                f"store row_data int head={[int(x) for x in row_data[:4]]}",
+                            )
+                            dprintf(
+                                "SYSARR",
+                                f"store row_data fp16 bits head={[_fp16_bits(x) for x in row_data[:4]]}",
+                            )
+                        except Exception as exc:
+                            dprintf("SYSARR", f"store row_data log failed: {exc}")
+                    assert vc.enqueue_memory(
+                        {
+                            "kind": "store",
+                            "vls": 1,
+                            "data": row_data,
+                            "addr": SPAD_OUT_BASE + row_idx,
                             "dtype": "fp16",
                         }
                     )
-                    state["weight_row"] += 1
-                    if state["weight_row"] >= tile:
-                        state["weights_done"] = True
-                        dprintf("SYSARR", "weights_done")
-
-                # Activation rows are launched only after the weight preload phase
-                # has completed. Each activation row generates one output row later.
-                elif src == "vlsu" and dst == A_REG and state["act_loads_inflight"] > 0:
-                    state["act_loads_inflight"] -= 1
-                    dprintf(
-                        "SYSARR",
-                        f"act load done row={state['act_loaded_rows']} len={len(wb.get('data', []))}",
-                    )
-                    adata = list(wb.get("data", []))
-                    state["bytes_load_act"] += len(adata) * 2
-                    metrics.count_act_load()
-                    nz = [i for i, v in enumerate(adata) if v != 0]
-                    if state["act_loaded_rows"] < 2:
-                        dprintf(
-                            "SYSARR",
-                            f"act data head={adata[:8]} nz_count={len(nz)} nz_idx_head={nz[:8]}",
-                        )
-                    state["ready_act_rows"].append(adata)
-                    state["act_loaded_rows"] += 1
-
-                # GSAU writebacks are the architectural outputs of the systolic
-                # pipeline. Hold them in order until the store side can accept them.
-                elif src == "gsau" and dst == OUT_REG:
-                    row_idx = state["next_out_row"]
-                    if row_idx < tile:
-                        dprintf("SYSARR", f"gsau output row={row_idx} len={len(wb.get('data', []))}")
-                        if observed_rows[row_idx] is None:
-                            observed_rows[row_idx] = [int(x) for x in list(wb.get("data", []))[:tile]]
-                        metrics.count_output_row()
-                        state["pending_output_rows"].append(
-                            {
-                                "row": row_idx,
-                                "data": list(wb.get("data", [])),
-                            }
-                        )
-                        state["next_out_row"] += 1
-
-            # Do not let the compute-side VLS traffic start until the backend has
-            # finished bulk-loading both source tiles into the scratchpad.
-            if state["preload_done"]:
-                while (
-                    state["weight_issue_row"] < tile
-                    and state["weight_loads_inflight"] < state["load_issue_window"]
-                ):
-                    if not _issue_weight_load():
-                        break
-
-            # TPU consumes activations only after all weights have been presented.
-            if state["preload_done"] and state["weights_done"]:
-                while (
-                    state["act_issue_row"] < tile
-                    and state["act_loads_inflight"] < state["load_issue_window"]
-                ):
-                    if not _issue_act_load():
-                        break
-
-            while state["weights_done"] and state["ready_act_rows"]:
-                adata = state["ready_act_rows"][0]
-                if not vc.enqueue_scheduler_instruction(
-                    {
-                        "unit": "gsau",
-                        "vdata": adata,
-                        "dst": OUT_REG,
-                        "is_weight": False,
-                        "expect_output": True,
-                        "dtype": "fp16",
-                    }
-                ):
-                    break
-                state["ready_act_rows"].pop(0)
-                state["act_row"] += 1
-                if state["act_row"] >= tile:
-                    sysarr_bridge.finish_inputs()
-                    break
-
-            # Once a row comes back from GSAU, turn it into a VLS store targeting
-            # the output region of the scratchpad. This mirrors the VRF->SPAD path
-            # before the backend later writes the row back to DRAM.
-            while state["pending_output_rows"] and len(state["store_inflight"]) < state["store_issue_window"]:
-                next_item = state["pending_output_rows"].pop(0)
-                row_idx = next_item["row"]
-                row_data = next_item["data"]
-                dprintf("SYSARR", f"issue store row={row_idx}")
-                if row_idx < 2:
-                    try:
-                        dprintf("SYSARR", f"store row_data head={row_data[:8]}")
-                        dprintf(
-                            "SYSARR",
-                            f"store row_data types head={[type(x) for x in row_data[:4]]}",
-                        )
-                        dprintf(
-                            "SYSARR",
-                            f"store row_data int head={[int(x) for x in row_data[:4]]}",
-                        )
-                        dprintf(
-                            "SYSARR",
-                            f"store row_data fp16 bits head={[_fp16_bits(x) for x in row_data[:4]]}",
-                        )
-                    except Exception as exc:
-                        dprintf("SYSARR", f"store row_data log failed: {exc}")
-                assert vc.enqueue_memory(
-                    {
-                        "kind": "store",
-                        "vls": 1,
+                    state["store_inflight"][row_idx] = {
                         "data": row_data,
-                        "addr": SPAD_OUT_BASE + row_idx,
-                        "dtype": "fp16",
+                        "age": 0,
                     }
-                )
-                state["store_inflight"][row_idx] = {
-                    "data": row_data,
-                    "age": 0,
-                }
 
-            completed_store_rows = []
-            for row_idx, store_meta in list(state["store_inflight"].items()):
-                # First wait for the VLS store to land in the scratchpad. Once the
-                # row is resident, kick a backend store so DRAM writeback uses the
-                # same path as the RTL bulk-memory engine.
-                spad_vec = _read_slot_vector_u16(spad, SPAD_OUT_BASE + row_idx, vc.vector_len, tile_id=1)
-                store_meta["age"] += 1
-                if spad_vec == (store_meta["data"] or []):
-                    dprintf("SYSARR", f"store complete row={row_idx}")
-                    if row_idx not in state["backend_store_rows"]:
-                        tx_id = backend_act.driver_to_backend_start_store(
-                            base_sp_addr=SPAD_OUT_BASE + row_idx,
-                            base_dram_addr=DRAM_OUT + row_idx * row_bytes,
-                            rows=1,
-                            cols=tile,
-                            callback=lambda _tx, row=row_idx: _on_backend_store_done(row, _tx),
+                completed_store_rows = []
+                for row_idx, store_meta in list(state["store_inflight"].items()):
+                    spad_vec = _read_slot_vector_u16(spad, SPAD_OUT_BASE + row_idx, vc.vector_len, tile_id=1)
+                    store_meta["age"] += 1
+                    if spad_vec == (store_meta["data"] or []):
+                        dprintf("SYSARR", f"store complete row={row_idx}")
+                        if row_idx not in state["backend_store_rows"]:
+                            tx_id = backend_act.driver_to_backend_start_store(
+                                base_sp_addr=SPAD_OUT_BASE + row_idx,
+                                base_dram_addr=DRAM_OUT + row_idx * row_bytes,
+                                rows=1,
+                                cols=tile,
+                                callback=lambda _tx, row=row_idx: _on_backend_store_done(row, _tx),
+                            )
+                            assert tx_id > 0
+                            state["backend_store_rows"].add(row_idx)
+                            state["backend_store_txs"][row_idx] = tx_id
+                        completed_store_rows.append(row_idx)
+                    elif store_meta["age"] > 1000:
+                        dprintf(
+                            "SYSARR",
+                            f"store stuck row={row_idx} spad_head={spad_vec[:4]} data_head={(store_meta['data'] or [])[:4]}",
                         )
-                        assert tx_id > 0
-                        state["backend_store_rows"].add(row_idx)
-                        state["backend_store_txs"][row_idx] = tx_id
-                    completed_store_rows.append(row_idx)
-                elif store_meta["age"] > 1000:
+                        raise AssertionError("store did not commit to scratchpad")
+                for row_idx in completed_store_rows:
+                    state["store_inflight"].pop(row_idx, None)
+
+                for row_idx in sorted(state["backend_store_tx_done"] - state["completed_rows"]):
+                    dram_row = _read_dram_row_u16(dram, DRAM_OUT + row_idx * row_bytes, tile)
+                    expected_row = observed_rows[row_idx] if row_idx < len(observed_rows) else None
+                    if expected_row is not None and dram_row == expected_row[:tile]:
+                        state["bytes_store_out"] += len(dram_row) * 2
+                        metrics.count_store_row()
+                        state["completed_rows"].add(row_idx)
+
+                metrics.count_cycle()
+                state["cycles"] += 1
+                q_depths = {
+                    "gsau_to_systolic": len(vc.gsau.to_systolic),
+                    "gsau_from_systolic": len(vc.gsau.from_systolic),
+                    "gsau_rd_queue": len(vc.gsau.rd_queue),
+                    "gsau_writebacks": len(vc.gsau.writebacks),
+                    "scheduler_packets": len(vc.scheduler_packets),
+                    "scheduler_build_gsau": len(vc._build_packet["gsau"]),
+                    "scheduler_build_vlsu": len(vc._build_packet["vlsu"]),
+                    "scheduler_build_datapath": len(vc._build_packet["datapath"]),
+                    "scheduler_packet_gsau": sum(len(pkt["gsau"]) for pkt in vc.vliw_q.items),
+                    "scheduler_packet_vlsu": sum(len(pkt["vlsu"]) for pkt in vc.vliw_q.items),
+                    "scheduler_packet_datapath": sum(len(pkt["datapath"]) for pkt in vc.vliw_q.items),
+                    "wb_buffer": len(vc.wb_buffer.entries),
+                    "vlsu_issue_q": sum(len(vls.issue_q) for vls in vc.vls_units),
+                    "vlsu_req_q": sum(len(vls.req_q) for vls in vc.vls_units),
+                    "vlsu_rsp_q": sum(len(vls.rsp_q) for vls in vc.vls_units),
+                    "vlsu_wb_q": sum(len(vls.wb_q) for vls in vc.vls_units),
+                    "vlsu_dst_fifo": sum(len(vls.load_dst_fifos[0]) for vls in vc.vls_units),
+                }
+                q_stats["samples"] += 1
+                for name, depth in q_depths.items():
+                    q_stats["sum"][name] = q_stats["sum"].get(name, 0) + depth
+                    q_stats["max"][name] = max(q_stats["max"].get(name, 0), depth)
+                if state["cycles"] % 500 == 0:
                     dprintf(
                         "SYSARR",
-                        f"store stuck row={row_idx} spad_head={spad_vec[:4]} data_head={(store_meta['data'] or [])[:4]}",
+                        "cycle=%d weight_row=%d act_row=%d out_row=%d completed=%d pending_out=%d"
+                        % (
+                            state["cycles"],
+                            state["weight_row"],
+                            state["act_row"],
+                            state["next_out_row"],
+                            len(state["completed_rows"]),
+                            len(state["pending_output_rows"]),
+                        ),
                     )
-                    raise AssertionError("store did not commit to scratchpad")
-            for row_idx in completed_store_rows:
-                state["store_inflight"].pop(row_idx, None)
+                if len(state["completed_rows"]) >= tile:
+                    self._finish()
+                    return
+                if state["cycles"] >= 20000:
+                    self._finish()
 
-            # Backend store completion is observed through the backend callback, then
-            # confirmed at the architectural boundary we care about: the row is now
-            # visible in DRAM.
-            for row_idx in sorted(state["backend_store_tx_done"] - state["completed_rows"]):
-                dram_row = _read_dram_row_u16(dram, DRAM_OUT + row_idx * row_bytes, tile)
-                expected_row = observed_rows[row_idx] if row_idx < len(observed_rows) else None
-                if expected_row is not None and dram_row == expected_row[:tile]:
-                    state["bytes_store_out"] += len(dram_row) * 2
-                    metrics.count_store_row()
-                    state["completed_rows"].add(row_idx)
-
-            metrics.count_cycle()
-            state["cycles"] += 1
-            # Queue backpressure tracking (max + average depth).
-            q_depths = {
-                "gsau_to_systolic": len(vc.gsau.to_systolic),
-                "gsau_from_systolic": len(vc.gsau.from_systolic),
-                "gsau_rd_queue": len(vc.gsau.rd_queue),
-                "gsau_writebacks": len(vc.gsau.writebacks),
-                "scheduler_packets": len(vc.scheduler_packets),
-                "scheduler_build_gsau": len(vc._build_packet["gsau"]),
-                "scheduler_build_vlsu": len(vc._build_packet["vlsu"]),
-                "scheduler_build_datapath": len(vc._build_packet["datapath"]),
-                "scheduler_packet_gsau": sum(len(pkt["gsau"]) for pkt in vc.vliw_q.items),
-                "scheduler_packet_vlsu": sum(len(pkt["vlsu"]) for pkt in vc.vliw_q.items),
-                "scheduler_packet_datapath": sum(len(pkt["datapath"]) for pkt in vc.vliw_q.items),
-                "wb_buffer": len(vc.wb_buffer.entries),
-                "vlsu_issue_q": sum(len(vls.issue_q) for vls in vc.vls_units),
-                "vlsu_req_q": sum(len(vls.req_q) for vls in vc.vls_units),
-                "vlsu_rsp_q": sum(len(vls.rsp_q) for vls in vc.vls_units),
-                "vlsu_wb_q": sum(len(vls.wb_q) for vls in vc.vls_units),
-                "vlsu_dst_fifo": sum(len(vls.load_dst_fifos[0]) for vls in vc.vls_units),
-            }
-            q_stats["samples"] += 1
-            for name, depth in q_depths.items():
-                q_stats["sum"][name] = q_stats["sum"].get(name, 0) + depth
-                q_stats["max"][name] = max(q_stats["max"].get(name, 0), depth)
-            if state["cycles"] % 500 == 0:
-                dprintf(
-                    "SYSARR",
-                    "cycle=%d weight_row=%d act_row=%d out_row=%d completed=%d pending_out=%d"
-                    % (
-                        state["cycles"],
-                        state["weight_row"],
-                        state["act_row"],
-                        state["next_out_row"],
-                        len(state["completed_rows"]),
-                        len(state["pending_output_rows"]),
-                    ),
-                )
-            if len(state["completed_rows"]) >= tile:
-                return
-            if state["cycles"] >= 20000:
-                return
-            eq.schedule(time + 1.0, _step, time + 1.0)
-
-        eq.schedule(0.0, _step, 0.0)
+        backend_ticker = RoundRobinBackendTicker(backends)
+        clk.objects = [vc, *vls_bridges, sysarr_bridge, backend_ticker, spad, TPUEndToEndHarness()]
+        clk.schedule_next(0.0)
         sim.run()
 
         if len(state["completed_rows"]) < tile:

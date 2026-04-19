@@ -680,8 +680,8 @@ class TiledTPUCosim:
             bridge.start_cycle()
         self.vc.tick()
         for bridge in self.vls_bridges:
-            bridge.tick()
-        self.sysarr_bridge.tick()
+            bridge.tick(self.global_cycle)
+        self.sysarr_bridge.tick(self.global_cycle)
         backend_count = len(self.backends)
         start_backend = self.global_cycle % backend_count if backend_count else 0
         for offset in range(backend_count):

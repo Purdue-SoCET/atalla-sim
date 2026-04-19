@@ -99,6 +99,39 @@ class StallHarness(Clocked):
             self.sa.set_control(weight_en=False, mac_shift=True, start=True, stall=False)
 
 
+class TPUGemmHarness(Clocked):
+    def __init__(self, sa: SystolicArrayTPU, weight_stream, activations):
+        super().__init__()
+        self.sa = sa
+        self.weight_stream = list(weight_stream)
+        self.activations = list(activations)
+        self.zero = [0.0] * self.sa.size
+
+    def tick(self, time: float) -> None:
+        cycle = int(time) - 1
+        weight_cycles = len(self.weight_stream)
+        act_cycles = len(self.activations)
+
+        if cycle < weight_cycles:
+            vec = self.weight_stream[cycle]
+            assert self.sa.enqueue_weights([float(x) for x in vec], dtype='fp16')
+            self.sa.set_control(weight_en=True, mac_shift=False, start=False, stall=False)
+            return
+
+        if cycle < weight_cycles + act_cycles:
+            vec = self.activations[cycle - weight_cycles]
+            assert self.sa.enqueue([float(x) for x in vec], dtype='fp16')
+            assert self.sa.enqueue_psums(self.zero, dtype='fp16')
+            self.sa.set_control(weight_en=False, mac_shift=True, start=True, stall=False)
+            return
+
+        flush_end = weight_cycles + act_cycles + self.sa.flush_cycles()
+        if cycle < flush_end:
+            assert self.sa.enqueue(self.zero, dtype='fp16', count_algo=False)
+            assert self.sa.enqueue_psums(self.zero, dtype='fp16')
+            self.sa.set_control(weight_en=False, mac_shift=True, start=True, stall=False)
+
+
 def test_systolic_array_weight_preload_shifts_right():
     eq, clk, sim = build_sim()
     sa = SystolicArrayTPU(size=4, dtype='fp16')
@@ -135,42 +168,22 @@ def test_systolic_array_stall_freezes_and_resumes():
 
 
 def test_systolic_array_tpu_gemm_32x32():
+    eq, clk, sim = build_sim()
     sa = SystolicArrayTPU(size=32, dtype='fp16')
     size = 32
 
     wgt = [[(i * size) + j + 1 for j in range(size)] for i in range(size)]
     act = [[1 if i == j else 0 for j in range(size)] for i in range(size)]
     wgt_stream = [[wgt[r][c] for r in range(size)] for c in range(size - 1, -1, -1)]
+    driver = TPUGemmHarness(sa, wgt_stream, act)
+    clk.add_clocked(driver)
+    clk.add_clocked(sa)
+    clk.schedule_next(0.0)
 
-    zero = [0.0] * size
-    out = []
-    out_read = 0
+    total_cycles = len(wgt_stream) + len(act) + sa.flush_cycles()
+    sim.run(until=float(total_cycles))
 
-    for vec in wgt_stream:
-        assert sa.enqueue_weights([float(x) for x in vec], dtype='fp16')
-        sa.set_control(weight_en=True, mac_shift=False, start=False, stall=False)
-        sa.tick()
-
-    for vec in act:
-        assert sa.enqueue([float(x) for x in vec], dtype='fp16')
-        assert sa.enqueue_psums(zero, dtype='fp16')
-        sa.set_control(weight_en=False, mac_shift=True, start=True, stall=False)
-        sa.tick()
-        buf = sa.get_buffer()
-        while out_read < len(buf):
-            out.append([int(float(x)) for x in buf[out_read]])
-            out_read += 1
-
-    for _ in range(sa.flush_cycles()):
-        assert sa.enqueue(zero, dtype='fp16', count_algo=False)
-        assert sa.enqueue_psums(zero, dtype='fp16')
-        sa.set_control(weight_en=False, mac_shift=True, start=True, stall=False)
-        sa.tick()
-        buf = sa.get_buffer()
-        while out_read < len(buf):
-            out.append([int(float(x)) for x in buf[out_read]])
-            out_read += 1
-
+    out = [[int(float(x)) for x in row] for row in sa.get_buffer()]
     assert out == wgt
 
 

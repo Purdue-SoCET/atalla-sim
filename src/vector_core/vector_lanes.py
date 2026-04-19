@@ -94,7 +94,7 @@ class LaneFUContext:
         indices: List[int],
         dst: int,
         reduce: bool,
-        dtype: DType,
+        dtype: Optional[object] = None,
     ):
         self.inst_id = inst_id
         self.op = op
@@ -104,7 +104,7 @@ class LaneFUContext:
         self.indices = indices
         self.dst = dst
         self.reduce = reduce
-        self.dtype = dtype
+        self.dtype = normalize_dtype(dtype, default=DType.FP16)
         self.cursor = 0
         self.last_sent = False
         self.pending_count = 0
@@ -187,6 +187,7 @@ class ResultCollector(Clocked):
         super().__init__()
         self.lane_count = lane_count
         self.vector_len = vector_len
+        self._tick = -1
         self.sink_capacity = max(1, sink_capacity)
         self.reduction_alu_latency = max(1, reduction_alu_latency)
         self.reduction_unit = GlobalReductionUnit(vector_len)
@@ -324,6 +325,10 @@ class ResultCollector(Clocked):
         state["completion_scheduled"] = True
 
     def tick(self, time: Optional[float] = None) -> None:
+        cycle = self._consume_tick(time, attr_name="_tick")
+        if cycle is None:
+            return
+
         next_pending = SimQueue(self.pending_reductions.max_size)
         while not self.pending_reductions.is_empty():
             item = self.pending_reductions.dequeue()
@@ -366,6 +371,7 @@ class VectorLane(Clocked):
 
         self.lane_id = lane_id
         self.lane_count = lane_count
+        self._tick = -1
         self.ops = _op_lut()
         self.fu_latencies = {
             "alu": 4,
@@ -402,7 +408,17 @@ class VectorLane(Clocked):
         self.fu_ctx[fu_name] = context
         return True
 
-    def tick(self, collector: ResultCollector) -> None:
+    def tick(self, time: Optional[float] = None, collector: Optional[ResultCollector] = None) -> None:
+        if collector is None and time is not None and not isinstance(time, (int, float)):
+            collector = time
+            time = None
+        if collector is None:
+            raise ValueError("collector is required")
+
+        cycle = self._consume_tick(time, attr_name="_tick")
+        if cycle is None:
+            return
+
         # Stage 1: sequencer routes one element/FU/cycle with ready/valid semantics.
         for fu_name, ctx in self.fu_ctx.items():
             if ctx is None:
@@ -456,7 +472,7 @@ class VectorLane(Clocked):
 
         # Stage 2: execute pipelines.
         for fu in self.fus.values():
-            fu.tick()
+            fu.tick(time)
 
         # Stage 3: pair FU output with metadata FIFO.
         for fu_name, fu in self.fus.items():
@@ -514,6 +530,7 @@ class VectorDatapath(Clocked):
         self.vector_len = veggie_size // FLOAT_SLOT_BITS
         self.lane_count = min(lane_count, self.vector_len)
         self.issue_width = issue_width
+        self._tick = -1
         self.next_inst_id = 0
         self.alu_latency = 4
         if fu_latencies and ("alu" in fu_latencies):
@@ -597,7 +614,11 @@ class VectorDatapath(Clocked):
         return True
 
     def tick(self, time: Optional[float] = None) -> None:
-        self.collector.tick()
+        cycle = self._consume_tick(time, attr_name="_tick")
+        if cycle is None:
+            return
+
+        self.collector.tick(cycle)
         issued = 0
         while (not self.pending_issue.is_empty()) and issued < self.issue_width:
             inst = self.pending_issue.peek()
@@ -634,7 +655,7 @@ class VectorDatapath(Clocked):
             issued += 1
 
         for lane in self.lanes:
-            lane.tick(self.collector)
+            lane.tick(cycle, self.collector)
 
         completed = self.collector.pop_completed()
         self.result_valid = completed is not None

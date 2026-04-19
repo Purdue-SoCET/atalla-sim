@@ -20,7 +20,11 @@ def test_crossbar_writes_debug_logs(tmp_path):
 
         ok_op = xbar.enqueue(shift_mask, vals)
         dropped_op = xbar.enqueue(shift_mask, vals)
-        completed = xbar.tick()
+        completed = []
+        for _ in range(2):
+            completed.extend(xbar.tick())
+            if completed:
+                break
 
         assert ok_op > 0
         assert dropped_op == -1
