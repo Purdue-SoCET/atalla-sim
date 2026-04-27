@@ -187,6 +187,7 @@ class TiledTPUCosim:
         tile_size: int = TILE,
         dtype: str = "fp16",
         spad_frontend_queue_size: int = 4,
+        backend_dram_burst_bytes: int = 32,
     ):
         self.matrix_size = int(matrix_size)
         self.tile_size = int(tile_size)
@@ -194,6 +195,7 @@ class TiledTPUCosim:
         assert self.matrix_size % self.tile_size == 0
         self.dtype = str(dtype)
         self.spad_frontend_queue_size = max(1, int(spad_frontend_queue_size))
+        self.backend_dram_burst_bytes = max(1, int(backend_dram_burst_bytes))
 
         self.W_REG = 1
         self.A_REG = 2
@@ -227,8 +229,11 @@ class TiledTPUCosim:
         self.gemm_cycle_records: List[Dict[str, int]] = []
         self.sdma_load_cycle_records: List[Dict[str, object]] = []
         self.queue_samples = 0
+        self.queue_valid_mac_samples = 0
         self.queue_depth_sums = {name: 0 for name in QUEUE_NAMES}
+        self.queue_depth_sums_valid_mac = {name: 0 for name in QUEUE_NAMES}
         self.queue_depth_max = {name: 0 for name in QUEUE_NAMES}
+        self._prev_sa_valid_mac_cycles = 0
         self.kernel_tag_info: Dict[str, Dict[str, int]] = {}
         self.kernel_path_spans: Dict[Tuple[str, str], KernelPathSpan] = {}
         self.sa_totals = {
@@ -400,9 +405,15 @@ class TiledTPUCosim:
             "vlsu_wb_q": sum(len(vls.wb_q) for vls in self.vc.vls_units),
             "vlsu_dst_fifo": sum(len(vls.load_dst_fifos[0]) for vls in self.vc.vls_units),
         }
+        had_valid_mac_this_cycle = int(self.sa.valid_mac_cycles) > int(self._prev_sa_valid_mac_cycles)
+        self._prev_sa_valid_mac_cycles = int(self.sa.valid_mac_cycles)
         self.queue_samples += 1
+        if had_valid_mac_this_cycle:
+            self.queue_valid_mac_samples += 1
         for name, depth in q_depths.items():
             self.queue_depth_sums[name] += depth
+            if had_valid_mac_this_cycle:
+                self.queue_depth_sums_valid_mac[name] += depth
             self.queue_depth_max[name] = max(self.queue_depth_max[name], depth)
 
     def _accumulate_sa_metrics(self) -> None:
@@ -484,6 +495,13 @@ class TiledTPUCosim:
             }
         else:
             queue_avg_depths = {name: 0.0 for name in QUEUE_NAMES}
+        if self.queue_valid_mac_samples:
+            queue_avg_depths_valid_mac = {
+                name: self.queue_depth_sums_valid_mac[name] / self.queue_valid_mac_samples
+                for name in QUEUE_NAMES
+            }
+        else:
+            queue_avg_depths_valid_mac = {name: 0.0 for name in QUEUE_NAMES}
         queue_max_depths = {name: self.queue_depth_max[name] for name in QUEUE_NAMES}
 
         if expected is None:
@@ -529,6 +547,8 @@ class TiledTPUCosim:
             "reuse_psum_internal_over_external": reuse_psum,
             "queue_max_depths": queue_max_depths,
             "queue_avg_depths": queue_avg_depths,
+            "queue_avg_depths_valid_mac": queue_avg_depths_valid_mac,
+            "queue_valid_mac_samples": self.queue_valid_mac_samples,
             "fp16_saturation_count": self.sa_totals["fp16_saturation_count"],
             "fp16_overflow_count": self.sa_totals["fp16_overflow_count"],
             "max_abs_error": max_abs_error,
@@ -537,6 +557,7 @@ class TiledTPUCosim:
             "tile_size": self.tile_size,
             "num_tiles": self.num_tiles,
             "spad_frontend_queue_size": self.spad_frontend_queue_size,
+            "backend_dram_burst_bytes": self.backend_dram_burst_bytes,
             "kernel_gantt_tag_count": len(self.kernel_tag_info),
             "kernel_gantt_span_count": len(self.kernel_path_spans),
             "prefetch_slots": 2,
@@ -559,7 +580,7 @@ class TiledTPUCosim:
             dram_block_bytes=256,
             backend_dram_latency=28,
             backend_dram_q_depth=16,
-            backend_dram_burst_bytes=32,
+            backend_dram_burst_bytes=self.backend_dram_burst_bytes,
             backend_delay_cycles=1,
             mirror=False,
             vls_bridge_cls=MetricsVLSFrontendBridge,
@@ -588,6 +609,7 @@ class TiledTPUCosim:
             mirror=None,
         )
         self.sysarr_bridge.trace_hook = self._trace_sysarr_event
+        self._prev_sa_valid_mac_cycles = 0
 
     def _slot_ready(self, base_addr: int, expected_rows: List[List[int]], tile_id: int = 0) -> bool:
         for row_idx, expected in enumerate(expected_rows):
@@ -1178,6 +1200,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Cycle-accurate tiled TPU co-sim")
     parser.add_argument("--matrix-size", type=int, default=MATRIX)
     parser.add_argument("--tile-size", type=int, default=TILE)
+    parser.add_argument("--backend-dram-burst-bytes", type=int, default=32)
     parser.add_argument(
         "--log-dir",
         type=str,
@@ -1189,7 +1212,12 @@ def main() -> None:
     wgt = _weights_matrix_u16(args.matrix_size)
     expected = _expected_tiled_fp16_accum(act, wgt, args.tile_size)
 
-    runner = TiledTPUCosim(matrix_size=args.matrix_size, tile_size=args.tile_size, dtype="fp16")
+    runner = TiledTPUCosim(
+        matrix_size=args.matrix_size,
+        tile_size=args.tile_size,
+        dtype="fp16",
+        backend_dram_burst_bytes=args.backend_dram_burst_bytes,
+    )
     got, _ = runner.run(act, wgt)
     stats = runner.build_stats(got, expected)
     if not np.array_equal(got, expected):

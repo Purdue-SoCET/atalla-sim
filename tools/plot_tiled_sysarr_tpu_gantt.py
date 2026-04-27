@@ -222,6 +222,9 @@ def _make_tag_label(tag_meta: Dict[str, str], rows: Sequence[Dict[str, str]]) ->
     tj_values = sorted({_to_int(row, "tj") for row in rows})
     tk_values = sorted({_to_int(row, "tk") for row in rows})
 
+    if len(ti_values) == 1 and len(tj_values) == 1 and len(tk_values) > 1:
+        return f"({_to_int(tag_meta, 'tk')}, {_to_int(tag_meta, 'slot')})"
+
     parts: List[str] = []
     if len(ti_values) > 1:
         parts.append(f"ti={_to_int(tag_meta, 'ti'):02d}")
@@ -229,7 +232,6 @@ def _make_tag_label(tag_meta: Dict[str, str], rows: Sequence[Dict[str, str]]) ->
         parts.append(f"tj={_to_int(tag_meta, 'tj'):02d}")
     if len(tk_values) > 1 or not parts:
         parts.append(f"tk={_to_int(tag_meta, 'tk'):02d}")
-    parts.append(f"slot={_to_int(tag_meta, 'slot')}")
     return " ".join(parts)
 
 
@@ -906,6 +908,10 @@ def plot_gantt(
     tile_drain_interval: Optional[Tuple[int, int]] = None,
     time_mode: str = "absolute",
 ) -> Path:
+    axis_label_fontsize = 18
+    tick_label_fontsize = 13
+    legend_fontsize = 15
+
     tags: List[str] = []
     tag_meta: Dict[str, Dict[str, str]] = {}
     for row in rows:
@@ -1011,7 +1017,7 @@ def plot_gantt(
                     f"tk={_to_int(row, 'tk'):02d}",
                     ha="center",
                     va="center",
-                    fontsize=7,
+                    fontsize=9,
                     color="#1f1f1f",
                     clip_on=True,
                     zorder=4,
@@ -1020,33 +1026,30 @@ def plot_gantt(
         if row_mode == "slot":
             axis.set_yticks(range(len(slot_keys)))
             if axis_index == 0:
-                axis.set_ylabel("prefetch slot")
+                axis.set_ylabel("prefetch slot", fontsize=axis_label_fontsize)
                 axis.set_yticklabels([f"slot={slot}" for slot in slot_keys])
             else:
                 axis.tick_params(axis="y", labelleft=False)
         else:
             axis.set_yticks(range(len(tags)))
             if axis_index == 0:
-                axis.set_ylabel("microkernel tag")
+                axis.set_ylabel("microkernel tag (tk, slot)", fontsize=axis_label_fontsize)
                 axis.set_yticklabels([_make_tag_label(tag_meta[tag], rows) for tag in tags])
             else:
                 axis.tick_params(axis="y", labelleft=False)
 
         axis.invert_yaxis()
         axis.grid(True, axis="x", alpha=0.25)
+        axis.tick_params(axis="both", labelsize=tick_label_fontsize)
         if time_mode == "clustered":
             cluster_span = max(1, cluster_end - cluster_start)
             cluster_pad = max(64, int(0.03 * cluster_span))
             axis.set_xlim(cluster_start - cluster_pad, cluster_end + cluster_pad)
-            if len(axis_list) > 1:
-                axis.set_title(f"{cluster_start:,}..{cluster_end:,}", fontsize=9)
 
     if len(axis_list) == 1:
-        axis_list[0].set_title(title)
-        axis_list[0].set_xlabel("cycle")
+        axis_list[0].set_xlabel("cycle", fontsize=axis_label_fontsize)
     else:
-        fig.suptitle(title)
-        fig.supxlabel("cycle")
+        fig.supxlabel("cycle", fontsize=axis_label_fontsize)
 
     legend_handles = [
         Patch(
@@ -1060,7 +1063,7 @@ def plot_gantt(
     if tile_drain_interval is not None:
         legend_handles.append(Patch(color=TILE_DRAIN_COLOR, label=TILE_DRAIN_LABEL, alpha=0.20))
     if legend_handles:
-        axis_list[-1].legend(handles=legend_handles, loc="upper right", fontsize=8, ncol=2)
+        axis_list[-1].legend(handles=legend_handles, loc="upper right", fontsize=legend_fontsize, ncol=2)
 
     if len(axis_list) == 1:
         fig.tight_layout()

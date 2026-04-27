@@ -15,7 +15,7 @@ SRC_DIR = REPO_ROOT / "src"
 BLOCKED_HARNESS_PATH = (
     REPO_ROOT / "tests" / "atalla" / "test_scratchpad_vector_core_sysarr_tpu_tiled_1024_blocked_mn.py"
 )
-DEFAULT_QUEUE_SIZES = list(range(1, 9))
+DEFAULT_BURST_BYTES = [4, 8, 16, 32, 64]
 
 if sys.version_info < (3, 7):
     raise SystemExit("This runner needs Python 3.7+. Try `python3.11`.")
@@ -27,7 +27,7 @@ if str(SRC_DIR) not in sys.path:
 
 
 def _load_blocked_harness_module():
-    spec = importlib.util.spec_from_file_location("_blocked_mn_sweep_harness", BLOCKED_HARNESS_PATH)
+    spec = importlib.util.spec_from_file_location("_blocked_mn_burst_sweep_harness", BLOCKED_HARNESS_PATH)
     if spec is None or spec.loader is None:
         raise ImportError(f"failed to load blocked harness from {BLOCKED_HARNESS_PATH}")
     module = importlib.util.module_from_spec(spec)
@@ -39,22 +39,18 @@ def _load_blocked_harness_module():
 blocked = _load_blocked_harness_module()
 
 
-def _build_run_name(weight_reuse_m: int, activation_reuse_n: int, queue_size: int) -> str:
-    return f"m{int(weight_reuse_m)}_n{int(activation_reuse_n)}_spad_frontend_queue_size_{int(queue_size)}"
+def _build_run_name(weight_reuse_m: int, activation_reuse_n: int, burst_bytes: int) -> str:
+    return (
+        f"m{int(weight_reuse_m)}_n{int(activation_reuse_n)}_"
+        f"backend_dram_burst_bytes_{int(burst_bytes)}"
+    )
 
 
 def _safe_json_dump(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def _queue_avg_over_valid_mac_cycles(result: Dict[str, Any], queue_name: str) -> float:
-    valid_mac_depths = result.get("queue_avg_depths_valid_mac") or {}
-    return float(valid_mac_depths.get(queue_name, 0.0) or 0.0)
-
-
 def _summary_row(result: Dict[str, Any]) -> Dict[str, Any]:
-    queue_max_depths = dict(result.get("queue_max_depths") or {})
-    queue_avg_depths = dict(result.get("queue_avg_depths") or {})
     return {
         "name": result.get("name"),
         "status": result.get("status"),
@@ -63,22 +59,16 @@ def _summary_row(result: Dict[str, Any]) -> Dict[str, Any]:
         "weight_reuse_m": result.get("weight_reuse_m"),
         "activation_reuse_n": result.get("activation_reuse_n"),
         "spad_frontend_queue_size": result.get("spad_frontend_queue_size"),
+        "backend_dram_burst_bytes": result.get("backend_dram_burst_bytes"),
         "cycles": result.get("cycles"),
         "mac_utilization": result.get("mac_utilization"),
         "mac_utilization_sysarr_active": result.get("mac_utilization_sysarr_active"),
-        "avg_active_pes_when_active": result.get("avg_active_pes_when_active"),
-        "avg_active_pes_during_compute_window": result.get("avg_active_pes_during_compute_window"),
-        "max_active_pes_in_any_cycle": result.get("max_active_pes_in_any_cycle"),
         "throughput_float_operations_per_cycle": result.get("throughput_float_operations_per_cycle"),
         "external_bandwidth_avg_bytes_per_cycle": result.get("external_bandwidth_avg_bytes_per_cycle"),
         "internal_bandwidth_bytes_per_cycle": result.get("internal_bandwidth_bytes_per_cycle"),
         "reuse_weight_internal_over_external": result.get("reuse_weight_internal_over_external"),
         "reuse_act_internal_over_external": result.get("reuse_act_internal_over_external"),
         "reuse_psum_internal_over_external": result.get("reuse_psum_internal_over_external"),
-        "gsau_rd_queue_max": queue_max_depths.get("gsau_rd_queue"),
-        "vlsu_dst_fifo_max": queue_max_depths.get("vlsu_dst_fifo"),
-        "gsau_rd_queue_avg": queue_avg_depths.get("gsau_rd_queue"),
-        "gsau_rd_queue_avg_valid_mac": _queue_avg_over_valid_mac_cycles(result, "gsau_rd_queue"),
         "error_type": result.get("error_type", ""),
         "error_message": result.get("error_message", ""),
     }
@@ -93,22 +83,16 @@ def _write_results_csv(path: Path, rows: Sequence[Dict[str, Any]]) -> None:
         "weight_reuse_m",
         "activation_reuse_n",
         "spad_frontend_queue_size",
+        "backend_dram_burst_bytes",
         "cycles",
         "mac_utilization",
         "mac_utilization_sysarr_active",
-        "avg_active_pes_when_active",
-        "avg_active_pes_during_compute_window",
-        "max_active_pes_in_any_cycle",
         "throughput_float_operations_per_cycle",
         "external_bandwidth_avg_bytes_per_cycle",
         "internal_bandwidth_bytes_per_cycle",
         "reuse_weight_internal_over_external",
         "reuse_act_internal_over_external",
         "reuse_psum_internal_over_external",
-        "gsau_rd_queue_max",
-        "vlsu_dst_fifo_max",
-        "gsau_rd_queue_avg",
-        "gsau_rd_queue_avg_valid_mac",
         "error_type",
         "error_message",
     ]
@@ -122,7 +106,7 @@ def _write_results_csv(path: Path, rows: Sequence[Dict[str, Any]]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Sweep scratchpad frontend queue size for the blocked tiled TPU harness. "
+            "Sweep backend dram burst width for the blocked tiled TPU harness. "
             "Defaults target the M=8, N=32 weight-stationary schedule."
         )
     )
@@ -130,10 +114,11 @@ def main() -> int:
     parser.add_argument("--tile-size", type=int, default=blocked.TILE)
     parser.add_argument("--weight-reuse-m", type=int, default=8)
     parser.add_argument("--activation-reuse-n", type=int, default=32)
-    parser.add_argument("--queue-sizes", nargs="*", type=int, default=DEFAULT_QUEUE_SIZES)
+    parser.add_argument("--spad-frontend-queue-size", type=int, default=4)
+    parser.add_argument("--burst-bytes", nargs="*", type=int, default=DEFAULT_BURST_BYTES)
     parser.add_argument(
         "--output-dir",
-        default=str(REPO_ROOT / "logs" / "blocked_m8_n32_spad_frontend_queue_sweep"),
+        default=str(REPO_ROOT / "logs" / "blocked_m8_n32_dram_burst_bytes_sweep"),
     )
     parser.add_argument(
         "--write-run-logs",
@@ -142,25 +127,26 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    queue_sizes = sorted({int(value) for value in args.queue_sizes if int(value) > 0})
-    if not queue_sizes:
-        raise SystemExit("queue sizes must contain at least one positive integer")
+    burst_bytes_values = sorted({int(value) for value in args.burst_bytes if int(value) > 0})
+    if not burst_bytes_values:
+        raise SystemExit("burst-bytes must contain at least one positive integer")
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     results: List[Dict[str, Any]] = []
     summary_rows: List[Dict[str, Any]] = []
-    for index, queue_size in enumerate(queue_sizes, start=1):
-        run_name = _build_run_name(args.weight_reuse_m, args.activation_reuse_n, queue_size)
-        print(f"[{index}/{len(queue_sizes)}] running {run_name}", flush=True)
+    for index, burst_bytes in enumerate(burst_bytes_values, start=1):
+        run_name = _build_run_name(args.weight_reuse_m, args.activation_reuse_n, burst_bytes)
+        print(f"[{index}/{len(burst_bytes_values)}] running {run_name}", flush=True)
         try:
             _, stats, runner = blocked.run_blocked_mn_tpu_cosim(
                 matrix_size=args.matrix_size,
                 tile_size=args.tile_size,
                 weight_reuse_m=args.weight_reuse_m,
                 activation_reuse_n=args.activation_reuse_n,
-                spad_frontend_queue_size=queue_size,
+                spad_frontend_queue_size=args.spad_frontend_queue_size,
+                backend_dram_burst_bytes=burst_bytes,
             )
             result: Dict[str, Any] = dict(stats)
             result.update(
@@ -172,10 +158,10 @@ def main() -> int:
             if args.write_run_logs:
                 blocked._write_logs(runner, stats, output_dir / run_name)
             print(
-                "  completed cycles=%s mac_util=%.6f"
+                "  completed cycles=%s ext_bw=%.6f"
                 % (
                     result.get("cycles"),
-                    float(result.get("mac_utilization", 0.0) or 0.0),
+                    float(result.get("external_bandwidth_avg_bytes_per_cycle", 0.0) or 0.0),
                 ),
                 flush=True,
             )
@@ -187,16 +173,13 @@ def main() -> int:
                 "tile_size": int(args.tile_size),
                 "weight_reuse_m": int(args.weight_reuse_m),
                 "activation_reuse_n": int(args.activation_reuse_n),
-                "spad_frontend_queue_size": int(queue_size),
+                "spad_frontend_queue_size": int(args.spad_frontend_queue_size),
+                "backend_dram_burst_bytes": int(burst_bytes),
                 "error_type": type(exc).__name__,
                 "error_message": str(exc),
                 "traceback": traceback.format_exc(),
             }
-            print(
-                "  failed error=%s"
-                % result["error_type"],
-                flush=True,
-            )
+            print("  failed error=%s" % result["error_type"], flush=True)
 
         results.append(result)
         summary_rows.append(_summary_row(result))
@@ -213,7 +196,8 @@ def main() -> int:
             "tile_size": int(args.tile_size),
             "weight_reuse_m": int(args.weight_reuse_m),
             "activation_reuse_n": int(args.activation_reuse_n),
-            "queue_sizes": queue_sizes,
+            "spad_frontend_queue_size": int(args.spad_frontend_queue_size),
+            "burst_bytes": burst_bytes_values,
             "write_run_logs": bool(args.write_run_logs),
             "run_count": len(results),
         },

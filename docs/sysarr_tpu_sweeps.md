@@ -83,6 +83,24 @@ This writes three PNGs under `logs/blocked_m8_n32_spad_frontend_queue_sweep/plot
 - `gsau_rd_queue_vs_spad_frontend_queue_size.png`
 - `blocked_mn_spad_frontend_queue_sweep_summary.png`
 
+For the GSAU RD queue plots, the average line is normalized by valid MAC cycles rather than total end-to-end cycles.
+That metric is emitted directly by the updated harness; older sweep JSONs do not contain it and should be rerun before plotting.
+
+## Blocked M/N Roofline Sweep
+
+For the `1024x1024` blocked reuse-policy roofline comparison, use:
+
+```bash
+python3.11 tools/run_blocked_mn_reuse_roofline_sweep.py
+python3.11 tools/plot_blocked_mn_reuse_roofline.py
+```
+
+The detailed workflow, outputs, and metric definitions are documented in
+`docs/blocked_mn_reuse_roofline_sweeps.md`.
+The runner now writes each invocation into a fresh timestamped run directory
+under `logs/roofline_study/blocked_mn_reuse_1024/`, and the plotter resolves
+the latest run automatically when `--input-dir` is omitted.
+
 ## What Gets Graphed
 
 Each sweep plot includes:

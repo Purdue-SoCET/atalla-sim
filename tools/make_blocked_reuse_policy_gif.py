@@ -30,6 +30,7 @@ OUT_IDLE = {"face": "#f5f5f5", "edge": "#c7c7c7", "text": "#7a7a7a", "lw": 1.1, 
 OUT_TARGET = {"face": "#ececec", "edge": "#bab0ac", "text": "#595959", "lw": 1.5, "hatch": None}
 OUT_DONE = {"face": "#d3bf55", "edge": "#9a8620", "text": "#382d00", "lw": 1.6, "hatch": None}
 OUT_ACTIVE = {"face": "#8cd17d", "edge": "#4f8c46", "text": "#10300c", "lw": 2.3, "hatch": None}
+OUT_BLOCK = {"face": "#e6f4df", "edge": "#6e9f57", "text": "#234216", "lw": 1.7, "hatch": None}
 
 SPAD_EMPTY = {"face": "#fbfbfb", "edge": "#c7c7c7", "text": "#999999", "lw": 1.0}
 SPAD_ACT = {"face": "#d9e7f5", "edge": "#4c78a8", "text": "#1f2d3a", "lw": 1.4}
@@ -131,50 +132,217 @@ def _draw_tile_grid(
         spine.set_linewidth(0.9)
 
 
-def _draw_scratchpad(ax: plt.Axes, frame: FrameSpec) -> None:
-    ax.set_title("Scratchpad Reuse Block", fontsize=13, pad=10)
-    ax.set_xlim(0, 8.3)
-    ax.set_ylim(6.2, 0)
+def _draw_scratchpad(
+    ax: plt.Axes,
+    frame: FrameSpec,
+    *,
+    title: str = "Scratchpad Reuse Block",
+    title_y: float = 1.0,
+    horizontal_layout: bool = False,
+    footer_text: Optional[str] = (
+        "Prefetch fills the block first. Then each W[k0,j] stays resident while A[i,k0] tiles stream."
+    ),
+) -> None:
+    ax.set_title(title, fontsize=13, pad=10, y=title_y)
+    if horizontal_layout:
+        ax.set_xlim(0, 8.3)
+        ax.set_ylim(5.1 if frame.next_preview else 4.15, 0)
+    else:
+        ax.set_xlim(0, 8.3)
+        ax.set_ylim(6.2, 0)
     ax.axis("off")
 
-    ax.text(1.5, 0.55, "activation buffers", ha="center", va="center", fontsize=11, fontweight="bold")
-    ax.text(4.65, 0.55, "resident weights", ha="center", va="center", fontsize=11, fontweight="bold")
-    if frame.next_preview:
-        ax.text(7.0, 0.55, "next k-slice", ha="center", va="center", fontsize=10.5, fontweight="bold", color="#6a4a00")
+    compact_headings = footer_text is None
+    header_size = 9.5 if compact_headings else 11
+    act_header = "A buffers" if compact_headings else "activation buffers"
+    wgt_header = "W resident" if compact_headings else "resident weights"
+    next_header = "next W" if compact_headings else "next k-slice"
 
-    for index in range(4):
-        label = frame.act_buffers[index] if index < len(frame.act_buffers) else None
-        style = SPAD_EMPTY
-        if label is not None:
-            style = SPAD_ACT_ACTIVE if frame.active_act_slot == index else SPAD_ACT
-        rect = Rectangle((0.45, 1.0 + index), 2.15, 0.82, facecolor=style["face"], edgecolor=style["edge"], linewidth=style["lw"])
-        ax.add_patch(rect)
-        ax.text(1.525, 1.41 + index, label or "empty", ha="center", va="center", fontsize=11, color=style["text"], fontweight="bold" if frame.active_act_slot == index else None)
+    if horizontal_layout:
+        act_label_y = 0.78 if compact_headings else 0.6
+        act_box_y = 1.08 if compact_headings else 0.92
+        wgt_label_y = 2.42 if compact_headings else 2.25
+        wgt_box_y = 2.72 if compact_headings else 2.52
 
-    for index in range(2):
-        label = frame.wgt_buffers[index] if index < len(frame.wgt_buffers) else None
-        style = SPAD_EMPTY
-        if label is not None:
-            style = SPAD_WGT_ACTIVE if frame.active_wgt_slot == index else SPAD_WGT
-        rect = Rectangle((3.55, 1.35 + 1.35 * index), 2.15, 1.02, facecolor=style["face"], edgecolor=style["edge"], linewidth=style["lw"])
-        ax.add_patch(rect)
-        ax.text(4.625, 1.86 + 1.35 * index, label or "empty", ha="center", va="center", fontsize=11, color=style["text"], fontweight="bold" if frame.active_wgt_slot == index else None)
-
-    if frame.next_preview:
-        for index, label in enumerate(frame.next_preview[:2]):
-            rect = Rectangle((6.15, 1.35 + 0.72 * index), 1.65, 0.52, facecolor=WGT_NEXT["face"], edgecolor=WGT_NEXT["edge"], linewidth=WGT_NEXT["lw"], hatch=WGT_NEXT["hatch"])
+        ax.text(0.4, act_label_y, act_header, ha="left", va="center", fontsize=header_size, fontweight="bold")
+        for index in range(4):
+            label = frame.act_buffers[index] if index < len(frame.act_buffers) else None
+            style = SPAD_EMPTY
+            if label is not None:
+                style = SPAD_ACT_ACTIVE if frame.active_act_slot == index else SPAD_ACT
+            x = 0.4 + 1.9 * index
+            rect = Rectangle((x, act_box_y), 1.55, 0.9, facecolor=style["face"], edgecolor=style["edge"], linewidth=style["lw"])
             ax.add_patch(rect)
-            ax.text(6.975, 1.61 + 0.72 * index, label, ha="center", va="center", fontsize=9.7, color=WGT_NEXT["text"])
+            ax.text(
+                x + 0.775,
+                act_box_y + 0.45,
+                label or "empty",
+                ha="center",
+                va="center",
+                fontsize=10.5,
+                color=style["text"],
+                fontweight="bold" if frame.active_act_slot == index else None,
+            )
 
-    ax.text(
-        4.1,
-        5.82,
-        "Prefetch fills the block first. Then each W[k0,j] stays resident while A[i,k0] tiles stream.",
-        ha="center",
-        va="bottom",
-        fontsize=9.5,
-        color="#444444",
+        ax.text(0.4, wgt_label_y, wgt_header, ha="left", va="center", fontsize=header_size, fontweight="bold")
+        for index in range(2):
+            label = frame.wgt_buffers[index] if index < len(frame.wgt_buffers) else None
+            style = SPAD_EMPTY
+            if label is not None:
+                style = SPAD_WGT_ACTIVE if frame.active_wgt_slot == index else SPAD_WGT
+            x = 0.4 + 1.95 * index
+            rect = Rectangle((x, wgt_box_y), 1.62, 0.96, facecolor=style["face"], edgecolor=style["edge"], linewidth=style["lw"])
+            ax.add_patch(rect)
+            ax.text(
+                x + 0.81,
+                wgt_box_y + 0.48,
+                label or "empty",
+                ha="center",
+                va="center",
+                fontsize=10.7,
+                color=style["text"],
+                fontweight="bold" if frame.active_wgt_slot == index else None,
+            )
+
+        if frame.next_preview:
+            next_label_y = 4.02
+            next_box_y = 4.28
+            ax.text(0.4, next_label_y, next_header, ha="left", va="center", fontsize=header_size, fontweight="bold", color="#6a4a00")
+            for index, label in enumerate(frame.next_preview[:2]):
+                x = 0.4 + 1.78 * index
+                rect = Rectangle((x, next_box_y), 1.45, 0.5, facecolor=WGT_NEXT["face"], edgecolor=WGT_NEXT["edge"], linewidth=WGT_NEXT["lw"], hatch=WGT_NEXT["hatch"])
+                ax.add_patch(rect)
+                ax.text(x + 0.725, next_box_y + 0.25, label, ha="center", va="center", fontsize=9.1, color=WGT_NEXT["text"])
+    else:
+        header_y = 0.82 if compact_headings else 0.55
+        ax.text(1.5, header_y, act_header, ha="center", va="center", fontsize=header_size, fontweight="bold")
+        ax.text(4.65, header_y, wgt_header, ha="center", va="center", fontsize=header_size, fontweight="bold")
+        if frame.next_preview:
+            ax.text(7.0, header_y, next_header, ha="center", va="center", fontsize=header_size, fontweight="bold", color="#6a4a00")
+
+        for index in range(4):
+            label = frame.act_buffers[index] if index < len(frame.act_buffers) else None
+            style = SPAD_EMPTY
+            if label is not None:
+                style = SPAD_ACT_ACTIVE if frame.active_act_slot == index else SPAD_ACT
+            rect = Rectangle((0.45, 1.0 + index), 2.15, 0.82, facecolor=style["face"], edgecolor=style["edge"], linewidth=style["lw"])
+            ax.add_patch(rect)
+            ax.text(1.525, 1.41 + index, label or "empty", ha="center", va="center", fontsize=11, color=style["text"], fontweight="bold" if frame.active_act_slot == index else None)
+
+        for index in range(2):
+            label = frame.wgt_buffers[index] if index < len(frame.wgt_buffers) else None
+            style = SPAD_EMPTY
+            if label is not None:
+                style = SPAD_WGT_ACTIVE if frame.active_wgt_slot == index else SPAD_WGT
+            rect = Rectangle((3.55, 1.35 + 1.35 * index), 2.15, 1.02, facecolor=style["face"], edgecolor=style["edge"], linewidth=style["lw"])
+            ax.add_patch(rect)
+            ax.text(4.625, 1.86 + 1.35 * index, label or "empty", ha="center", va="center", fontsize=11, color=style["text"], fontweight="bold" if frame.active_wgt_slot == index else None)
+
+        if frame.next_preview:
+            for index, label in enumerate(frame.next_preview[:2]):
+                rect = Rectangle((6.15, 1.35 + 0.72 * index), 1.65, 0.52, facecolor=WGT_NEXT["face"], edgecolor=WGT_NEXT["edge"], linewidth=WGT_NEXT["lw"], hatch=WGT_NEXT["hatch"])
+                ax.add_patch(rect)
+                ax.text(6.975, 1.61 + 0.72 * index, label, ha="center", va="center", fontsize=9.7, color=WGT_NEXT["text"])
+
+    if footer_text:
+        ax.text(
+            4.1,
+            5.82,
+            footer_text,
+            ha="center",
+            va="bottom",
+            fontsize=9.5,
+            color="#444444",
+        )
+
+
+def _draw_reuse_schedule(
+    ax: plt.Axes,
+    *,
+    weight_reuse_m: int,
+    activation_reuse_n: int,
+    k_index: int,
+    j_start: int,
+) -> None:
+    ax.set_title("4. Reuse Schedule", fontsize=13, pad=10)
+    ax.set_xlim(0, activation_reuse_n + 0.42)
+    ax.set_ylim(weight_reuse_m, 0)
+    ax.set_xticks(
+        [index + 0.5 for index in range(activation_reuse_n)],
+        [_tile_name("A", index, k_index) for index in range(activation_reuse_n)],
     )
+    ax.set_yticks(
+        [index + 0.5 for index in range(weight_reuse_m)],
+        [_tile_name("W", k_index, j_start + index) for index in range(weight_reuse_m)],
+    )
+    ax.tick_params(length=0, labelsize=10)
+    ax.set_aspect("equal")
+    ax.grid(False)
+
+    for row in range(weight_reuse_m):
+        for col in range(activation_reuse_n):
+            rect = Rectangle(
+                (col, row),
+                1.0,
+                1.0,
+                facecolor="#eef6ea",
+                edgecolor="#6e9f57",
+                linewidth=1.4,
+            )
+            ax.add_patch(rect)
+            ax.text(
+                col + 0.5,
+                row + 0.56,
+                _tile_name("C", col, j_start + row),
+                ha="center",
+                va="center",
+                fontsize=10.2,
+                color="#214017",
+                fontweight="bold",
+            )
+            ax.text(
+                col + 0.16,
+                row + 0.2,
+                str(row * activation_reuse_n + col + 1),
+                ha="center",
+                va="center",
+                fontsize=8.2,
+                color="#5d7d4a",
+            )
+
+    for row in range(weight_reuse_m):
+        arrow_y = row + 0.84
+        ax.annotate(
+            "",
+            xy=(activation_reuse_n - 0.2, arrow_y),
+            xytext=(0.18, arrow_y),
+            arrowprops={
+                "arrowstyle": "->",
+                "lw": 1.3,
+                "color": "#4f8c46",
+                "alpha": 0.88,
+                "mutation_scale": 12,
+            },
+            zorder=0,
+        )
+        if row + 1 < weight_reuse_m:
+            ax.annotate(
+                "",
+                xy=(activation_reuse_n + 0.18, row + 1.16),
+                xytext=(activation_reuse_n + 0.18, row + 0.86),
+                arrowprops={
+                    "arrowstyle": "->",
+                    "lw": 1.2,
+                    "color": "#4f8c46",
+                    "alpha": 0.88,
+                    "mutation_scale": 11,
+                },
+                zorder=0,
+            )
+
+    for spine in ax.spines.values():
+        spine.set_color("#888888")
+        spine.set_linewidth(0.9)
 
 
 def _frame_to_image(fig: plt.Figure) -> Image.Image:
@@ -183,13 +351,19 @@ def _frame_to_image(fig: plt.Figure) -> Image.Image:
     return Image.fromarray(rgba[:, :, :3])
 
 
-def _build_frames(tile_grid: int, weight_reuse_m: int, activation_reuse_n: int, k_index: int) -> Tuple[List[FrameSpec], List[int]]:
+def _build_frames(
+    tile_grid: int,
+    weight_reuse_m: int,
+    activation_reuse_n: int,
+    k_index: int,
+    j_start: int,
+) -> Tuple[List[FrameSpec], List[int]]:
     act_tiles = {_tile for _tile in [(row, k_index) for row in range(activation_reuse_n)]}
-    wgt_tiles = {_tile for _tile in [(k_index, col) for col in range(weight_reuse_m)]}
-    out_tiles = {(row, col) for row in range(activation_reuse_n) for col in range(weight_reuse_m)}
+    wgt_tiles = {_tile for _tile in [(k_index, j_start + col) for col in range(weight_reuse_m)]}
+    out_tiles = {(row, j_start + col) for row in range(activation_reuse_n) for col in range(weight_reuse_m)}
 
     act_buffers = [_tile_name("A", row, k_index) for row in range(activation_reuse_n)]
-    wgt_buffers = [_tile_name("W", k_index, col) for col in range(weight_reuse_m)]
+    wgt_buffers = [_tile_name("W", k_index, j_start + col) for col in range(weight_reuse_m)]
 
     frames: List[FrameSpec] = [
         FrameSpec(
@@ -219,15 +393,16 @@ def _build_frames(tile_grid: int, weight_reuse_m: int, activation_reuse_n: int, 
 
     done_outputs: Set[Tile] = set()
     for col in range(weight_reuse_m):
+        j_index = j_start + col
         frames.append(
             FrameSpec(
                 caption=(
-                    f"Resident weight {_tile_name('W', k_index, col)} stays in the TPU. "
-                    f"The selected A[:,k{k_index}] tiles now stream past it and accumulate into output column j{col}."
+                    f"Resident weight {_tile_name('W', k_index, j_index)} stays in the TPU. "
+                    f"The selected A[:,k{k_index}] tiles now stream past it and accumulate into output column j{j_index}."
                 ),
                 act_selected=act_tiles,
                 wgt_selected=wgt_tiles,
-                wgt_active=(k_index, col),
+                wgt_active=(k_index, j_index),
                 out_targets=out_tiles,
                 out_done=set(done_outputs),
                 act_buffers=act_buffers,
@@ -237,18 +412,18 @@ def _build_frames(tile_grid: int, weight_reuse_m: int, activation_reuse_n: int, 
         )
         durations.append(1000)
         for row in range(activation_reuse_n):
-            active_output = (row, col)
+            active_output = (row, j_index)
             frames.append(
                 FrameSpec(
                     caption=(
-                        f"Accumulate the k{k_index} contribution into {_tile_name('C', row, col)}: "
-                        f"{_tile_name('C', row, col)} += {_tile_name('A', row, k_index)} @ {_tile_name('W', k_index, col)}. "
-                        f"The final {_tile_name('C', row, col)} still needs the other k slices."
+                        f"Accumulate the k{k_index} contribution into {_tile_name('C', row, j_index)}: "
+                        f"{_tile_name('C', row, j_index)} += {_tile_name('A', row, k_index)} @ {_tile_name('W', k_index, j_index)}. "
+                        f"The final {_tile_name('C', row, j_index)} still needs the other k slices."
                     ),
                     act_selected=act_tiles,
                     act_active=(row, k_index),
                     wgt_selected=wgt_tiles,
-                    wgt_active=(k_index, col),
+                    wgt_active=(k_index, j_index),
                     out_targets=out_tiles,
                     out_done=set(done_outputs),
                     out_active=active_output,
@@ -262,9 +437,8 @@ def _build_frames(tile_grid: int, weight_reuse_m: int, activation_reuse_n: int, 
             done_outputs.add(active_output)
 
     next_k_index = k_index + 1
-    next_weight_tiles = {(next_k_index, col) for col in range(weight_reuse_m)} if next_k_index < tile_grid else set()
-    next_preview = [_tile_name("W", next_k_index, col) for col in range(weight_reuse_m)] if next_k_index < tile_grid else []
-    next_act_preview = [_tile_name("A", row, next_k_index) for row in range(activation_reuse_n)] if next_k_index < tile_grid else []
+    next_weight_tiles = {(next_k_index, j_start + col) for col in range(weight_reuse_m)} if next_k_index < tile_grid else set()
+    next_preview = [_tile_name("W", next_k_index, j_start + col) for col in range(weight_reuse_m)] if next_k_index < tile_grid else []
     frames.append(
         FrameSpec(
             caption=(
@@ -394,8 +568,127 @@ def _render_frame(tile_grid: int, weight_reuse_m: int, activation_reuse_n: int, 
     return image
 
 
-def make_gif(output_path: Path, *, tile_grid: int, weight_reuse_m: int, activation_reuse_n: int, k_index: int) -> Path:
-    frames, durations = _build_frames(tile_grid, weight_reuse_m, activation_reuse_n, k_index)
+def make_strategy_figure(
+    output_path: Path,
+    *,
+    tile_grid: int,
+    weight_reuse_m: int,
+    activation_reuse_n: int,
+    k_index: int,
+    j_start: int,
+) -> Path:
+    act_tiles = {(row, k_index) for row in range(activation_reuse_n)}
+    wgt_tiles = {(k_index, j_start + col) for col in range(weight_reuse_m)}
+    out_tiles = {(row, j_start + col) for row in range(activation_reuse_n) for col in range(weight_reuse_m)}
+    frame = FrameSpec(
+        caption="",
+        act_selected=act_tiles,
+        wgt_selected=wgt_tiles,
+        out_targets=out_tiles,
+        act_buffers=[_tile_name("A", row, k_index) for row in range(activation_reuse_n)],
+        wgt_buffers=[_tile_name("W", k_index, j_start + col) for col in range(weight_reuse_m)],
+    )
+
+    fig = plt.figure(figsize=(11.0, 8.5))
+    fig.patch.set_facecolor("white")
+    grid = fig.add_gridspec(2, 3, width_ratios=[1.0, 1.0, 1.36], height_ratios=[1.0, 1.0])
+    axes = {
+        "act": fig.add_subplot(grid[0, 0]),
+        "wgt": fig.add_subplot(grid[1, 0]),
+        "spad": fig.add_subplot(grid[0, 1]),
+        "out": fig.add_subplot(grid[1, 1]),
+        "sched": fig.add_subplot(grid[:, 2]),
+    }
+
+    _draw_tile_grid(
+        axes["act"],
+        title="1a. Activation Tile Set",
+        prefix="A",
+        row_prefix="i",
+        col_prefix="k",
+        rows=tile_grid,
+        cols=tile_grid,
+        default_style=ACT_IDLE,
+        selected=frame.act_selected,
+        selected_style=ACT_SELECTED,
+        active=None,
+        active_style=ACT_ACTIVE,
+        done=set(),
+        done_style=None,
+        next_tiles=set(),
+        next_style=None,
+    )
+    _draw_tile_grid(
+        axes["wgt"],
+        title="1b. Resident Weight Set",
+        prefix="W",
+        row_prefix="k",
+        col_prefix="j",
+        rows=tile_grid,
+        cols=tile_grid,
+        default_style=WGT_IDLE,
+        selected=frame.wgt_selected,
+        selected_style=WGT_SELECTED,
+        active=None,
+        active_style=WGT_ACTIVE,
+        done=set(),
+        done_style=None,
+        next_tiles=set(),
+        next_style=None,
+    )
+    _draw_scratchpad(
+        axes["spad"],
+        frame,
+        title="2. Scratchpad Block",
+        title_y=0.875,
+        horizontal_layout=True,
+        footer_text=None,
+    )
+    _draw_tile_grid(
+        axes["out"],
+        title="3. PSUM Output Block",
+        prefix="C",
+        row_prefix="i",
+        col_prefix="j",
+        rows=tile_grid,
+        cols=tile_grid,
+        default_style=OUT_IDLE,
+        selected=frame.out_targets,
+        selected_style=OUT_BLOCK,
+        active=None,
+        active_style=OUT_ACTIVE,
+        done=set(),
+        done_style=None,
+        next_tiles=set(),
+        next_style=None,
+    )
+    _draw_reuse_schedule(
+        axes["sched"],
+        weight_reuse_m=weight_reuse_m,
+        activation_reuse_n=activation_reuse_n,
+        k_index=k_index,
+        j_start=j_start,
+    )
+
+    fig.tight_layout(rect=(0.02, 0.03, 0.98, 0.98), h_pad=2.2, w_pad=2.1)
+    spad_pos = axes["spad"].get_position()
+    axes["spad"].set_position([spad_pos.x0, spad_pos.y0 - 0.012, spad_pos.width, spad_pos.height])
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+    return output_path
+
+
+def make_gif(
+    output_path: Path,
+    *,
+    tile_grid: int,
+    weight_reuse_m: int,
+    activation_reuse_n: int,
+    k_index: int,
+    j_start: int,
+) -> Path:
+    frames, durations = _build_frames(tile_grid, weight_reuse_m, activation_reuse_n, k_index, j_start)
     images = [
         _render_frame(
             tile_grid=tile_grid,
@@ -430,6 +723,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight-reuse-m", type=int, default=2, help="Resident weight tiles per block.")
     parser.add_argument("--activation-reuse-n", type=int, default=4, help="Activation tiles streamed per resident weight.")
     parser.add_argument("--k-index", type=int, default=0, help="Reduction tile index to illustrate.")
+    parser.add_argument("--j-start", type=int, default=0, help="Starting output-column / weight-column tile index for the block.")
+    parser.add_argument(
+        "--page-output",
+        type=Path,
+        default=None,
+        help="Optional path for a clean letter-sized static strategy figure.",
+    )
     return parser.parse_args()
 
 
@@ -445,6 +745,22 @@ def main() -> None:
         raise SystemExit("--activation-reuse-n cannot exceed --tile-grid")
     if args.k_index < 0 or args.k_index >= args.tile_grid:
         raise SystemExit("--k-index must be within the tile grid")
+    if args.j_start < 0 or args.j_start >= args.tile_grid:
+        raise SystemExit("--j-start must be within the tile grid")
+    if args.j_start + args.weight_reuse_m > args.tile_grid:
+        raise SystemExit("--j-start + --weight-reuse-m cannot exceed --tile-grid")
+
+    if args.page_output is not None:
+        output_path = make_strategy_figure(
+            args.page_output,
+            tile_grid=args.tile_grid,
+            weight_reuse_m=args.weight_reuse_m,
+            activation_reuse_n=args.activation_reuse_n,
+            k_index=args.k_index,
+            j_start=args.j_start,
+        )
+        print(f"wrote {output_path}")
+        return
 
     output_path = make_gif(
         args.output,
@@ -452,6 +768,7 @@ def main() -> None:
         weight_reuse_m=args.weight_reuse_m,
         activation_reuse_n=args.activation_reuse_n,
         k_index=args.k_index,
+        j_start=args.j_start,
     )
     print(f"wrote {output_path}")
 

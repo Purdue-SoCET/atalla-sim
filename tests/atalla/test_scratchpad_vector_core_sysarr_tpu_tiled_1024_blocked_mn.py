@@ -170,6 +170,7 @@ class MNReuseBlockedTPUCosim(TiledTPUCosim):
         activation_reuse_n: int = 1,
         dtype: str = "fp16",
         spad_frontend_queue_size: int = 4,
+        backend_dram_burst_bytes: int = 32,
     ):
         self.weight_reuse_m = max(1, int(weight_reuse_m))
         self.activation_reuse_n = max(1, int(activation_reuse_n))
@@ -178,6 +179,7 @@ class MNReuseBlockedTPUCosim(TiledTPUCosim):
             tile_size=tile_size,
             dtype=dtype,
             spad_frontend_queue_size=spad_frontend_queue_size,
+            backend_dram_burst_bytes=backend_dram_burst_bytes,
         )
         self.weight_reuse_m = min(self.weight_reuse_m, self.num_tiles)
         self.activation_reuse_n = min(self.activation_reuse_n, self.num_tiles)
@@ -1079,6 +1081,7 @@ def run_blocked_mn_tpu_cosim(
     weight_reuse_m: int = 1,
     activation_reuse_n: int = 1,
     spad_frontend_queue_size: int = 4,
+    backend_dram_burst_bytes: int = 32,
 ) -> Tuple[np.ndarray, Dict[str, int], MNReuseBlockedTPUCosim]:
     act = _act_matrix_u16(matrix_size)
     wgt = _weights_matrix_u16(matrix_size)
@@ -1089,6 +1092,7 @@ def run_blocked_mn_tpu_cosim(
         activation_reuse_n=activation_reuse_n,
         dtype="fp16",
         spad_frontend_queue_size=spad_frontend_queue_size,
+        backend_dram_burst_bytes=backend_dram_burst_bytes,
     )
     expected = _expected_tiled_fp16_accum(act, wgt, tile_size)
     got, _ = runner.run(act, wgt)
@@ -1451,6 +1455,7 @@ def main() -> None:
     parser.add_argument("--weight-reuse-m", type=int, default=1)
     parser.add_argument("--activation-reuse-n", type=int, default=1)
     parser.add_argument("--spad-frontend-queue-size", type=int, default=4)
+    parser.add_argument("--backend-dram-burst-bytes", type=int, default=32)
     parser.add_argument(
         "--log-dir",
         type=str,
@@ -1469,6 +1474,7 @@ def main() -> None:
         activation_reuse_n=args.activation_reuse_n,
         dtype="fp16",
         spad_frontend_queue_size=args.spad_frontend_queue_size,
+        backend_dram_burst_bytes=args.backend_dram_burst_bytes,
     )
     got, _ = runner.run(act, wgt)
     stats = runner.build_stats(got, expected)
