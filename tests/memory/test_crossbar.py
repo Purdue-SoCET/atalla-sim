@@ -6,7 +6,7 @@ from base.clock_domain import ClockDomain
 from base.core import Core
 from base.sim import Sim
 
-from scratchpad.crossbar import Xbar
+from memory.crossbar import Xbar
 
 def build_sim():
     eq = EventQueue()
@@ -23,14 +23,21 @@ def test_crossbar_basic():
     # Set a small queue size for overflow testing
     x = Xbar(delay=3, num_banks=8, max_size=2)
 
-    # try registering with clock domain if supported by the model
-    try:
-        clk.add_clocked(x)
-    except Exception:
-        pass
-
     results = []
     completions = []
+
+    orig_tick = x.tick
+
+    def tick_and_collect(time=None):
+        comp = orig_tick(time)
+        if comp:
+            completions.extend(comp)
+            print(f"[{time}] Completed: {comp}")
+        return comp
+
+    x.tick = tick_and_collect
+    clk.add_clocked(x)
+    clk.schedule_next(0.0)
 
     def cb(out):
         results.append(out)
@@ -53,18 +60,6 @@ def test_crossbar_basic():
     print("submitted xbar ops", op_id1, op_id2, op_id3)
     assert op_id1 > 0 and op_id2 > 0, "First two ops should succeed"
     assert op_id3 == -1, "Third op should fail due to queue overflow"
-
-    def tick_and_collect(time):
-        comp = x.tick()
-        if comp:
-            completions.extend(comp)
-            print(f"[{time}] Completed: {comp}")
-
-    eq.schedule(0.1, tick_and_collect, 0.1)
-    eq.schedule(1.1, tick_and_collect, 1.1)
-    eq.schedule(2.1, tick_and_collect, 2.1)
-    eq.schedule(3.1, tick_and_collect, 3.1)
-    eq.schedule(4.1, tick_and_collect, 4.1)
 
     sim.run(until=5.0)
 
@@ -89,5 +84,60 @@ def test_crossbar_basic():
 
     print("crossbar test passed.")
 
+
+def test_crossbar_pipeline_staggers_completions():
+    x = Xbar(delay=3, num_banks=4)
+
+    shift_mask = [0, 1, 2, 3]
+    inputs = [10, 11, 12, 13]
+
+    op1 = x.enqueue(shift_mask, inputs)
+    op2 = x.enqueue(shift_mask, inputs)
+    op3 = x.enqueue(shift_mask, inputs)
+
+    assert op1 > 0 and op2 > 0 and op3 > 0
+
+    completion_cycles = {}
+    for cycle in range(6):
+        for op_id, _out in x.tick():
+            completion_cycles[op_id] = cycle
+
+    assert completion_cycles[op1] == 3
+    assert completion_cycles[op2] == 4
+    assert completion_cycles[op3] == 5
+
+
+def test_crossbar_backpressure_stalls_tail_until_sink_accepts():
+    x = Xbar(delay=3, num_banks=4)
+
+    shift_mask = [0, 1, 2, 3]
+    inputs = [10, 11, 12, 13]
+
+    attempts = {"op1": 0, "op2": 0}
+
+    def cb1(_out):
+        attempts["op1"] += 1
+        return attempts["op1"] >= 2
+
+    def cb2(_out):
+        attempts["op2"] += 1
+        return True
+
+    op1 = x.enqueue(shift_mask, inputs, callback=cb1)
+    op2 = x.enqueue(shift_mask, inputs, callback=cb2)
+
+    completion_cycles = {}
+    for cycle in range(7):
+        for op_id, _out in x.tick():
+            completion_cycles[op_id] = cycle
+
+    assert attempts["op1"] == 2
+    assert attempts["op2"] == 1
+    assert completion_cycles[op1] == 4
+    assert completion_cycles[op2] == 5
+    assert x.get_stats()["total_retire_stalls"] == 1
+
 if __name__ == "__main__":
     test_crossbar_basic()
+    test_crossbar_pipeline_staggers_completions()
+    test_crossbar_backpressure_stalls_tail_until_sink_accepts()

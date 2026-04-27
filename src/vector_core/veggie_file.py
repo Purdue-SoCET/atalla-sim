@@ -1,11 +1,12 @@
 from base.clocked_object import Clocked
 from collections import defaultdict
+from typing import Optional
 
 Time = float
 
 class VBank:
     def __init__(self, rows, width):
-        self.mem = [[0]*width for _ in range(rows)]
+        self.mem = [[0.0] * width for _ in range(rows)]
 
     def read(self, addr):
         return self.mem[addr]
@@ -23,8 +24,9 @@ class Veggie(Clocked):
         self.mask_banks = mask_banks
 
         # register storage
-        self.data_banks = [[0] * regs_per_bank for _ in range(bank_count)]
-        self.mask_banks_data = [[0] * regs_per_bank for _ in range(mask_banks)]
+        self.data_banks = [[0.0] * regs_per_bank for _ in range(bank_count)]
+        self.dtype_banks = [[None] * regs_per_bank for _ in range(bank_count)]
+        self.mask_banks_data = [[0.0] * regs_per_bank for _ in range(mask_banks)]
 
         # connection endpoints
         self.inp = None
@@ -38,7 +40,7 @@ class Veggie(Clocked):
         self.inp = inp
         self.out = out
 
-    def tick(self):
+    def tick(self, time: Optional[Time] = None):
         if not self.inp:
             return
 
@@ -95,7 +97,7 @@ class OpBuffer(Clocked):
         self.inp = inp
         self.out = out
 
-    def tick(self):
+    def tick(self, time: Optional[Time] = None):
         if not self.inp:
             return
 

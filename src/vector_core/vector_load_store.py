@@ -34,6 +34,7 @@ class VectorLoadStoreUnit(Clocked):
             raise ValueError("scratchpad_count must be > 0")
 
         self.scratchpad_count = scratchpad_count
+        self._tick = -1
         self.load_response_latency = max(1, load_response_latency)
         self.read_vreg_cb = read_vreg_cb
         self.write_vreg_cb = write_vreg_cb
@@ -144,6 +145,8 @@ class VectorLoadStoreUnit(Clocked):
                     "vl": op.get("vl"),
                     "eew": op.get("eew"),
                     "swizzle": op.get("swizzle"),
+                    "dtype": op.get("dtype"),
+                    "meta": dict(op.get("meta", {}) or {}),
                 }
             ):
                 return
@@ -158,6 +161,7 @@ class VectorLoadStoreUnit(Clocked):
                 "stride": op.get("stride"),
                 "swizzle": op.get("swizzle"),
                 "mask": op.get("mask"),
+                "meta": dict(op.get("meta", {}) or {}),
             }
             if not self.req_q.enqueue(req):
                 _ = self.load_dst_fifos[spad].dequeue()
@@ -183,6 +187,7 @@ class VectorLoadStoreUnit(Clocked):
                 "mask": op.get("mask"),
                 "data": store_data,
                 "vs": op.get("vs"),
+                "meta": dict(op.get("meta", {}) or {}),
             }
             if not self.req_q.enqueue(req):
                 return
@@ -203,6 +208,8 @@ class VectorLoadStoreUnit(Clocked):
 
         _ = self.load_dst_fifos[spad].dequeue()
         _ = self.rsp_q.dequeue()
+        merged_meta = dict(dst_tag.get("meta", {}) or {})
+        merged_meta.update(dict(rsp.get("meta", {}) or {}))
         wb = {
             "scratchpad": spad,
             "vd": dst_tag["vd"],
@@ -211,8 +218,9 @@ class VectorLoadStoreUnit(Clocked):
             "vl": dst_tag.get("vl"),
             "eew": dst_tag.get("eew"),
             "swizzle": dst_tag.get("swizzle"),
+            "dtype": dst_tag.get("dtype"),
             "addr": rsp.get("addr"),
-            "meta": rsp.get("meta"),
+            "meta": merged_meta,
         }
         if not self.wb_q.enqueue(wb):
             raise RuntimeError("writeback queue overflow")
@@ -234,7 +242,11 @@ class VectorLoadStoreUnit(Clocked):
         self.rsp_valid = self.last_rsp is not None
         self.wb_valid = self.last_wb is not None
 
-    def tick(self) -> None:
+    def tick(self, time: Optional[float] = None) -> None:
+        cycle = self._consume_tick(time, attr_name="_tick")
+        if cycle is None:
+            return
+
         # One issue and one response are processed per cycle.
         self._issue_one()
         self._handle_one_response()

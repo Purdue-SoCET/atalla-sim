@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import heapq
 from typing import Callable, Optional, List, Dict, Tuple, Any
 
 from base.clocked_object import Clocked
@@ -16,7 +17,7 @@ from base.queue import SimQueue
 def _noop_cb(_: Optional[bytes]) -> None:
     return None
 
-@dataclass
+@dataclass(slots=True)
 class SRAMOperation:
     op_id: int
     is_write: bool
@@ -24,6 +25,7 @@ class SRAMOperation:
     data: Optional[bytes]
     length: int
     remaining_cycles: int
+    due_cycle: int = 0
     callback: Optional[Callable[[Optional[bytes]], None]] = None
 
 
@@ -38,13 +40,17 @@ class SRAMBank(Clocked):
 
         # Use SimQueue for pending operations
         self._pending: SimQueue[SRAMOperation] = SimQueue(max_size=queue_size)
+        self._ready_heap: List[Tuple[int, int, SRAMOperation]] = []
         self._op_counter = 0
 
         # Stall / utilization counters
         self.cycles_busy: int = 0
         self.enqueue_stalls: int = 0
-        self._curr_tick: int = 0
-        self._last_enqueue_tick: int = -1
+        self._curr_tick: int = -1
+        self._last_enqueue_tick: int = -2
+
+    def can_accept_enqueue(self) -> bool:
+        return self._last_enqueue_tick != self._curr_tick and not self._pending.is_full()
 
     def _check_bounds(self, slot: int, length: int):
         if slot < 0 or slot >= self.slots:
@@ -52,86 +58,89 @@ class SRAMBank(Clocked):
         # length is advisory: reads will return min(length, len(slot_data))
 
     def enqueue_read(self, slot: int, length: int, callback: Optional[Callable[[bytes], None]] = None) -> int:
-        if self._last_enqueue_tick == self._curr_tick:
+        if not self.can_accept_enqueue():
             self.enqueue_stalls += 1
-            raise RuntimeError("SRAMBank enqueue stall: multiple enqueues in same cycle")
+            if self._last_enqueue_tick == self._curr_tick:
+                raise RuntimeError("SRAMBank enqueue stall: multiple enqueues in same cycle")
+            raise RuntimeError("SRAMBank enqueue stall: pending queue full")
         self._last_enqueue_tick = self._curr_tick
         self._check_bounds(slot, length)
-        if not self._pending.enqueue(SRAMOperation(
+        op = SRAMOperation(
             op_id=self._op_counter + 1,
             is_write=False,
             addr=int(slot),
             data=None,
             length=int(length),
             remaining_cycles=self.read_latency,
+            due_cycle=self._curr_tick + self.read_latency,
             callback=callback,
-        )):
+        )
+        if not self._pending.enqueue(op):
             self.enqueue_stalls += 1
             raise RuntimeError("SRAMBank enqueue stall: pending queue full")
+        heapq.heappush(self._ready_heap, (op.due_cycle, op.op_id, op))
         self._op_counter += 1
         return self._op_counter
 
     def enqueue_write(self, slot: int, data: bytes, callback: Optional[Callable[[None], None]] = None) -> int:
-        if self._last_enqueue_tick == self._curr_tick:
+        if not self.can_accept_enqueue():
             self.enqueue_stalls += 1
-            raise RuntimeError("SRAMBank enqueue stall: multiple enqueues in same cycle")
+            if self._last_enqueue_tick == self._curr_tick:
+                raise RuntimeError("SRAMBank enqueue stall: multiple enqueues in same cycle")
+            raise RuntimeError("SRAMBank enqueue stall: pending queue full")
         self._last_enqueue_tick = self._curr_tick
         self._check_bounds(slot, len(data))
-        if not self._pending.enqueue(SRAMOperation(
+        op = SRAMOperation(
             op_id=self._op_counter + 1,
             is_write=True,
             addr=int(slot),
             data=bytes(data),
             length=len(data),
             remaining_cycles=self.write_latency,
+            due_cycle=self._curr_tick + self.write_latency,
             callback=callback,
-        )):
+        )
+        if not self._pending.enqueue(op):
             self.enqueue_stalls += 1
             raise RuntimeError("SRAMBank enqueue stall: pending queue full")
+        heapq.heappush(self._ready_heap, (op.due_cycle, op.op_id, op))
         self._op_counter += 1
         return self._op_counter
 
-    def tick(self) -> List[Tuple[int, Optional[bytes]]]:
+    def tick(self, time: Optional[float] = None) -> List[Tuple[int, Optional[bytes]]]:
         """
         Advance one cycle. Return list of completed operations as tuples
         (op_id, result) where result is bytes for reads or None for writes.
         Callbacks are invoked before returning.
         """
-        self._curr_tick += 1
+        cycle = self._consume_tick(time, attr_name="_curr_tick")
+        if cycle is None:
+            return []
+
         completed: List[Tuple[int, Optional[bytes]]] = []
 
         # account busy cycle if there are pending ops at start of tick
         if self._pending:
             self.cycles_busy += 1
 
-        # Decrement remaining_cycles for all pending ops (FIFO/order preserved)
-        for op in self._pending.items:
-            op.remaining_cycles -= 1
-
-        # Collect completed ops (those with remaining_cycles <= 0), in order
-        to_remove = []
-        for op in self._pending.items:
-            if op.remaining_cycles <= 0:
-                if op.is_write:
-                    # perform write: replace the slot contents with provided bytes
-                    self.mem[op.addr] = op.data or b""
-                    result = None
-                else:
-                    # perform read: return up to requested length of slot contents
-                    slot_data = self.mem[op.addr]
-                    result = bytes(slot_data[: op.length])
-                completed.append((op.op_id, result))
-                # invoke callback (swallow exceptions to avoid breaking sim)
-                cb = op.callback or _noop_cb
-                try:
-                    cb(result)
-                except Exception:
-                    raise RuntimeError(f"Callback is None at tick: {self._curr_tick}")
-                to_remove.append(op)
-
-        # remove completed ops from pending queue
-        for op in to_remove:
-            self._pending._items.remove(op)
+        while self._ready_heap and self._ready_heap[0][0] <= cycle:
+            _due_cycle, _op_id, op = heapq.heappop(self._ready_heap)
+            if not self._pending.remove(op):
+                continue
+            if op.is_write:
+                # perform write: replace the slot contents with provided bytes
+                self.mem[op.addr] = op.data or b""
+                result = None
+            else:
+                # perform read: return up to requested length of slot contents
+                slot_data = self.mem[op.addr]
+                result = bytes(slot_data[: op.length])
+            completed.append((op.op_id, result))
+            cb = op.callback or _noop_cb
+            try:
+                cb(result)
+            except Exception:
+                raise RuntimeError(f"Callback is None at tick: {self._curr_tick}")
 
         return completed
 
@@ -168,6 +177,7 @@ class SRAMBanks(Clocked):
             SRAMBank(slots=self.bank_size, read_latency=self.read_latency, write_latency=self.write_latency)
             for _ in range(self.bank_count)
         ]
+        self._tick = -1
 
     def _addr_to_bank_slot(self, addr: int) -> Tuple[int, int]:
         """
@@ -207,14 +217,18 @@ class SRAMBanks(Clocked):
         op_id = self.banks[bank].enqueue_write(slot, data, callback=callback)
         return bank, op_id
 
-    def tick(self) -> List[Tuple[int, int, Optional[bytes]]]:
+    def tick(self, time: Optional[float] = None) -> List[Tuple[int, int, Optional[bytes]]]:
         """
         Return aggregated list of completed operations as
         tuples (bank_idx, op_id, result).
         """
+        cycle = self._consume_tick(time, attr_name="_tick")
+        if cycle is None:
+            return []
+
         all_completed: List[Tuple[int, int, Optional[bytes]]] = []
         for b_idx, b in enumerate(self.banks):
-            completed = b.tick()
+            completed = b.tick(time)
             for op_id, result in completed:
                 all_completed.append((b_idx, op_id, result))
         return all_completed

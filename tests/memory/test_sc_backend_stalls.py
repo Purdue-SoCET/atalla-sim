@@ -6,7 +6,7 @@ from base.clock_domain import ClockDomain
 from base.core import Core
 from base.sim import Sim
 
-from scratchpad.backend import Backend
+from memory.backend import Backend
 
 def build_sim():
     eq = EventQueue()
@@ -40,6 +40,7 @@ def test_backend_stalls():
     )
 
     clk.add_clocked(backend)
+    clk.schedule_next(0.0)
 
     # --- Test LOAD with guaranteed stalls ---
     # 1 row, 32 cols, elem_bytes=1, burst_bytes=4 => 1 row * 8 subreqs/row = 8 bursts
@@ -47,16 +48,7 @@ def test_backend_stalls():
     tx_id = backend.driver_to_backend_start_load(base_sp_addr=100, base_dram_addr=200, rows=1, cols=32)
     print(f"started LOAD tx={tx_id}")
 
-    def tick_and_reschedule(t, end=5.0, step=0.1):
-        backend.tick(t)
-        st = backend.backend_to_driver_get_stats()
-        print(f"[{t:.2f}] dram_pending={st['dram_pending']} issued={st['issued_bursts']} completed={st['completed_bursts']} stalls={st['backend_stalls']}")
-        next_t = t + step
-        if next_t <= end:
-            eq.schedule(next_t, lambda tt: tick_and_reschedule(tt, end, step), next_t)
-
-    eq.schedule(0.0, lambda t: tick_and_reschedule(t, 3.0, 0.05), 0.0)
-    sim.run(until=3.5)
+    sim.run(until=16.0)
 
     stats = backend.backend_to_driver_get_stats()
     print("Backend stats after forced stalls:", stats)

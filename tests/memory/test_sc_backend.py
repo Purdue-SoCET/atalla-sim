@@ -7,7 +7,7 @@ from base.clock_domain import ClockDomain
 from base.core import Core
 from base.sim import Sim
 
-from scratchpad.backend import Backend
+from memory.backend import Backend
 
 def build_sim():
     eq = EventQueue()
@@ -44,23 +44,13 @@ def test_sc_backend_load_and_store_flow():
     )
 
     clk.add_clocked(backend)
+    clk.schedule_next(0.0)
 
     # --- Test LOAD ---
     tx_id = backend.driver_to_backend_start_load(base_sp_addr=100, base_dram_addr=200, rows=2, cols=6)
     print(f"started LOAD tx={tx_id}")
 
-    # drive backend.tick periodically until completion and print status
-    def tick_and_reschedule(t, end=5.0, step=0.1):
-        backend.tick(t)
-        # print lightweight status
-        st = backend.get_stats()
-        print(f"[{t:.2f}] dram_pending={st['dram_pending']} issued={st['issued_bursts']} completed={st['completed_bursts']} writes={len(writes)} stores={len(stores)}")
-        next_t = t + step
-        if next_t <= end:
-            eq.schedule(next_t, lambda tt: tick_and_reschedule(tt, end, step), next_t)
-
-    eq.schedule(0.0, lambda t: tick_and_reschedule(t, 3.0, 0.05), 0.0)
-    sim.run(until=3.5)
+    sim.run(until=8.0)
 
     print("collected writes (load):", [(w[2], len(w[1]), w[3]) for w in writes])
     assert len(writes) == 2, f"expected 2 sram writes, got {len(writes)}"
@@ -75,8 +65,7 @@ def test_sc_backend_load_and_store_flow():
     tx_id2 = backend.driver_to_backend_start_store(base_sp_addr=300, base_dram_addr=400, rows=2, cols=6)
     print(f"started STORE tx={tx_id2}")
 
-    eq.schedule(0.0, lambda t: tick_and_reschedule(t, 3.0, 0.05), 0.0)
-    sim.run(until=3.5)
+    sim.run(until=16.0)
 
     print("collected stores (store):", [(s[2], len(s[1]), s[3]) for s in stores])
     stats2 = backend.get_stats()

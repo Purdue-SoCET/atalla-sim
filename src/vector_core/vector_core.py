@@ -2,7 +2,8 @@ from base.clocked_object import Clocked
 from base.queue import SimQueue
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
-from vector_core.vector_lanes import BF16, DType, VectorDatapath
+from base.dtype import DType, cast_vector, normalize_dtype
+from vector_core.vector_lanes import VectorDatapath
 from vector_core.vector_load_store import VLSU
 from vector_core.veggie_file import Veggie
 
@@ -17,12 +18,34 @@ class WBBuffer(Clocked):
     def __init__(self, depth: int = 128):
         super().__init__()
         self.entries = SimQueue(max(1, depth))
+        self._reserved_banks = set()
 
     def can_accept(self) -> bool:
         return not self.entries.is_full()
 
+    def start_cycle(self) -> None:
+        self._reserved_banks.clear()
+
+    def can_accept_entry(self, entry: Dict) -> bool:
+        if self.entries.is_full():
+            return False
+        bank = entry.get("bank")
+        if bank is None:
+            return True
+        if bank in self._reserved_banks:
+            return False
+        for queued in self.entries._raw_items:
+            if queued.get("bank") == bank:
+                return False
+        return True
+
     def enqueue(self, entry: Dict) -> bool:
-        return self.entries.enqueue(dict(entry))
+        if not self.can_accept_entry(entry):
+            return False
+        bank = entry.get("bank")
+        if bank is not None:
+            self._reserved_banks.add(bank)
+        return self.entries.enqueue(entry)
 
     def has_pending(self) -> bool:
         return not self.entries.is_empty()
@@ -37,24 +60,143 @@ class WBBuffer(Clocked):
         return len(self.entries)
 
 
-class GSAUStub(Clocked):
+class SchedulerBacklogView:
+    def __init__(self, owner: "VectorCore"):
+        self.owner = owner
+
+    def __len__(self) -> int:
+        return self.owner.scheduler_backlog()
+
+
+class SchedulerPacketView:
+    def __init__(self, owner: "VectorCore"):
+        self.owner = owner
+
+    def __len__(self) -> int:
+        return self.owner.scheduler_packet_count()
+
+
+class GSAU(Clocked):
     """
-    Placeholder Global Systolic Array Unit interface.
-    TODO: Will update it to a new class on a new file after I implement Systolic Array
+    Global Systolic Array Unit control block.
+
+    Responsibilities:
+    - Accept scheduler-issued vectors and stream them to systolic-array control.
+    - Track destination register indices in-order via rd FIFO.
+    - Pair returning systolic vectors with rd queue and emit WB packets.
     """
 
-    def __init__(self, queue_depth: int = 64):
+    def __init__(
+        self,
+        max_vregs: int = 256,
+        instruction_latency_mac: int = 64,
+        clocks_per_mac_cycle: int = 3,
+        req_depth: int = 256,
+        rsp_depth: int = 256,
+    ):
         super().__init__()
-        self.pending = SimQueue(max(1, queue_depth))
+        self.max_vregs = max(1, int(max_vregs))
+        self.instruction_latency_mac = max(1, int(instruction_latency_mac))
+        self.clocks_per_mac_cycle = max(1, int(clocks_per_mac_cycle))
+        self._tick = -1
+        # Formula-driven destination queue depth in entries.
+        self.rd_queue_depth = max(1, self.instruction_latency_mac * self.clocks_per_mac_cycle)
+
+        self.to_systolic = SimQueue(max(1, int(req_depth)))
+        self.from_systolic = SimQueue(max(1, int(rsp_depth)))
+        self.rd_queue = SimQueue(self.rd_queue_depth)
+        self.writebacks = SimQueue(max(1, int(rsp_depth)))
 
     def issue(self, cmd: Dict) -> bool:
-        return self.pending.enqueue(dict(cmd))
+        entry = dict(cmd)
+        dtype = normalize_dtype(entry.get("dtype"), default=None)
+        if dtype is None:
+            raise ValueError("gsau command missing dtype")
+        expects_output = bool(entry.get("expect_output", not bool(entry.get("is_weight", False))))
+        meta = entry.get("meta", {})
+        if self.to_systolic.is_full():
+            return False
+        if expects_output:
+            dst = entry.get("dst")
+            if dst is None:
+                raise ValueError("gsau command missing dst for expected output")
+            if self.rd_queue.is_full():
+                return False
+            if not self.rd_queue.enqueue(
+                {
+                    "dst": int(dst),
+                    "dtype": dtype,
+                    "meta": meta,
+                }
+            ):
+                return False
 
-    def pop_pending(self) -> Optional[Dict]:
-        return self.pending.dequeue()
+        vdata = entry["vdata"] if isinstance(entry["vdata"], list) else list(entry["vdata"])
+        return self.to_systolic.enqueue(
+            {
+                "vdata": vdata,
+                "is_weight": bool(entry.get("is_weight", False)),
+                "dtype": dtype,
+                "meta": meta,
+                "expect_output": expects_output,
+            }
+        )
+
+    def pop_systolic_request(self) -> Optional[Dict]:
+        return self.to_systolic.dequeue()
+
+    def push_systolic_response(self, rsp: Dict) -> bool:
+        packet = rsp
+        if "vdata" not in packet and "data" in packet:
+            packet = dict(rsp)
+            packet["vdata"] = packet["data"]
+        if "vdata" not in packet:
+            raise ValueError("gsau response missing vdata")
+        if not isinstance(packet["vdata"], list):
+            packet = dict(packet)
+            packet["vdata"] = list(packet["vdata"])
+        return self.from_systolic.enqueue(packet)
+
+    def can_pop_writeback(self) -> bool:
+        return not self.writebacks.is_empty()
+
+    def pop_writeback(self) -> Optional[Dict]:
+        return self.writebacks.dequeue()
 
     def has_pending(self) -> bool:
-        return not self.pending.is_empty()
+        return (not self.to_systolic.is_empty()) or (not self.from_systolic.is_empty())
+
+    def tick(self, time: Optional[Time] = None) -> None:
+        cycle = self._consume_tick(time, attr_name="_tick")
+        if cycle is None:
+            return
+
+        while (not self.from_systolic.is_empty()) and (not self.rd_queue.is_empty()) and (not self.writebacks.is_full()):
+            rsp = self.from_systolic.dequeue()
+            rd = self.rd_queue.dequeue()
+            if rsp is None or rd is None:
+                break
+            rsp_dtype = normalize_dtype(
+                rsp.get("dtype") or rsp.get("meta", {}).get("dtype"),
+                default=None,
+            )
+            if rd.get("dtype") is None or rsp_dtype is None:
+                raise ValueError("gsau response missing dtype")
+            if rsp_dtype != rd.get("dtype"):
+                raise ValueError("gsau dtype mismatch: rd=%s rsp=%s" % (rd.get("dtype"), rsp_dtype))
+            self.writebacks.enqueue(
+                {
+                    "dst": int(rd["dst"]),
+                    "data": list(rsp["vdata"]),
+                    "mask": rsp.get("mask"),
+                    "dtype": rd.get("dtype"),
+                    "meta": {
+                        "rdq_depth": self.rd_queue_depth,
+                        "rdq_entry": rd.get("meta", {}),
+                        "rsp_meta": rsp.get("meta", {}),
+                    },
+                }
+            )
 
 
 class VectorCore(Clocked):
@@ -65,16 +207,15 @@ class VectorCore(Clocked):
     - VectorDatapath (compute operations)
     - Veggie (vector register file storage backing)
     - VLSU(s) (scratchpad load/store path)
+    - GSAU (systolic-array ingress/egress + rd queue tracking)
     - WBBuffer (common result sink before VRF write)
-
-    TODO: GSAU is intentionally left as a stub and can be replaced later.
     """
 
     def __init__(
         self,
-        veggie_size: int,
+        veggie_size: int, # width of one vector register value (used to determine vector_len = veggie_size / FLOAT_SLOT_BITS)
         lane_count: int = 1,
-        dtype: DType = BF16,
+        dtype: Optional[object] = None,
         issue_width: int = 1,
         vls_count: int = 2,
         wb_depth: int = 128,
@@ -86,11 +227,13 @@ class VectorCore(Clocked):
         super().__init__()
         if vls_count <= 0:
             raise ValueError("vls_count must be > 0")
+        self._tick = -1
 
+        self.dtype_default = normalize_dtype(dtype, default=None)
         self.datapath = VectorDatapath(
             veggie_size=veggie_size,
             lane_count=lane_count,
-            dtype=dtype,
+            dtype=self.dtype_default,
             issue_width=issue_width,
             fu_latencies=fu_latencies,
         )
@@ -100,11 +243,17 @@ class VectorCore(Clocked):
             bank_count=veggie_bank_count,
             regs_per_bank=veggie_regs_per_bank,
         )
-        self.max_vregs = self.veggie.bank_count * self.veggie.regs_per_bank
+        self.max_vregs = self.veggie.bank_count * self.veggie.regs_per_bank # number of vregs available
 
         self.wb_buffer = WBBuffer(depth=wb_depth)
-        self.gsau = GSAUStub() # TODO
-        self.scheduler_q = SimQueue(max(1, scheduler_depth))
+        self.gsau = GSAU(max_vregs=self.max_vregs)
+        self.gsau_slots = 1
+        self.vlsu_slots = 4
+        self.datapath_slots = 2
+        self.vliw_q = SimQueue(max(1, scheduler_depth))
+        self._build_packet = self._empty_packet()
+        self.scheduler_q = SchedulerBacklogView(self)
+        self.scheduler_packets = SchedulerPacketView(self)
 
         self.vls_units = []
         for _ in range(vls_count):
@@ -114,6 +263,7 @@ class VectorCore(Clocked):
         self.last_wb = None
         self.wb_valid = False
         self.last_datapath_inst_id = None
+        self._datapath_wb_hold = None
 
     def _reg_to_bank_addr(self, reg: int) -> Tuple[int, int]:
         if reg < 0:
@@ -125,7 +275,7 @@ class VectorCore(Clocked):
         return bank, addr
 
     def _normalize_vector(self, data: Sequence[float]) -> List[float]:
-        vec = list(data)
+        vec = [float(x) for x in data]
         if len(vec) != self.vector_len:
             raise ValueError(
                 "vector length mismatch: expected %d, got %d"
@@ -138,20 +288,41 @@ class VectorCore(Clocked):
         raw = self.veggie.data_banks[bank][addr]
         if isinstance(raw, list):
             if len(raw) == self.vector_len:
-                return raw[:]
+                return [float(x) for x in raw]
             if len(raw) == 0:
-                return [0] * self.vector_len
+                return [0.0] * self.vector_len
             if len(raw) < self.vector_len:
-                return raw[:] + ([0] * (self.vector_len - len(raw)))
-            return raw[: self.vector_len]
-        return [raw] * self.vector_len
+                return [float(x) for x in raw] + ([0.0] * (self.vector_len - len(raw)))
+            return [float(x) for x in raw[: self.vector_len]]
+        return [float(raw)] * self.vector_len
 
-    def write_vreg(self, reg: int, data: Sequence[float]) -> None:
+    def read_vreg_with_dtype(self, reg: int) -> Tuple[List[float], DType]:
         bank, addr = self._reg_to_bank_addr(reg)
-        self.veggie.data_banks[bank][addr] = self._normalize_vector(data)
+        vec = self.read_vreg(reg)
+        dtype = self.veggie.dtype_banks[bank][addr]
+        dtype = normalize_dtype(dtype, default=self.dtype_default)
+        if dtype is None:
+            raise ValueError("dtype must be specified for vreg %s" % reg)
+        if self.veggie.dtype_banks[bank][addr] is None:
+            self.veggie.dtype_banks[bank][addr] = dtype
+        return vec, dtype
 
-    def load_vreg(self, reg: int, data: Sequence[float]) -> None:
-        self.write_vreg(reg, data)
+    def write_vreg(self, reg: int, data: Sequence[float], dtype: Optional[object] = None) -> None:
+        bank, addr = self._reg_to_bank_addr(reg)
+        dtype_norm = normalize_dtype(dtype, default=self.dtype_default)
+        if dtype_norm is None:
+            raise ValueError("dtype must be specified for write_vreg")
+        vec = cast_vector(data, dtype_norm)
+        if len(vec) != self.vector_len:
+            raise ValueError(
+                "vector length mismatch: expected %d, got %d"
+                % (self.vector_len, len(vec))
+            )
+        self.veggie.data_banks[bank][addr] = vec
+        self.veggie.dtype_banks[bank][addr] = dtype_norm
+
+    def load_vreg(self, reg: int, data: Sequence[float], dtype: Optional[object] = None) -> None:
+        self.write_vreg(reg, data, dtype=dtype)
 
     def dump_vreg(self, reg: int) -> List[float]:
         return self.read_vreg(reg)
@@ -163,9 +334,67 @@ class VectorCore(Clocked):
         Supported instruction classes:
         - Compute: {"unit":"datapath", "op", "dst", "src0", "src1?", ...}
         - Memory:  {"unit":"vlsu", "kind":"load|store", "vls":0/1, ...}
-        - GSAU:    {"unit":"gsau", ...}  # TODO
+        - GSAU:    {"unit":"gsau", ...}
         """
-        return self.scheduler_q.enqueue(dict(inst))
+        entry = dict(inst)
+        if not self._packet_append_inst(self._build_packet, entry):
+            if not self._flush_build_packet():
+                return False
+            if not self._packet_append_inst(self._build_packet, entry):
+                raise ValueError("instruction does not fit in VLIW packet: %s" % entry.get("unit", "datapath"))
+        return True
+
+    def _empty_packet(self) -> Dict[str, List[Dict]]:
+        return {"gsau": [], "vlsu": [], "datapath": []}
+
+    def _packet_has_entries(self, packet: Dict[str, List[Dict]]) -> bool:
+        return bool(packet["gsau"] or packet["vlsu"] or packet["datapath"])
+
+    def _packet_append_inst(self, packet: Dict[str, List[Dict]], inst: Dict) -> bool:
+        unit = inst.get("unit", "datapath")
+        if unit == "gsau":
+            if len(packet["gsau"]) >= self.gsau_slots:
+                return False
+            packet["gsau"].append(inst)
+            return True
+        if unit == "vlsu":
+            if len(packet["vlsu"]) >= self.vlsu_slots:
+                return False
+            packet["vlsu"].append(inst)
+            return True
+        if unit == "datapath":
+            if len(packet["datapath"]) >= self.datapath_slots:
+                return False
+            packet["datapath"].append(inst)
+            return True
+        raise ValueError("unsupported scheduler unit: %s" % unit)
+
+    def _flush_build_packet(self) -> bool:
+        if not self._packet_has_entries(self._build_packet):
+            return True
+        if self.vliw_q.is_full():
+            return False
+        packet = self._build_packet
+        self._build_packet = self._empty_packet()
+        if not self.vliw_q.enqueue(packet):
+            self._build_packet = packet
+            return False
+        return True
+
+    def enqueue_vliw_packet(self, packet: Dict) -> bool:
+        if not self._flush_build_packet():
+            return False
+        norm = self._empty_packet()
+        for unit in ("gsau", "vlsu", "datapath"):
+            items = packet.get(unit, [])
+            if isinstance(items, dict):
+                items = [items]
+            for inst in items:
+                if not self._packet_append_inst(norm, dict(inst)):
+                    return False
+        if not self._packet_has_entries(norm):
+            return True
+        return self.vliw_q.enqueue(norm)
 
     def enqueue_compute(
         self,
@@ -197,14 +426,21 @@ class VectorCore(Clocked):
         inst.setdefault("unit", "vlsu")
         return self.enqueue_scheduler_instruction(inst)
 
-    def _resolve_operand(self, value, default_zero: bool = False) -> List[float]:
+    def _resolve_operand_with_dtype(self, value, default_zero: bool, dtype_hint: Optional[object]) -> Tuple[List[float], DType]:
         if value is None:
             if default_zero:
-                return [0] * self.vector_len
+                dtype_norm = normalize_dtype(dtype_hint, default=self.dtype_default)
+                if dtype_norm is None:
+                    raise ValueError("dtype must be specified")
+                return [0.0] * self.vector_len, dtype_norm
             raise ValueError("missing required operand")
         if isinstance(value, int):
-            return self.read_vreg(value)
-        return self._normalize_vector(value)
+            vec, dtype = self.read_vreg_with_dtype(value)
+            return vec, dtype
+        dtype_norm = normalize_dtype(dtype_hint, default=self.dtype_default)
+        if dtype_norm is None:
+            raise ValueError("dtype must be specified")
+        return self._normalize_vector(value), dtype_norm
 
     def _resolve_mask(self, mask_value) -> List[bool]:
         if mask_value is None:
@@ -227,8 +463,11 @@ class VectorCore(Clocked):
 
         src0_spec = inst.get("src0", inst.get("vs1"))
         src1_spec = inst.get("src1", inst.get("vs2"))
-        src0 = self._resolve_operand(src0_spec, default_zero=False)
-        src1 = self._resolve_operand(src1_spec, default_zero=True)
+        dtype_hint = inst.get("dtype")
+        src0, dtype0 = self._resolve_operand_with_dtype(src0_spec, default_zero=False, dtype_hint=inst.get("src0_dtype", dtype_hint))
+        src1, dtype1 = self._resolve_operand_with_dtype(src1_spec, default_zero=True, dtype_hint=inst.get("src1_dtype", dtype_hint) or dtype0)
+        if dtype0 != dtype1:
+            raise ValueError("datatype mismatch: src0=%s src1=%s" % (dtype0, dtype1))
         mask = self._resolve_mask(inst.get("mask"))
 
         inst_id = self.datapath.enqueue(
@@ -240,6 +479,7 @@ class VectorCore(Clocked):
             reduce=bool(inst.get("reduce", False)),
             reduce_op=inst.get("reduce_op", "sum"),
             reduce_out_mode=inst.get("reduce_out_mode", "partial_zero"),
+            dtype=dtype0,
         )
         self.last_datapath_inst_id = inst_id
         return True
@@ -263,58 +503,161 @@ class VectorCore(Clocked):
     def _issue_gsau(self, inst: Dict) -> bool:
         cmd = dict(inst)
         cmd.pop("unit", None)
-        return self.gsau.issue(cmd)
+        src_spec = cmd.get("src", cmd.get("vs"))
+        vdata_spec = cmd.get("vdata")
+        dtype_hint = cmd.get("dtype")
+        if vdata_spec is None:
+            if src_spec is None:
+                raise ValueError("gsau instruction requires src or vdata")
+            if isinstance(src_spec, int):
+                vdata, dtype0 = self.read_vreg_with_dtype(src_spec)
+            else:
+                dtype0 = normalize_dtype(dtype_hint, default=self.dtype_default)
+                if dtype0 is None:
+                    raise ValueError("dtype must be specified")
+                vdata = self._normalize_vector(src_spec)
+        else:
+            if isinstance(vdata_spec, int):
+                vdata, dtype0 = self.read_vreg_with_dtype(vdata_spec)
+            else:
+                dtype0 = normalize_dtype(dtype_hint, default=self.dtype_default)
+                if dtype0 is None:
+                    raise ValueError("dtype must be specified")
+                vdata = self._normalize_vector(vdata_spec)
+        vdata = cast_vector(vdata, dtype0)
+
+        expects_output = bool(cmd.get("expect_output", not bool(cmd.get("is_weight", False))))
+        gsau_meta = dict(cmd.get("meta", {}) or {})
+        gsau_meta.setdefault("kind", cmd.get("kind"))
+        gsau_meta.setdefault("src", src_spec)
+        gsau_meta.setdefault("dtype", dtype0)
+        gsau_cmd = {
+            "vdata": vdata,
+            "is_weight": bool(cmd.get("is_weight", False)),
+            "expect_output": expects_output,
+            "meta": gsau_meta,
+            "dtype": dtype0,
+        }
+        if expects_output:
+            dst = cmd.get("dst", cmd.get("vd"))
+            if dst is None:
+                raise ValueError("gsau instruction missing dst")
+            gsau_cmd["dst"] = int(dst)
+        return self.gsau.issue(gsau_cmd)
 
     def _try_issue_scheduler(self) -> None:
-        inst = self.scheduler_q.peek()
-        if inst is None:
+        _ = self._flush_build_packet()
+        packet = self.vliw_q.peek()
+        if packet is None:
             return
-        unit = inst.get("unit", "datapath")
-        if unit == "datapath":
-            accepted = self._issue_datapath(inst)
-        elif unit == "vlsu":
-            accepted = self._issue_vlsu(inst)
-        elif unit == "gsau":
-            accepted = self._issue_gsau(inst)
-        else:
-            raise ValueError("unsupported scheduler unit: %s" % unit)
-        if accepted:
-            _ = self.scheduler_q.dequeue()
+        for issue_fn, unit in (
+            (self._issue_gsau, "gsau"),
+            (self._issue_vlsu, "vlsu"),
+            (self._issue_datapath, "datapath"),
+        ):
+            remaining = []
+            for inst in packet[unit]:
+                if not issue_fn(inst):
+                    remaining.append(inst)
+            packet[unit] = remaining
+        if not self._packet_has_entries(packet):
+            _ = self.vliw_q.dequeue()
 
     def _collect_results_to_wb(self) -> None:
-        if self.datapath.result_valid:
+        candidates = []
+
+        pkt = self._datapath_wb_hold
+        if pkt is None and self.datapath.result_valid:
             pkt = self.datapath.last_result
-            if pkt is not None and self.wb_buffer.can_accept():
-                self.wb_buffer.enqueue(
+        if pkt is not None:
+            bank, _ = self._reg_to_bank_addr(int(pkt["dst"]))
+            reduction = pkt.get("reduction")
+            candidates.append(
+                (
+                    3 if reduction is not None else 4,
+                    "datapath",
                     {
                         "source": "datapath",
                         "dst": pkt["dst"],
                         "data": pkt["vector"],
+                        "dtype": pkt.get("dtype"),
+                        "bank": bank,
                         "meta": {
                             "inst_id": pkt["inst_id"],
                             "op": pkt["op"],
                             "reduce_op": pkt["reduce_op"],
                             "reduce_out_mode": pkt["reduce_out_mode"],
-                            "reduction": pkt["reduction"],
+                            "reduction": reduction,
                         },
-                    }
+                    },
+                    pkt,
                 )
+            )
 
         for vls_id, vls in enumerate(self.vls_units):
-            while vls.can_pop_writeback() and self.wb_buffer.can_accept():
-                wb = vls.pop_writeback()
-                if wb is None:
-                    break
-                self.wb_buffer.enqueue(
+            wb = vls.wb_q.peek()
+            if wb is None:
+                continue
+            bank, _ = self._reg_to_bank_addr(int(wb["vd"]))
+            meta = dict(wb.get("meta", {}) or {})
+            meta.setdefault("addr", wb.get("addr"))
+            meta.setdefault("scratchpad", wb.get("scratchpad"))
+            meta.setdefault("vd", wb.get("vd"))
+            candidates.append(
+                (
+                    0 if vls_id == 0 else 1,
+                    ("vlsu", vls_id),
                     {
                         "source": "vlsu",
                         "vls": vls_id,
                         "dst": wb["vd"],
                         "data": wb["data"],
                         "mask": wb.get("mask"),
-                        "meta": wb,
-                    }
+                        "dtype": wb.get("dtype"),
+                        "bank": bank,
+                        "meta": meta,
+                    },
+                    wb,
                 )
+            )
+
+        wb = self.gsau.writebacks.peek()
+        if wb is not None:
+            bank, _ = self._reg_to_bank_addr(int(wb["dst"]))
+            meta = dict(wb.get("meta", {}) or {})
+            meta.update(dict(meta.get("rdq_entry", {}) or {}))
+            meta.update(dict(meta.get("rsp_meta", {}) or {}))
+            candidates.append(
+                (
+                    2,
+                    "gsau",
+                    {
+                        "source": "gsau",
+                        "dst": wb["dst"],
+                        "data": wb["data"],
+                        "mask": wb.get("mask"),
+                        "dtype": wb.get("dtype"),
+                        "bank": bank,
+                        "meta": meta,
+                    },
+                    wb,
+                )
+            )
+
+        accepted_datapath = False
+        for _prio, src_key, entry, raw in sorted(candidates, key=lambda x: x[0]):
+            if not self.wb_buffer.enqueue(entry):
+                continue
+            if src_key == "datapath":
+                accepted_datapath = True
+                self._datapath_wb_hold = None
+            elif src_key == "gsau":
+                _ = self.gsau.pop_writeback()
+            else:
+                _ = self.vls_units[src_key[1]].pop_writeback()
+
+        if pkt is not None and not accepted_datapath:
+            self._datapath_wb_hold = pkt
 
     def _commit_one_writeback(self) -> None:
         self.wb_valid = False
@@ -326,30 +669,43 @@ class VectorCore(Clocked):
 
         dst = int(wb["dst"])
         new_vec = self._normalize_vector(wb["data"])
+        wb_dtype = normalize_dtype(wb.get("dtype"), default=None)
         mask = wb.get("mask")
         if mask is not None:
             mask_vec = [bool(x) for x in list(mask)]
             if len(mask_vec) != self.vector_len:
                 raise ValueError("writeback mask length mismatch")
             old_vec = self.read_vreg(dst)
+            _, old_dtype = self.read_vreg_with_dtype(dst)
+            if wb_dtype is not None and wb_dtype != old_dtype:
+                raise ValueError("masked writeback dtype mismatch: dst=%s wb=%s" % (old_dtype, wb_dtype))
             merged = [new_vec[i] if mask_vec[i] else old_vec[i] for i in range(self.vector_len)]
-            self.write_vreg(dst, merged)
+            self.write_vreg(dst, merged, dtype=old_dtype)
         else:
-            self.write_vreg(dst, new_vec)
+            if wb_dtype is None:
+                _, old_dtype = self.read_vreg_with_dtype(dst)
+                wb_dtype = old_dtype
+            self.write_vreg(dst, new_vec, dtype=wb_dtype)
 
         self.last_wb = wb
         self.wb_valid = True
 
-    def tick(self) -> None:
-        # 1) Consume one scheduler instruction when target unit can accept it.
+    def tick(self, time: Optional[Time] = None) -> None:
+        cycle = self._consume_tick(time, attr_name="_tick")
+        if cycle is None:
+            return
+
+        # 1) Consume one VLIW packet when target units can accept its slots.
         self._try_issue_scheduler()
 
         # 2) Advance compute and memory units.
-        self.datapath.tick()
+        self.datapath.tick(cycle)
         for vls in self.vls_units:
-            vls.tick()
+            vls.tick(cycle)
+        self.gsau.tick(cycle)
 
         # 3) Funnel unit outputs into shared writeback buffer.
+        self.wb_buffer.start_cycle()
         self._collect_results_to_wb()
 
         # 4) Commit one writeback per cycle to Veggie.
@@ -368,7 +724,25 @@ class VectorCore(Clocked):
         return self.vls_units[vls_id].push_response(local_rsp)
 
     def scheduler_backlog(self) -> int:
-        return len(self.scheduler_q)
+        total = 0
+        if self._packet_has_entries(self._build_packet):
+            total += (
+                len(self._build_packet["gsau"])
+                + len(self._build_packet["vlsu"])
+                + len(self._build_packet["datapath"])
+            )
+        for packet in self.vliw_q._raw_items:
+            total += len(packet["gsau"]) + len(packet["vlsu"]) + len(packet["datapath"])
+        return total
+
+    def scheduler_packet_count(self) -> int:
+        return len(self.vliw_q) + (1 if self._packet_has_entries(self._build_packet) else 0)
+
+    def pop_systolic_request(self) -> Optional[Dict]:
+        return self.gsau.pop_systolic_request()
+
+    def push_systolic_response(self, rsp: Dict) -> bool:
+        return self.gsau.push_systolic_response(rsp)
 
 
 VC = VectorCore

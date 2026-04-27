@@ -1,16 +1,17 @@
-from typing import Generic, TypeVar, List, Optional
+from collections import deque
+from typing import Deque, Generic, List, Optional, TypeVar
 
 T = TypeVar("T")
 
 
 class SimQueue(Generic[T]):
-    """A small fixed-capacity queue backed by a Python list."""
+    """A small fixed-capacity queue backed by a deque."""
 
     def __init__(self, max_size: int) -> None:
         if max_size <= 0:
             raise ValueError("max_size must be a positive integer")
         self._max_size = max_size
-        self._items: List[T] = []
+        self._items: Deque[T] = deque()
 
     @property
     def max_size(self) -> int:
@@ -22,7 +23,7 @@ class SimQueue(Generic[T]):
         return list(self._items)
 
     @property
-    def _raw_items(self) -> List[T]:
+    def _raw_items(self) -> Deque[T]:
         return self._items
 
     def __len__(self) -> int:
@@ -47,7 +48,7 @@ class SimQueue(Generic[T]):
         """Remove and return the front item, or None if empty."""
         if self.is_empty():
             return None
-        return self._items.pop(0)
+        return self._items.popleft()
 
     def peek(self) -> Optional[T]:
         """Return front item without removing it, or None if empty."""
@@ -55,3 +56,10 @@ class SimQueue(Generic[T]):
 
     def clear(self) -> None:
         self._items.clear()
+
+    def remove(self, item: T) -> bool:
+        try:
+            self._items.remove(item)
+        except ValueError:
+            return False
+        return True

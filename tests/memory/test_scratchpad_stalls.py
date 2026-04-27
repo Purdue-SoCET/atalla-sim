@@ -6,8 +6,8 @@ from base.clock_domain import ClockDomain
 from base.core import Core
 from base.sim import Sim
 
-from scratchpad.scratchpad import Scratchpad
-from scratchpad.backend import Backend
+from memory.scratchpad import Scratchpad
+from memory.backend import Backend
 
 def build_sim():
     eq = EventQueue()
@@ -58,19 +58,19 @@ def test_scratchpad_stalls():
     print("Backend vs Backend stats:", backend_stats)
     assert backend_stats["backend_stalls"] >= 2, "Backend stalls not detected"
 
-    # --- Frontend vs Backend: Backend in flight blocks frontend ---
-    # Fill backend write inflight flag manually to simulate contention
-    spad.backend_write_inflight[0] = True
+    # --- Frontend vs Backend: A saturated write pipeline blocks frontend service ---
+    spad.backend_write_inflight[0] = spad.tile_write_xbars[0].max_size
     ok4 = spad.frontend_write(6, row_bytes, row_idx=3, tile_id=0)
     assert ok4, "Frontend write should enqueue (queue not full)"
-    # But tick will not process it until backend_write_inflight is cleared
-    spad.frontends[0].tick(2)
+    ready_cycle, *_ = spad.frontends[0].writeq.peek()
+    # But tick will not process it until xbar capacity is made available
+    spad.frontends[0].tick(ready_cycle)
     # The request should remain in the queue
     assert len(spad.frontends[0].writeq.items) == 1, "Frontend write should be blocked by backend inflight"
 
-    # Now clear backend inflight and tick again
-    spad.backend_write_inflight[0] = False
-    spad.frontends[0].tick(10)
+    # Now clear the synthetic occupancy and tick again
+    spad.backend_write_inflight[0] = 0
+    spad.frontends[0].tick(ready_cycle + 1)
     # The request should be processed
     assert len(spad.frontends[0].writeq.items) == 0, "Frontend write should be processed after backend inflight cleared"
 
