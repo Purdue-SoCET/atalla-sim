@@ -37,6 +37,28 @@ def lower_linear_modules(gm: GraphModule) -> GraphModule:
     modules = dict(gm.named_modules())
 
     for node in list(gm.graph.nodes):
+        if node.op == "call_function" and node.target is F.linear:
+            if len(node.args) < 2:
+                raise ValueError("F.linear expects at least input and weight")
+            input_node, weight_node = node.args[0], node.args[1]
+            bias_node = node.args[2] if len(node.args) > 2 else None
+            with gm.graph.inserting_before(node):
+                weight_t = gm.graph.call_method(
+                    "transpose", args=(weight_node, -1, -2)
+                )
+            with gm.graph.inserting_before(node):
+                matmul_node = gm.graph.call_function(
+                    torch.matmul, args=(input_node, weight_t)
+                )
+            out = matmul_node
+            if bias_node is not None:
+                with gm.graph.inserting_before(node):
+                    out = gm.graph.call_function(
+                        operator.add, args=(out, bias_node)
+                    )
+            node.replace_all_uses_with(out)
+            gm.graph.erase_node(node)
+            continue
         if node.op != "call_module":
             continue
 

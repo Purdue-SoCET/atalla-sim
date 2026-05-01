@@ -2,6 +2,13 @@
 """
 Emit graph_schedule.c by consuming an FX GraphModule that already has DRAM
 addresses (node.meta["dram_addr"]) and tensor metadata attached.
+
+**Partial coverage:** this generator emits *matmul_kernel*, *add_kernel*, *relu_*,
+*conv_*, *mul_*, *maxpool_*, *avgpool_* for matching ``call_function``/``call_module``
+nodes. It does **not** yet lower ``F.layer_norm``, ``F.gelu``, or fused
+``AtallaSdpa`` to C calls, so a ViT graph schedule still omits those ops even
+when ``run_graph`` validate emulates them — see ``graph.lower_modules`` (F.linear
+is lowered to matmul+add so linears appear as matmul in the schedule).
 """
 
 from __future__ import annotations

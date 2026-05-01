@@ -12,13 +12,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.fx import GraphModule, Node, symbolic_trace
+
+from model.atalla_ops import AtallaSdpa
 from torch.fx.passes.shape_prop import ShapeProp
 
 
 ATALLA_OPS = {
-    "matmul", "linear", "conv", "relu", "add", "maxpool",
+    "matmul", "linear", "conv", "relu", "add", "mul", "maxpool",
     "softmax", "flatten", "adaptive_avg_pool", "dropout", "bias_add",
-    "layernorm", "gelu",
+    "layernorm", "gelu", "atalla_sdpa",
 }
 
 _OP_MAP: Dict[object, str] = {
@@ -73,6 +75,7 @@ _MODULE_MAP: Dict[type, str] = {
     nn.Flatten: "flatten",
     nn.LayerNorm: "layernorm",
     nn.GELU: "gelu",
+    AtallaSdpa: "atalla_sdpa",
 }
 
 

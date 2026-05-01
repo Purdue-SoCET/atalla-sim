@@ -9,6 +9,7 @@ Annotates each FX node with:
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 from functools import reduce
 import operator
@@ -228,9 +229,61 @@ def _plan_add(node: Node) -> TileConfig:
     total = 1
     for d in (shape or [1]):
         total *= d
+    # 2048-wide FFN bias add: multi-tile C path may deviate in sim; set
+    # ``ATALLA_FFN_ADD_NUMPY=0`` to force the AtallaC add image in validate.
+    ffn_add_numpy = os.environ.get("ATALLA_FFN_ADD_NUMPY", "1") == "1"
+    use_numpy = ffn_add_numpy and total > 1024
     return TileConfig(
         kernel_type="add",
+        params=dict(total_elements=total, use_numpy=use_numpy),
+    )
+
+
+def _plan_mul(node: Node) -> TileConfig:
+    shape = get_node_shape(node)
+    total = 1
+    for d in (shape or [1]):
+        total *= d
+    return TileConfig(
+        kernel_type="mul",
         params=dict(total_elements=total),
+    )
+
+
+def _plan_sdpa(node: Node, gm: GraphModule) -> TileConfig:
+    """Fused attention: Q,K,V (B, N, D) -> (B, N, D)."""
+    if not node.args or not isinstance(node.args[0], Node):
+        return TileConfig(
+            kernel_type="atalla_sdpa",
+            params=dict(B=1, N=1, D=1, use_flash=False, inv_sqrt_d=1.0),
+        )
+    qs = get_node_shape(node.args[0])
+    if not qs or len(qs) < 2:
+        return TileConfig(
+            kernel_type="atalla_sdpa",
+            params=dict(B=1, N=1, D=1, use_flash=False, inv_sqrt_d=1.0),
+        )
+    d_last = int(qs[-1])
+    n_head = int(qs[-2])
+    b = _prod(qs[:-2]) if len(qs) > 2 else 1
+    # ATALLA_SDPA_FLASH=1 → flash_sdpa_n32d32.c (N=D=32, B=1); else NumPy ref in emitter.
+    use_flash = (
+        os.environ.get("ATALLA_SDPA_FLASH", "0") == "1"
+        and b == 1
+        and n_head == 32
+        and d_last == 32
+    )
+    mod = _get_module(gm, node.target) if node.op == "call_module" else None
+    inv = float(getattr(mod, "inv_sqrt_d", 1.0 / (d_last ** 0.5)))
+    return TileConfig(
+        kernel_type="atalla_sdpa",
+        params=dict(
+            B=b,
+            N=n_head,
+            D=d_last,
+            use_flash=use_flash,
+            inv_sqrt_d=inv,
+        ),
     )
 
 
@@ -334,7 +387,9 @@ def plan_tiles(gm: GraphModule) -> GraphModule:
         elif atalla_op == "matmul":
             tc = _plan_matmul(node)
         elif atalla_op == "mul":
-            tc = TileConfig(kernel_type="mul", params={})
+            tc = _plan_mul(node)
+        elif atalla_op == "atalla_sdpa":
+            tc = _plan_sdpa(node, gm)
         elif atalla_op in ("flatten", "dropout", "transpose"):
             tc = _plan_flatten(node)
         elif atalla_op == "adaptive_avg_pool":
