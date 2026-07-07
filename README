@@ -1,34 +1,71 @@
-This is the Atalla 0x01 Cycle Accurate Simulator.
+# Atalla 0x01 — Cycle-Accurate Simulator
 
-The main website can be found at https://github.com/Purdue-SoCET/atalla/.
+A cycle-accurate hardware simulator for a heterogeneous SoC accelerator, developed by [Purdue SoCET](https://github.com/Purdue-SoCET/atalla/). Models the full tensor processing datapath — from DRAM through a systolic array — with realistic per-cycle timing for every component.
 
-> This repository is currently being built. 
+**Primary use:** measure performance of GEMM and tensor workloads (cycle counts, FLOP rates, memory bandwidth, queue depths) to identify bottlenecks and evaluate scheduling strategies.
 
-A good starting point is https://github.com/Purdue-SoCET/atalla/docs, and for
-more information about building the simulator and getting started
-please see https://github.com/Purdue-SoCET/Atalla-Sim/docs. 
+> This repository is currently being built.
 
-The main source tree includes these subdirectories:
-    /benchmarks/ -> Benchmarking kernels.
-    /configs/ -> Design Configurations.
-    /docs/ -> Documentation of Arch, Contribution Guide, etc. 
-    /src/ -> Core Design Files. 
-    /tests/ -> Unit Tests.
-    /scripts/ -> CI/CD pipelines.
-    /LICENSE 
-    /Makefile  
-    /README
-    
-If you have questions, please send mail to socet@purdue.edu.
+## Architecture
 
-Enjoy using Atalla-Sim and please share your modifications and extensions.
+The simulation engine is gem5-inspired: all components inherit from `Clocked` and execute one `tick()` per cycle, driven by a global `EventQueue`. Inter-component state lives entirely in `SimQueue` FIFOs, so backpressure propagates naturally.
 
-*NOTE!*
+## Repository Layout
 
-This project draws conceptual and structural inspiration from the
-[gem5 Simulator](https://www.gem5.org/) project.
+```
+atalla-sim/
+├── src/
+│   ├── base/             # Simulation framework (EventQueue, ClockDomain, Clocked)
+│   ├── systolic_array/   # SystolicArrayTPU — pipelined grouped MAC engine
+│   ├── memory/           # DRAM, Scratchpad, Backend, Crossbar, SRAM banks
+│   ├── vector_core/      # VectorCore, VLSU, VectorDatapath, GSAU, Veggie
+│   └── atalla/           # System integration, bridges, experiment harnesses
+├── tests/                # pytest unit and integration tests
+├── tools/                # Sweep runners and visualization scripts
+├── docs/                 # Architecture docs, metrics, queue glossary
+├── logs/                 # Simulation output (stats, gantt, schedule)
+├── Makefile
+└── LICENSE               # BSD 3-Clause
+```
 
-Many architectural ideas — including the modular class hierarchy, 
-naming conventions, and simulation lifecycle — are based on the gem5 design.
+## Getting Started
 
-gem5 is © The gem5 Project and distributed under the BSD 3-Clause License.
+```bash
+# Run the full test suite
+pytest tests/
+
+# Key integration tests
+pytest tests/test_scratchpad_vector_core_sysarr_tpu_tiled_1024.py
+pytest tests/test_scratchpad_vector_core_sysarr_tpu_tiled_1024_blocked_mn.py
+
+# Parameter sweeps
+python tools/run_sysarr_tpu_sweeps.py
+python tools/run_blocked_mn_reuse_sweeps.py
+
+# Visualization
+python tools/plot_sysarr_tpu_sweeps.py
+python tools/plot_blocked_mn_reuse_roofline.py
+python tools/plot_tiled_sysarr_tpu_gantt.py
+```
+
+Simulation logs are written to `logs/`: `stats.log`, `schedule.log`, `gemm_cycles.log`, `gantt.log`.
+
+## Documentation
+
+| Document | What it covers |
+|---|---|
+| [docs/overview.md](docs/overview.md) | Full architecture walkthrough — start here |
+| [docs/sysarr_tpu_system_uml.md](docs/sysarr_tpu_system_uml.md) | Mermaid runtime flowchart and class diagram |
+| [docs/sysarr_tpu_queue_glossary.md](docs/sysarr_tpu_queue_glossary.md) | Every queue/FIFO with payload definitions |
+| [docs/understanding-core-classes.md](docs/understanding-core-classes.md) | Clock/tick/cycle model in detail |
+| [docs/harness_at_test_scratchpad_vector_core_sysarr_tpu_tiled_1024.md](docs/harness_at_test_scratchpad_vector_core_sysarr_tpu_tiled_1024.md) | Tiled GEMM harness walkthrough |
+| [docs/blocked_mn_reuse_roofline_sweeps.md](docs/blocked_mn_reuse_roofline_sweeps.md) | Reuse policy comparison and roofline methodology |
+| [docs/smart_tile_scheduling.ipynb](docs/smart_tile_scheduling.ipynb) | Interactive scheduling model and bandwidth sweep |
+
+## Questions & Contact
+
+Send mail to socet@purdue.edu. Contributions and extensions are welcome — please share them back.
+
+---
+
+This project draws conceptual and structural inspiration from the [gem5 Simulator](https://www.gem5.org/) project. Many architectural ideas — including the modular class hierarchy, naming conventions, and simulation lifecycle — are based on the gem5 design. gem5 is © The gem5 Project and distributed under the BSD 3-Clause License.

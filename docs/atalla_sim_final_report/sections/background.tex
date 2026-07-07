@@ -1,0 +1,33 @@
+% Relevant background.
+% Cite prior work using \cite{key} — entries go in references.bib.
+\subsection{Motivation on Deep Neural Network Accelerators and the development of the Atalla}
+For decades, the dominant paradigm in applied computing rested on expert-designed, hand-crafted heuristics, an approach fundamentally inadequate for real-world complexity, as hand-written rules cannot generalize gracefully. The emergence of Deep Neural Networks (DNNs) represents a decisive shift: a single general-purpose learning program that autonomously extracts hierarchical representations from raw data, recognizing patterns at multiple levels of abstraction without explicit human specification \cite{efficientprocessingofdnn}.
+
+However, the superior accuracy of DNNs comes at the cost of high computational complexity \cite{efficientprocessingofdnn}. The breakdown of Dennard Scaling and the deceleration of Moore's Law, from a doubling of compute performance every 18 months to once every 20 years, have ruled out the expectation that general-purpose hardware will keep pace. This was made economically tangible at Google, where internal analysis found that just three minutes of daily DNN-based voice search per Android user would necessitate doubling the company's entire data center footprint—a capital investment deemed unsound. The response was a decisive industry pivot toward Domain-Specific Architectures (DSAs): circuits designed to perform a narrow subset of tasks with extreme efficiency \cite{pattersontpulecture}.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1\linewidth]{figures/dnngemm.png}
+    \caption{GEMM modelling of a DNN layer}
+    \label{fig:dnngemm}
+\end{figure}
+
+AI accelerators are DSAs specialized for the dominant ML kernels, such as General Matrix Multiplications (GEMMs) and Convolutions (CONVs), employing a systolic array compute fabric: a 2D grid of processing elements (PEs) that passes inputs horizontally and partial sums vertically, maximizing data reuse and minimizing costly off-chip memory accesses \cite{scpadfinalreport}. The Atalla Ax01 \cite{atallasite} is grounded in this same logic, and understanding its architecture requires appreciating this broader convergence of algorithmic necessity, physical scaling limits, and market drive \cite{pattersontpulecture}.
+
+\subsection{Need for Hardware Simulation}
+
+While analytical performance models offer a quick mean of estimating hardware behavior, they are insufficient for evaluating modern architectures. The sheer number of configurations, pipeline interlocks, memory access patterns, and microarchitectural corner cases that affect real performance cannot be faithfully captured by closed-form formulas. Implementation details produce significant and non-obvious performance variations that only come up under realistic workload conditions. Simulation has consequently become the industry standard performance modeling method prior to committing to silicon \cite{surveycomparchsim}.
+
+The most manageable simulation methodology for complex hardware is Discrete-Event Simulation (DES), which models system progression through an event scheduler and queue rather than advancing time cycle-by-cycle through idle states \cite{surveycomparchsim}. DES is formally expressed through Petri Nets, in which hardware is abstracted into three primitives:
+
+1- tokens: serve as abstraction of carriers of information, such as instructions or data packets,
+
+2- places: represent storage entities such as registers and buffers, and
+
+3- transitions: model processing models such as ALUs and arbiters.
+
+A transition fires when its input places hold sufficient tokens, consuming them and producing output tokens, capturing the data-driven, concurrent behavior of pipelined hardware \cite{casvliw}.
+
+Translating architectural intent into Register-Transfer Level (RTL) remains a "mammoth task". Functional verification alone routinely demands tens or hundreds of person-years of engineering effort and substantial compute infrastructure, yet nearly 50\% of chips require additional unplanned tape-outs due to functional bugs that escaped pre-silicon verification, leading to financial and scheduling penalties. Software simulations mitigate this risk by serving as a functional correctness tool by providing a behavioral reference for which against RTL can be validated much more easily than dense tenstbenches \cite{unifiedmethpresiverif}.
+
+Consolidated simulation infrastructures such as gem5 illustrate the maturity of this discipline, representing over 20 years of collaborative development between more than 250 contributors and 7,000 commits. This accumulated investment makes simulation a bedrock for hardware-software co-design, enabling design space exploration and software stack validation long before tape-out, thereby reducing time-to-market and integration risk \cite{gem5}.

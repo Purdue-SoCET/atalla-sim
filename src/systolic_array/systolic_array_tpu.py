@@ -1,9 +1,48 @@
 from typing import List, Optional
 import math
 
+import numpy as _np
+
 from base.dtype import DType, cast_scalar, normalize_dtype
 from base.clocked_object import Clocked
 from base.queue import SimQueue
+
+# ── CuPy GPU acceleration ─────────────────────────────────────────────────────
+# Falls back to pure Python transparently when CuPy is absent or no GPU found.
+try:
+    import cupy as _cp
+    _USE_CUPY: bool = _cp.cuda.runtime.getDeviceCount() > 0
+except Exception:
+    _cp = None          # type: ignore[assignment]
+    _USE_CUPY: bool = False
+
+# Array module alias: cp on GPU, np on CPU.
+_xp = _cp if _USE_CUPY else _np
+
+
+def _cupy_cast(arr: "_cp.ndarray", dtype: DType):
+    """Cast a CuPy float32 array to the simulation dtype and back to float32.
+    Returns (cast_arr, sat_count, ovf_count).
+    sat/ovf are only meaningful for FP16 (per the C++ kernel convention).
+    """
+    sat, ovf = 0, 0
+    if dtype == DType.FP16:
+        sat = int(_cp.sum(_cp.abs(arr) > 65504.0))
+        out = arr.astype(_cp.float16).astype(_cp.float32)
+        ovf = int(_cp.sum(~_cp.isfinite(out)))
+    elif dtype == DType.BF16:
+        try:
+            out = arr.astype(_cp.bfloat16).astype(_cp.float32)
+        except AttributeError:
+            # CuPy < 11: round-to-nearest via int32 bit manipulation
+            bits = arr.view(_cp.uint32)
+            bias = 0x7FFF + ((bits >> 16) & 1)
+            out = ((bits + bias) & 0xFFFF0000).view(_cp.float32)
+    elif dtype == DType.INT8:
+        out = _cp.clip(_cp.round(arr), -128, 127).astype(_cp.int8).astype(_cp.float32)
+    else:
+        out = arr
+    return out, sat, ovf
 
 
 class TPUCell4Input:
@@ -101,6 +140,13 @@ class SystolicArrayTPU(Clocked):
         self.array: List[List[TPUCell4Input]] = [
             [TPUCell4Input(self.group_size) for _ in range(self.size)] for _ in range(self.num_groups)
         ]
+        # Parallel array state (GPU when CuPy available, CPU otherwise).
+        # Mirrors array[g][j].{activation_latch,weight,mul_reg,accumulation}.
+        G, S, GS = self.num_groups, self.size, self.group_size
+        self._np_act = _xp.zeros((G, S, GS), dtype=_np.float32)
+        self._np_wgt = _xp.zeros((G, S, GS), dtype=_np.float32)
+        self._np_mul = _xp.zeros((G, S),     dtype=_np.float32)
+        self._np_acc = _xp.zeros((G, S),     dtype=_np.float32)
         self._input_fifo_left: List[SimQueue[List[float]]] = [
             SimQueue(boundary_buffer_depth) for _ in range(self.num_groups)
         ]
@@ -260,6 +306,7 @@ class SystolicArrayTPU(Clocked):
             groups = self._split_groups(col_vec)
             for g in range(self.num_groups):
                 self.array[g][col].weight = [cast_scalar(v, dtype_norm) for v in groups[g]]
+                self._np_wgt[g, col, :] = self.array[g][col].weight
 
     def tick(self, time: Optional[float] = None) -> None:
         if self._consume_tick(time) is None:
@@ -268,41 +315,43 @@ class SystolicArrayTPU(Clocked):
         if self.stall:
             return
 
-        old_act = [[list(self.array[g][j].activation_latch) for j in range(self.size)] for g in range(self.num_groups)]
-        old_w = [[list(self.array[g][j].weight) for j in range(self.size)] for g in range(self.num_groups)]
-        old_acc = [[self.array[g][j].accumulation for j in range(self.size)] for g in range(self.num_groups)]
-        old_mul = [[self.array[g][j].mul_reg for j in range(self.size)] for g in range(self.num_groups)]
+        # Snapshot BEFORE the shift so compute sees the pre-shift state.
+        # GPU/CPU array path uses fast device copies; pure Python uses list
+        # comprehensions built on demand.
+        if _USE_CUPY:
+            old_act_arr = self._np_act.copy()
+            old_wgt_arr = self._np_wgt.copy()
+            old_acc_arr = self._np_acc.copy()
+            old_mul_arr = self._np_mul.copy()
+        else:
+            old_act = [[list(self.array[g][j].activation_latch) for j in range(self.size)] for g in range(self.num_groups)]
+            old_w   = [[list(self.array[g][j].weight)           for j in range(self.size)] for g in range(self.num_groups)]
+            old_acc = [[self.array[g][j].accumulation           for j in range(self.size)] for g in range(self.num_groups)]
+            old_mul = [[self.array[g][j].mul_reg                for j in range(self.size)] for g in range(self.num_groups)]
 
-        issued_groups = [[0.0] * self.group_size for _ in range(self.num_groups)]
+        issued_groups  = [[0.0] * self.group_size for _ in range(self.num_groups)]
         issued_is_algo = False
 
-        if self.start:
-            active_pes = 0
-            for g in range(self.num_groups):
-                for j in range(self.size):
-                    for lane in range(self.group_size):
-                        if old_act[g][j][lane] != 0.0 and old_w[g][j][lane] != 0.0:
-                            active_pes += 1
-            self.compute_window_cycles += 1
-            self.compute_window_active_pe_sum += active_pes
-            if active_pes > self.max_active_pes_in_cycle:
-                self.max_active_pes_in_cycle = active_pes
-            if active_pes > 0:
-                self.valid_mac_cycles += 1
-                self.active_pe_sum += active_pes
-
+        # -- Shift phase -------------------------------------------------------
+        # The loops read self.array[g][j] before overwriting it (the sequential
+        # ordering guarantees each cell is read before its turn to be written),
+        # so no pre-built snapshot is needed inside the shift loops.
         if self.weight_en:
             elem_bytes = self._dtype_bytes()
             self.internal_bytes["weight_shift"] += self.size * self.size * elem_bytes
             for g in range(self.num_groups):
                 in_val = self._weight_boundary[g].dequeue()
                 pass_bus = list(in_val) if in_val is not None else [0.0] * self.group_size
+                in_arr_g = pass_bus[:]
                 for j in range(self.size):
-                    prev_weight = old_w[g][j]
+                    prev_weight = list(self.array[g][j].weight)   # read before overwrite
                     self.array[g][j].weight = [float(v) for v in pass_bus]
                     if any(v != 0.0 for v in pass_bus):
                         self.internal_bytes_valid["weight_shift"] += sum(1 for v in pass_bus if v != 0.0) * elem_bytes
                     pass_bus = prev_weight
+                if _USE_CUPY:
+                    self._np_wgt[g, 1:, :] = self._np_wgt[g, :-1, :].copy()
+                    self._np_wgt[g, 0, :]  = in_arr_g
         elif self.mac_shift:
             elem_bytes = self._dtype_bytes()
             self.internal_bytes["act_shift"] += self.size * self.size * elem_bytes
@@ -311,71 +360,171 @@ class SystolicArrayTPU(Clocked):
             for g in range(self.num_groups):
                 in_val = self._input_fifo_left[g].dequeue()
                 pass_bus = list(in_val) if in_val is not None else [0.0] * self.group_size
+                in_arr_g = pass_bus[:]
                 issued_groups[g] = list(pass_bus)
                 for j in range(self.size):
-                    prev_act = old_act[g][j]
+                    prev_act = list(self.array[g][j].activation_latch)  # read before overwrite
                     self.array[g][j].activation_latch = [float(v) for v in pass_bus]
                     if any(v != 0.0 for v in pass_bus):
                         self.internal_bytes_valid["act_shift"] += sum(1 for v in pass_bus if v != 0.0) * elem_bytes
                     pass_bus = prev_act
+                if _USE_CUPY:
+                    self._np_act[g, 1:, :] = self._np_act[g, :-1, :].copy()
+                    self._np_act[g, 0, :]  = in_arr_g
 
         elem_bytes = self._dtype_bytes()
-        self.internal_bytes["psum_shift"] += self.num_groups * self.size * elem_bytes
-        for g in range(self.num_groups):
-            for j in range(self.size):
-                top_boundary = self._psum_input_fifo_top[j].dequeue() if g == 0 else None
-                psum_in = float(top_boundary) if top_boundary is not None else (0.0 if g == 0 else old_acc[g - 1][j])
-                if psum_in != 0.0:
-                    self.internal_bytes_valid["psum_shift"] += elem_bytes
-                acc = old_mul[g][j] + psum_in
-                self.array[g][j].count_add(1, is_psum=True)
-                self.metrics["add_ops"] += 1
-                self.metrics["psum_adds"] += 1
+
+        # -- Compute phase ----------------------------------------------------
+        if _USE_CUPY:
+            G, S, GS = self.num_groups, self.size, self.group_size
+
+            # Dequeue psums (g=0 boundary) into a GPU vector.
+            self.internal_bytes["psum_shift"] += G * S * elem_bytes
+            psums_np = _np.zeros(S, dtype=_np.float32)
+            for j in range(S):
+                val = self._psum_input_fifo_top[j].dequeue()
+                if val is not None:
+                    psums_np[j] = float(val)
+            psums_cp = _cp.asarray(psums_np)                    # [S] on GPU
+
+            issued_cp = _cp.asarray(
+                _np.asarray(issued_groups, dtype=_np.float32))  # [G, GS] on GPU
+
+            # ── 1. Psum accumulation ──────────────────────────────────────────
+            # new_acc[g,j] = old_mul[g,j] + psum_in[g,j]
+            # psum_in[0,:] = psums_top; psum_in[g,:] = old_acc[g-1,:] for g>0
+            psum_in = _cp.empty((G, S), dtype=_cp.float32)
+            psum_in[0, :] = psums_cp
+            if G > 1:
+                psum_in[1:, :] = old_acc_arr[:-1, :]
+            new_acc = old_mul_arr + psum_in
+            valid_psum = int(_cp.sum(psum_in != 0.0))
+            sat, ovf = 0, 0
+            if self._current_dtype is not None:
+                new_acc, sat, ovf = _cupy_cast(new_acc, self._current_dtype)
+            _cp.copyto(self._np_acc, new_acc)
+            new_acc_np = _cp.asnumpy(new_acc)
+            for g in range(G):
+                for j in range(S):
+                    self.array[g][j].accumulation = float(new_acc_np[g, j])
+            self.internal_bytes_valid["psum_shift"] += valid_psum * elem_bytes
+            self.metrics["add_ops"]   += G * S
+            self.metrics["psum_adds"] += G * S
+            self.saturation_count     += sat
+            self.overflow_count       += ovf
+
+            if self.start:
+                # ── 2. Cell MAC: dot[g,j] = Σ_l act[g,j,l]*wgt[g,j,l] ───────
+                dot = _cp.einsum('gsl,gsl->gs', old_act_arr, old_wgt_arr)
+                active_pes = int(_cp.sum(
+                    (old_act_arr != 0.0) & (old_wgt_arr != 0.0)))
+                sat, ovf = 0, 0
                 if self._current_dtype is not None:
-                    cast_acc = cast_scalar(acc, self._current_dtype)
-                    self._note_cast(acc, cast_acc)
-                    acc = cast_acc
-                self.array[g][j].accumulation = float(acc)
+                    dot, sat, ovf = _cupy_cast(dot, self._current_dtype)
+                _cp.copyto(self._np_mul, dot)
+                mul_np = _cp.asnumpy(dot)
+                for g in range(G):
+                    for j in range(S):
+                        self.array[g][j].mul_reg = float(mul_np[g, j])
 
-        for g in range(self.num_groups):
-            for j in range(self.size):
-                if self.start:
-                    products = [old_act[g][j][lane] * old_w[g][j][lane] for lane in range(self.group_size)]
-                    dot = sum(products)
-                    mul_count = self.group_size
-                    add_count = max(0, self.group_size - 1)
-                    self.array[g][j].count_mul(mul_count)
-                    self.array[g][j].count_add(add_count, is_psum=False)
-                    self.metrics["mul_ops"] += mul_count
-                    self.metrics["mac_ops"] += mul_count
-                    self.metrics["add_ops"] += add_count
-                    if self._current_dtype is not None:
-                        cast_dot = cast_scalar(dot, self._current_dtype)
-                        self._note_cast(dot, cast_dot)
-                        dot = cast_dot
-                    self.array[g][j].mul_reg = float(dot)
+                # ── 3. Output row: issued_out[j] = Σ_{g,l} issued[g,l]*wgt[g,j,l]
+                issued_out_cp = _cp.einsum('gl,gjl->j', issued_cp, old_wgt_arr)
+                if self._current_dtype is not None:
+                    issued_out_cp, s2, o2 = _cupy_cast(issued_out_cp, self._current_dtype)
+                    sat += s2; ovf += o2
+                issued_output: Optional[List[float]] = _cp.asnumpy(issued_out_cp).tolist()
 
-        issued_output = None
-        if self.start:
-            full_input = [float(v) for group in issued_groups for v in group][: self.size]
-            issued_output = []
-            for j in range(self.size):
-                col_sum = 0.0
+                mul_ops = G * S * GS
+                self.metrics["add_ops"] += G * S * max(0, GS - 1)
+                self.metrics["mul_ops"] += mul_ops
+                self.metrics["mac_ops"] += mul_ops
+                self.saturation_count   += sat
+                self.overflow_count     += ovf
+
+                self.compute_window_cycles        += 1
+                self.compute_window_active_pe_sum += active_pes
+                if active_pes > self.max_active_pes_in_cycle:
+                    self.max_active_pes_in_cycle = active_pes
+                if active_pes > 0:
+                    self.valid_mac_cycles += 1
+                    self.active_pe_sum    += active_pes
+            else:
+                issued_output = None
+
+        else:
+            # -- Pure-Python fallback (original logic, unchanged) -------------
+            if self.start:
+                active_pes = 0
                 for g in range(self.num_groups):
-                    group_dot = 0.0
-                    for lane in range(self.group_size):
-                        group_dot += float(issued_groups[g][lane]) * float(old_w[g][j][lane])
-                    col_sum += group_dot
-                if self._current_dtype is not None:
-                    cast_sum = cast_scalar(col_sum, self._current_dtype)
-                    self._note_cast(col_sum, cast_sum)
-                    col_sum = cast_sum
-                issued_output.append(float(col_sum))
+                    for j in range(self.size):
+                        for lane in range(self.group_size):
+                            if old_act[g][j][lane] != 0.0 and old_w[g][j][lane] != 0.0:
+                                active_pes += 1
+                self.compute_window_cycles += 1
+                self.compute_window_active_pe_sum += active_pes
+                if active_pes > self.max_active_pes_in_cycle:
+                    self.max_active_pes_in_cycle = active_pes
+                if active_pes > 0:
+                    self.valid_mac_cycles += 1
+                    self.active_pe_sum += active_pes
 
+            self.internal_bytes["psum_shift"] += self.num_groups * self.size * elem_bytes
+            for g in range(self.num_groups):
+                for j in range(self.size):
+                    top_boundary = self._psum_input_fifo_top[j].dequeue() if g == 0 else None
+                    psum_in = float(top_boundary) if top_boundary is not None else (0.0 if g == 0 else old_acc[g - 1][j])
+                    if psum_in != 0.0:
+                        self.internal_bytes_valid["psum_shift"] += elem_bytes
+                    acc = old_mul[g][j] + psum_in
+                    self.array[g][j].count_add(1, is_psum=True)
+                    self.metrics["add_ops"] += 1
+                    self.metrics["psum_adds"] += 1
+                    if self._current_dtype is not None:
+                        cast_acc = cast_scalar(acc, self._current_dtype)
+                        self._note_cast(acc, cast_acc)
+                        acc = cast_acc
+                    self.array[g][j].accumulation = float(acc)
+
+            for g in range(self.num_groups):
+                for j in range(self.size):
+                    if self.start:
+                        products = [old_act[g][j][lane] * old_w[g][j][lane] for lane in range(self.group_size)]
+                        dot = sum(products)
+                        mul_count = self.group_size
+                        add_count = max(0, self.group_size - 1)
+                        self.array[g][j].count_mul(mul_count)
+                        self.array[g][j].count_add(add_count, is_psum=False)
+                        self.metrics["mul_ops"] += mul_count
+                        self.metrics["mac_ops"] += mul_count
+                        self.metrics["add_ops"] += add_count
+                        if self._current_dtype is not None:
+                            cast_dot = cast_scalar(dot, self._current_dtype)
+                            self._note_cast(dot, cast_dot)
+                            dot = cast_dot
+                        self.array[g][j].mul_reg = float(dot)
+
+            issued_output = None
+            if self.start:
+                full_input = [float(v) for group in issued_groups for v in group][: self.size]
+                issued_output = []
+                for j in range(self.size):
+                    col_sum = 0.0
+                    for g in range(self.num_groups):
+                        group_dot = 0.0
+                        for lane in range(self.group_size):
+                            group_dot += float(issued_groups[g][lane]) * float(old_w[g][j][lane])
+                        col_sum += group_dot
+                    if self._current_dtype is not None:
+                        cast_sum = cast_scalar(col_sum, self._current_dtype)
+                        self._note_cast(col_sum, cast_sum)
+                        col_sum = cast_sum
+                    issued_output.append(float(col_sum))
+
+        # -- Output pipeline (unchanged) --------------------------------------
         ready_row = self._output_pipe[-1]
         ready_tag = self._output_tag_pipe[-1]
-        self._output_pipe = [issued_output] + self._output_pipe[:-1]
-        self._output_tag_pipe = [issued_is_algo] + self._output_tag_pipe[:-1]
+        self._output_pipe      = [issued_output] + self._output_pipe[:-1]
+        self._output_tag_pipe  = [issued_is_algo] + self._output_tag_pipe[:-1]
         self.value_ready = bool(ready_tag and ready_row is not None)
 
         if self.value_ready and ready_row is not None:

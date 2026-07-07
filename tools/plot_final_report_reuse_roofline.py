@@ -340,7 +340,7 @@ def main() -> int:
     parser.add_argument(
         "--bandwidth-source",
         choices=("naive-active", "max-active", "max-avg"),
-        default="naive-active",
+        default="max-active",
         help="Bandwidth ceiling used for the roofline slope.",
     )
     args = parser.parse_args()

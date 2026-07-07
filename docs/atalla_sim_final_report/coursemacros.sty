@@ -1,0 +1,102 @@
+% coursemacros.sty — course-specific commands
+% Place this file in the same directory as main.tex
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{coursemacros}[2026/03/27 Course report macros]
+\RequirePackage{xspace}
+\RequirePackage{etoolbox}  % for list-building macros
+% ====================================================================
+% COURSE IDENTITY — Instructors: edit these to match your course.
+% ====================================================================
+\newcommand{\coursename}{}  % <-- fix capitalization
+\newcommand{\coursenumsophomore}{VIP 27920}
+\newcommand{\coursenumzerocredit}{VIP 37900}
+\newcommand{\coursenumjunior}{VIP 37920}
+\newcommand{\coursenumsenior}{VIP 47920}
+\newcommand{\coursenumsdfirst}{VIP 47921} % 1st sem SD
+\newcommand{\coursenumsdsecond}{VIP 47922} % 1st sem SD
+\newcommand{\coursenumindstudy}{ECE 49600}
+\newcommand{\coursenumscale}{ECE 49600S}
+\newcommand{\coursenumgrad}{ECE 69600}   % graduate number
+% Add more as needed, e.g. \newcommand{\coursenumhonors}{CS 400H}
+% ====================================================================
+% AUTHOR REGISTRATION SYSTEM
+% Students call \addauthor{Name}{email@school.edu}{\coursenum} for
+% each team member. This builds two things automatically:
+%   \authorblock  — formatted tabular block for title/cover pages
+%   \authorlist   — plain "Name, Name, Name" string for the footer
+%
+% Use \authornewline between \addauthor calls to force a new row
+% with vertical spacing. Adjust \authorrowsep to taste.
+% ====================================================================
+\newcounter{authorcount}
+\newcounter{@authslot}         % total slots including break markers
+\newcommand{\@authorlist}{}
+
+% Vertical space between rows of authors (adjust to taste)
+\newlength{\authorrowsep}
+\setlength{\authorrowsep}{1em}
+
+% Store per-author data in numbered macros; build the plain name list.
+\newcommand{\addauthor}[3]{%
+    \stepcounter{authorcount}%
+    \stepcounter{@authslot}%
+    % Store this author's data keyed by slot number
+    \expandafter\def\csname @authname\the@authslot\endcsname{#1}%
+    \expandafter\def\csname @authemail\the@authslot\endcsname{#2}%
+    \expandafter\def\csname @authcourse\the@authslot\endcsname{#3}%
+    % Append to plain name list
+    \ifnum\value{authorcount}>1
+        \g@addto@macro\@authorlist{, }%
+    \fi
+    \g@addto@macro\@authorlist{#1}%
+}
+
+% Insert a line break in the author block between rows.
+\newcommand{\authornewline}{%
+    \stepcounter{@authslot}%
+    \expandafter\def\csname @authbreak\the@authslot\endcsname{1}%
+}
+
+% Format one author as a centered tabular cell
+\newcommand{\@fmtauthor}[1]{%
+    \begin{tabular}[t]{c}%
+        \csname @authname#1\endcsname \\
+        \csname @authcourse#1\endcsname \\
+        \texttt{\csname @authemail#1\endcsname}%
+    \end{tabular}%
+}
+
+% Build the full author block at expansion time by iterating
+\newcounter{@authidx}
+\newcounter{@slotidx}
+\newcommand{\authorblock}{%
+    \setcounter{@authidx}{0}%
+    \setcounter{@slotidx}{0}%
+    \loop\ifnum\value{@authidx}<\value{authorcount}%
+        \stepcounter{@slotidx}%
+        % Check whether this slot is a break marker
+        \ifcsname @authbreak\arabic{@slotidx}\endcsname
+            \\[\authorrowsep]%
+            \stepcounter{@slotidx}%  skip past the marker to the next real author
+        \else
+            \ifnum\value{@authidx}>0 \qquad\fi
+        \fi
+        \stepcounter{@authidx}%
+        \@fmtauthor{\arabic{@slotidx}}%
+    \repeat
+}
+
+% Public accessor for the plain name list
+\newcommand{\authorlist}{\@authorlist}
+% ====================================================================
+% CONVENIENCE MATH MACROS
+% ====================================================================
+\newcommand{\bigO}[1]{\mathcal{O}(#1)}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\N}{\mathbb{N}}
+% ====================================================================
+% COMMON ABBREVIATIONS
+% ====================================================================
+\newcommand{\eg}{e.g.,\xspace}
+\newcommand{\ie}{i.e.,\xspace}
+\newcommand{\etal}{et~al.\xspace}
