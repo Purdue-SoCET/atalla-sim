@@ -64,8 +64,12 @@ class FunctionalUnitPipeline:
         return self.entries.enqueue({"remain": self.latency, "payload": payload})
 
     def tick(self, time: Optional[float] = None) -> None:
-        next_entries = SimQueue(self.capacity)
-        while not self.entries.is_empty():
+        # Rotate the queue in place: pop each entry once and push the survivors
+        # back. Since survivors can only ever be fewer than the entries popped,
+        # capacity is never exceeded and relative order is preserved -- the
+        # same result as rebuilding the queue, without allocating one per FU
+        # per simulated cycle.
+        for _ in range(len(self.entries)):
             entry = self.entries.dequeue()
             if entry is None:
                 break
@@ -73,8 +77,7 @@ class FunctionalUnitPipeline:
             if entry["remain"] <= 0:
                 self.completed.enqueue(entry["payload"])
             else:
-                next_entries.enqueue(entry)
-        self.entries = next_entries
+                self.entries.enqueue(entry)
 
     def has_completed(self) -> bool:
         return not self.completed.is_empty()
@@ -329,8 +332,8 @@ class ResultCollector(Clocked):
         if cycle is None:
             return
 
-        next_pending = SimQueue(self.pending_reductions.max_size)
-        while not self.pending_reductions.is_empty():
+        # Same in-place rotation as FunctionalUnitPipeline.tick.
+        for _ in range(len(self.pending_reductions)):
             item = self.pending_reductions.dequeue()
             if item is None:
                 break
@@ -338,14 +341,13 @@ class ResultCollector(Clocked):
                 item["remain"] -= 1
             if item["remain"] <= 0:
                 if not self.completed_vectors.enqueue(item["packet"]):
-                    next_pending.enqueue(item)
+                    self.pending_reductions.enqueue(item)
                 else:
                     inst_id = item["inst_id"]
                     if inst_id in self.inflight:
                         del self.inflight[inst_id]
             else:
-                next_pending.enqueue(item)
-        self.pending_reductions = next_pending
+                self.pending_reductions.enqueue(item)
 
     def pop_completed(self) -> Optional[dict]:
         item = self.completed_vectors.dequeue()
