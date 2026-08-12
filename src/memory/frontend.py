@@ -1,8 +1,10 @@
 from typing import Optional, Callable, List, Any
+from base.clocked_object import Clocked
 from base.queue import SimQueue
 
-class Frontend:
+class Frontend(Clocked):
     def __init__(self, tile_id: int, spad: "Scratchpad", queue_size: int = 1):
+        super().__init__()
         self.tile_id = tile_id
         self.spad = spad
         self.writeq = SimQueue(max_size=queue_size)  # (ready_cycle, base_sp_addr, row_bytes, row_idx, callback)
@@ -20,6 +22,7 @@ class Frontend:
             self.write_stalled = True
             return False
         self.write_stalled = False
+        self.request_wake(now)
         return True
 
     def read(self, base_sp_addr: int, row_idx: int, callback: Callable[[List[bytes]], None]):
@@ -31,7 +34,21 @@ class Frontend:
             self.read_stalled = True
             return False
         self.read_stalled = False
+        self.request_wake(now)
         return True
+
+    def next_wake(self, now: int) -> Optional[int]:
+        """Idle only when both queues are drained.
+
+        A queued request cannot simply be scheduled for its ready_cycle: it
+        also has to clear _write_path_can_accept / _read_path_can_accept, which
+        depend on downstream capacity and can keep it waiting. Retrying every
+        cycle while anything is queued is the conservative choice, and the
+        common case -- both queues empty -- still sleeps.
+        """
+        if len(self.writeq) or len(self.readq):
+            return now + 1
+        return None
 
     def tick(self, now):
         head = self.writeq.peek()

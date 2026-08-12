@@ -1,72 +1,189 @@
-This is the Atalla 0x01 Cycle Accurate Simulator.
+                    Atalla 0x01 — Cycle-Accurate Simulator
 
-The main website can be found at https://github.com/Purdue-SoCET/atalla/.
+A cycle-accurate model of a heterogeneous SoC accelerator, built by Purdue
+SoCET. It models the whole tensor datapath — DRAM through scratchpad, vector
+core, and systolic array — with per-cycle timing for every component, so that
+GEMM and tensor workloads can be measured (cycles, FLOP rate, bandwidth, queue
+depths) before there is silicon to measure.
 
-> This repository is currently being built. 
+    Project      https://github.com/Purdue-SoCET/atalla/
+    This repo    https://github.com/Purdue-SoCET/Atalla-Sim/
+    Contact      socet@purdue.edu
 
-A good starting point is https://github.com/Purdue-SoCET/atalla/docs, and for
-more information about building the simulator and getting started
-please see https://github.com/Purdue-SoCET/Atalla-Sim/docs. 
+> This repository is currently being built.
 
-The main source tree includes these subdirectories:
-    /benchmarks/ -> Benchmarking kernels.
-    /configs/ -> Design Configurations.
-    /docs/ -> Documentation of Arch, Contribution Guide, etc.
-    /src/ -> Core Design Files.
-    /src/native/ -> Optional C++ SIMD kernels (AVX2 / AVX-512).
-    /tests/ -> Unit Tests.
-    /scripts/ -> CI/CD pipelines.
-    /LICENSE
-    /Makefile
-    /README
+
+THE MODELED SYSTEM
+------------------
+
+                  ┌───────────────────────────────────────────────┐
+                  │                    DRAM                       │
+                  └───────────────────────┬───────────────────────┘
+                                          │ bursts
+                  ┌───────────────────────▼───────────────────────┐
+                  │                  Backend                      │
+                  │        transaction queue, burst channel       │
+                  └───────────────────────┬───────────────────────┘
+                                          │
+                  ┌───────────────────────▼───────────────────────┐
+                  │                 Scratchpad                    │
+                  │   frontends ──► crossbars ──► SRAM banks      │
+                  │   (queues)      (swizzle)     (2 tiles x N)   │
+                  └───────┬───────────────────────────▲───────────┘
+                     load │                           │ store
+                  ┌───────▼───────────────────────────┴───────────┐
+                  │                 Vector Core                   │
+                  │   VLSU ──► Veggie (VRF) ──► lanes / GSAU      │
+                  └───────────────────────┬───────────────────────┘
+                                          │ rows
+                  ┌───────────────────────▼───────────────────────┐
+                  │              SystolicArrayTPU                 │
+                  │   grouped MAC cells, weight + psum shift      │
+                  └───────────────────────────────────────────────┘
+
+Every box is a `Clocked` object advanced once per simulated cycle. Boxes are
+connected only by fixed-capacity `SimQueue` FIFOs, so backpressure propagates
+by itself instead of being modeled explicitly.
+
+
+REPOSITORY LAYOUT
+-----------------
+
+    src/
+      base/          simulation framework: EventQueue, ClockDomain, Clocked,
+                     WakeGroup/CompositeClocked, SimQueue, dtypes, debug
+      memory/        DRAM, Backend, Scratchpad, Crossbar, SRAM banks, Frontend
+      vector_core/   VectorCore, VLSU, VectorDatapath, GSAU, Veggie
+      systolic_array/  SystolicArrayTPU and the Meissa black-box model
+      native/        optional C++ SIMD kernels (AVX2 / AVX-512)
+      atalla/        platform integration, bridges, experiment harnesses
+    tests/           pytest unit and integration tests
+    tools/           sweep runners, plotting, benchmarks
+    docs/            see docs/README.md for the map
+    logs/            simulation output (stats, gantt, schedule)
+    Makefile  LICENSE  README
+
+
+GETTING STARTED
+---------------
+
+    make native        # optional but recommended; see below
+    pytest tests/
+
+    # the two long GEMM integration tests
+    pytest tests/atalla/test_scratchpad_vector_core_sysarr_tpu_tiled_1024.py
+    pytest tests/atalla/test_scratchpad_vector_core_sysarr_tpu_tiled_1024_blocked_mn.py
+
+    # parameter sweeps and plots
+    python tools/run_sysarr_tpu_sweeps.py
+    python tools/plot_sysarr_tpu_sweeps.py
+    python tools/bench_native.py
+
+Simulation output lands in `logs/`: stats.log, schedule.log, gemm_cycles.log,
+gantt.log.
+
+
+DOCUMENTATION
+-------------
+
+Start at `docs/README.md`. The one to read first is
+`docs/architecture/base-classes.md`, which covers the tick/cycle model, the
+scheduler, and how to write a component.
+
+    docs/architecture/   base-classes, platform-uml, queue-glossary
+    docs/harnesses/      how experiments drive the platform
+    docs/results/        measurements from specific runs
+    docs/sweeps/         parameter studies
+    docs/notebooks/      interactive scheduling model
+
+
+HOW A CYCLE RUNS
+----------------
+
+    EventQueue ──► ClockDomain ──► platform.tick(t)
+      (min-heap)     (one event         │
+                      per cycle)        ├─ phase 10  VectorCore
+                                        ├─ phase 20  VLS bridges
+                                        ├─ phase 30  GSAU bridge ──► systolic array
+                                        ├─ phase 40  Scratchpad
+                                        │              frontends ─► xbars ─► banks
+                                        ├─ phase 50  Backend / DRAM
+                                        └─ phase 90  experiment harness
+
+The event queue is a metronome: exactly one event is pending, and the clock
+domain reschedules itself each cycle. Phase order is declared once, in
+`src/atalla/sysarr_tpu_system.py`, rather than re-listed at every call site.
+
+
+TICK SCHEDULING
+---------------
+
+Components are ticked only when they have work. On a 16x16 GEMM, 92% of tick
+calls changed no state at all — an SRAM bank with an empty ready-heap, a
+functional unit with nothing in flight — so those are skipped. Worth ~12% on
+the 1024x1024 GEMM suite (1:18:38 -> 1:09:03).
+
+A clocked object may declare when it next needs to run:
+
+    def next_wake(self, now) -> Optional[int]      # None == quiescent
+
+The default returns `now + 1` ("tick me every cycle"), so an unconverted
+component behaves exactly as before and components convert one at a time. An
+override may only ever be CONSERVATIVE: waking too early costs a wasted tick,
+waking too late drops work silently.
+
+Scheduling must be invisible. Run the suite both ways and compare:
+
+    ATALLA_SCHED=legacy pytest tests/     # tick everything, every cycle
+    pytest tests/                         # default: skip idle components
+
+`tests/base/test_sched.py` asserts this end-to-end using per-bank utilisation
+counters, which shift if any operation completes even one cycle differently.
+
+Caveat when converting a component: anything derived from "when did I last
+run" goes stale once an object can sleep. SRAMBank takes its due-cycles from a
+shared SimClock rather than its own tick counter, and accumulates cycles_busy
+by elapsed cycles instead of +1 per tick. See docs/architecture/base-classes.md.
+
 
 BUILDING THE SIMD KERNELS
 -------------------------
 
     make native
 
-This compiles src/native/atalla_kernels.cpp into a shared object that
-accelerates the systolic-array datapath and the fp16 cast. The build is
-optional: without it the simulator runs a pure-numpy fallback that produces
-bit-identical results, just more slowly. A single .so carries AVX-512F, AVX2
-and portable scalar code paths and picks one at load time via CPUID, so it can
-be built once and copied between machines.
+Compiles `src/native/atalla_kernels.cpp` into a shared object that accelerates
+the systolic-array datapath and the fp16 cast. Optional: without it the
+simulator runs a pure-numpy fallback producing bit-identical results, just more
+slowly. One .so carries AVX-512F, AVX2 and portable scalar paths and selects
+one at load time via CPUID, so it can be built once and copied between hosts.
 
 Measured on a 32x32 fp16 array (Xeon E5-2697A v4, AVX2, no AVX-512):
 
     pure Python (previous)   2070 us / simulated cycle
     numpy fallback            400 us / simulated cycle
-    native AVX2                80 us / simulated cycle    ~25x
+    native AVX2                80 us / simulated cycle     ~25x
 
-Reproduce the last two with:
+Reproduce the last two with `python tools/bench_native.py`.
 
-    python tools/bench_native.py
-
-What remains after this is FIFO and event-queue bookkeeping, not arithmetic,
-so a wider vector unit alone will not move the number much further.
-
-To confirm which path is active, or to force the fallback:
+To see which path is active, or to force the fallback:
 
     python3 -c "import sys; sys.path.insert(0,'src'); \
         from native import kernels; print(kernels.NATIVE_ISA)"
-    ATALLA_NO_NATIVE=1 pytest tests/     # run without the .so
+    ATALLA_NO_NATIVE=1 pytest tests/      # run without the .so
 
 The kernels are held to bit-exact equivalence with the pure-Python reference:
-no FMA (products are rounded before they are summed), double-precision
+no FMA (products are rounded before they are summed), double precision
 throughout, and lane reductions kept in their original left-to-right order.
-tests/native/ checks the fp16 cast against numpy across every half-precision
+`tests/native/` checks the fp16 cast against numpy across every half-precision
 midpoint and verifies the native and fallback datapaths tick identically.
 
-If you have questions, please send mail to socet@purdue.edu.
 
-Enjoy using Atalla-Sim and please share your modifications and extensions.
-
-*NOTE!*
+NOTE
+----
 
 This project draws conceptual and structural inspiration from the
-[gem5 Simulator](https://www.gem5.org/) project.
-
-Many architectural ideas — including the modular class hierarchy, 
-naming conventions, and simulation lifecycle — are based on the gem5 design.
+[gem5 Simulator](https://www.gem5.org/) project. Many architectural ideas —
+the modular class hierarchy, naming conventions, and simulation lifecycle —
+are based on the gem5 design.
 
 gem5 is © The gem5 Project and distributed under the BSD 3-Clause License.

@@ -1,6 +1,56 @@
-# SysArr TPU System UML
+# SysArr TPU Platform
 
-This note now combines two different views of the sysarr TPU simulator stack:
+For the clocking and scheduling machinery underneath all of this, see
+[base-classes.md](base-classes.md).
+
+## Shape of the platform
+
+The detailed figures below are Mermaid, which renders on GitHub but is hard to
+read as source. Here is the same structure in plain text — the tick order is
+top to bottom, and the arrows are `SimQueue` FIFOs.
+
+```
+   phase 10   VectorCore ────────────────────────────────────────────┐
+                │  scheduler builds VLIW packets                     │
+                ├──► vliw_q ──► VLSU.issue_q ──► VLSU.req_q          │
+                │              (+ load_dst_fifos: dst metadata)      │
+                └──► gsau.to_systolic                                │
+                     (+ gsau.rd_queue: awaited destinations)         │
+                                                                     │
+   phase 20   VLSFrontendBridge                                      │
+                VLSU.req_q ──► Frontend.readq / .writeq              │
+                                                                     │
+   phase 30   GSAUTPUBridge                                          │
+                gsau.to_systolic ──► SystolicArrayTPU                │
+                  ├─ enqueue_weights ──► _weight_boundary[g]         │
+                  ├─ enqueue        ──► _input_fifo_left[g]          │
+                  ├─ enqueue_psums  ──► _psum_input_fifo_top[j]      │
+                  └─ psum_output_fifo_bottom ──► gsau.from_systolic ─┤
+                                                                     │
+   phase 40   Scratchpad                                             │
+                Frontend.readq  ──► tile_read_xbars[t]  ──► banks    │
+                Frontend.writeq ──► tile_write_xbars[t] ──► banks    │
+                banks ──► (callback) ──► frontend cb ──► VLSU rsp    │
+                                                                     │
+   phase 50   Backend ──► DRAM burst channel ──► Scratchpad          │
+                                                                     │
+   phase 90   Harness  ◄────── wb_valid / last_wb ────────────────────┘
+                observes writeback, issues the next work,
+                stops the clock when the run completes
+```
+
+Two properties this picture is meant to make obvious:
+
+- **Groups tick in the direction data flows.** Inside the scratchpad the order
+  is frontends, then crossbars, then banks — so work handed downstream is
+  picked up in the same cycle, exactly as it was before idle components were
+  skipped.
+- **Every arrow is a bounded FIFO.** A full queue is how a stall is expressed;
+  no component asks another whether it is busy.
+
+---
+
+This note combines two further views of the sysarr TPU simulator stack:
 
 - a detailed runtime flowchart focused on modeled dataflow, queue ownership, and per-cycle driving
 - a class-style view of the tiled and blocked harness layer that builds and drives the platform
@@ -328,14 +378,14 @@ classDiagram
 
 The main assembly functions are:
 
-- `build_tpu_platform(...)` in [src/atalla/sysarr_tpu_system.py](../src/atalla/sysarr_tpu_system.py)
-- `build_tpu_compute_path(...)` in [src/atalla/sysarr_tpu_system.py](../src/atalla/sysarr_tpu_system.py)
+- `build_tpu_platform(...)` in [src/atalla/sysarr_tpu_system.py](../../src/atalla/sysarr_tpu_system.py)
+- `build_tpu_compute_path(...)` in [src/atalla/sysarr_tpu_system.py](../../src/atalla/sysarr_tpu_system.py)
 
 The main user-facing wrappers are:
 
-- `SysArrTPUSystem` in [src/atalla/sysarr_tpu_system.py](../src/atalla/sysarr_tpu_system.py)
-- `TiledTPUCosim` in [tests/atalla/test_scratchpad_vector_core_sysarr_tpu_tiled_1024.py](../tests/atalla/test_scratchpad_vector_core_sysarr_tpu_tiled_1024.py)
-- `MNReuseBlockedTPUCosim` in [tests/atalla/test_scratchpad_vector_core_sysarr_tpu_tiled_1024_blocked_mn.py](../tests/atalla/test_scratchpad_vector_core_sysarr_tpu_tiled_1024_blocked_mn.py)
+- `SysArrTPUSystem` in [src/atalla/sysarr_tpu_system.py](../../src/atalla/sysarr_tpu_system.py)
+- `TiledTPUCosim` in [tests/atalla/test_scratchpad_vector_core_sysarr_tpu_tiled_1024.py](../../tests/atalla/test_scratchpad_vector_core_sysarr_tpu_tiled_1024.py)
+- `MNReuseBlockedTPUCosim` in [tests/atalla/test_scratchpad_vector_core_sysarr_tpu_tiled_1024_blocked_mn.py](../../tests/atalla/test_scratchpad_vector_core_sysarr_tpu_tiled_1024_blocked_mn.py)
 
 ## Reading Guide
 

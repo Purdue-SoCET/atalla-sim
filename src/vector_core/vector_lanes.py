@@ -4,6 +4,7 @@ from base.queue import SimQueue
 from typing import Callable, Dict, List, Optional, Sequence
 
 from base.dtype import DType, cast_scalar, cast_vector, normalize_dtype
+from base.sched import SCHED_ENABLED
 
 Time = float
 
@@ -78,6 +79,15 @@ class FunctionalUnitPipeline:
                 self.completed.enqueue(entry["payload"])
             else:
                 self.entries.enqueue(entry)
+
+    def is_idle(self) -> bool:
+        """True when tick() provably cannot change anything.
+
+        tick() only ever moves entries towards completion, so with no entries
+        in flight there is nothing for it to do. Note this deliberately ignores
+        `completed`: that queue is drained by the lane, not by tick().
+        """
+        return self.entries.is_empty()
 
     def has_completed(self) -> bool:
         return not self.completed.is_empty()
@@ -401,6 +411,27 @@ class VectorLane(Clocked):
     def _lane_indices(self, vector_len: int) -> List[int]:
         return list(range(self.lane_id, vector_len, self.lane_count))
 
+    def is_idle(self) -> bool:
+        """True when every stage of tick() would find nothing to do.
+
+        Stage 1 walks fu_ctx, stage 2 the pipelines, stage 3 pairs completed
+        results with meta, stage 4 drains pending_outputs. With all four empty
+        the tick is a no-op, which is the common case whenever the workload
+        drives the systolic path rather than the vector ALUs.
+        """
+        for ctx in self.fu_ctx.values():
+            if ctx is not None:
+                return False
+        if not self.pending_outputs.is_empty():
+            return False
+        for fu in self.fus.values():
+            if not fu.entries.is_empty() or not fu.completed.is_empty():
+                return False
+        for mf in self.meta_fifo.values():
+            if not mf.is_empty():
+                return False
+        return True
+
     def can_issue(self, fu_name: str) -> bool:
         return self.fu_ctx[fu_name] is None
 
@@ -472,8 +503,11 @@ class VectorLane(Clocked):
                 if ctx.pending_count == 0:
                     self.fu_ctx[fu_name] = None
 
-        # Stage 2: execute pipelines.
+        # Stage 2: execute pipelines. A pipeline with nothing in flight cannot
+        # change state, and most of them are empty most of the time.
         for fu in self.fus.values():
+            if SCHED_ENABLED and fu.entries.is_empty():
+                continue
             fu.tick(time)
 
         # Stage 3: pair FU output with metadata FIFO.
@@ -620,7 +654,10 @@ class VectorDatapath(Clocked):
         if cycle is None:
             return
 
-        self.collector.tick(cycle)
+        # The collector's tick only ages pending reductions; with none queued
+        # it cannot change anything.
+        if not (SCHED_ENABLED and self.collector.pending_reductions.is_empty()):
+            self.collector.tick(cycle)
         issued = 0
         while (not self.pending_issue.is_empty()) and issued < self.issue_width:
             inst = self.pending_issue.peek()
@@ -657,6 +694,8 @@ class VectorDatapath(Clocked):
             issued += 1
 
         for lane in self.lanes:
+            if SCHED_ENABLED and lane.is_idle():
+                continue
             lane.tick(cycle, self.collector)
 
         completed = self.collector.pop_completed()

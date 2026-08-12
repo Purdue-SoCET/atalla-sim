@@ -2,6 +2,8 @@ from typing import Callable, Optional, List, Any
 
 from base.clocked_object import Clocked
 
+from base.sched import SimClock, WakeGroup
+
 from memory.sc_sram_banks import SRAMBanks, _xor_bank
 from memory.crossbar import Xbar
 from memory import backend
@@ -42,9 +44,15 @@ class Scratchpad(Clocked):
         self.backend_write_inflight = [0, 0]
         self.backend_read_inflight = [0, 0]
 
+        # Shared view of the current cycle. Banks read this instead of their
+        # own last-tick counter, which goes stale once they are allowed to
+        # sleep through cycles where nothing is due.
+        self.clock = SimClock()
+
         # two tiles (tile 0 and tile 1). each tile is a SRAMBanks instance
         self.tiles: List[SRAMBanks] = [
-            SRAMBanks(bank_count=self.num_banks, bank_size=self.bank_size, read_latency=read_latency, write_latency=write_latency)
+            SRAMBanks(bank_count=self.num_banks, bank_size=self.bank_size, read_latency=read_latency,
+                      write_latency=write_latency, clock=self.clock)
             for _ in range(2)
         ]
 
@@ -65,6 +73,22 @@ class Scratchpad(Clocked):
             Frontend(0, self, queue_size=frontend_queue_size),
             Frontend(1, self, queue_size=frontend_queue_size)
         ]
+
+        # Wake groups, ticked in the order data flows: a frontend hands work to
+        # a crossbar, which hands it to a bank. Because each group runs after
+        # the one that feeds it, a producer can wake a consumer for the current
+        # cycle and the consumer still runs on time.
+        self._fe_group = WakeGroup("spad.frontends")
+        self._xbar_group = WakeGroup("spad.xbars")
+        self._bank_group = WakeGroup("spad.banks")
+        for fe in self.frontends:
+            self._fe_group.add(fe)
+        for xb in self.tile_write_xbars + self.tile_read_xbars:
+            self._xbar_group.add(xb)
+        for tile in self.tiles:
+            for b in getattr(tile, "banks", []):
+                self._bank_group.add(b)
+        self.wake_groups = [self._fe_group, self._xbar_group, self._bank_group]
 
     def _write_path_can_accept(self, tile_id: int) -> bool:
         tile_id = self._normalize_tile_id(tile_id)
@@ -264,19 +288,14 @@ class Scratchpad(Clocked):
     def tick(self, time=None) -> None:
         now = time if time is not None else getattr(self, 'now', 0)
         self.now = now
-        try:
-            for tid, fe in enumerate(self.frontends):
-                fe.tick(now)
-            for xb in self.tile_write_xbars + self.tile_read_xbars:
-                xb.tick(now)
-            for tile in self.tiles:
-                for b in getattr(tile, "banks", []):
-                    try:
-                        b.tick(now)
-                    except Exception as e:
-                        pass
-        except Exception as e:
-            pass
+        self.clock.advance_to(int(now))
+        # These loops used to be wrapped in blanket `except Exception: pass`,
+        # which silently discarded any failure inside the memory pipeline.
+        # Nothing was actually being swallowed, and hiding errors here makes
+        # the scheduling changes undebuggable, so the handlers are gone.
+        self._fe_group.tick(now)
+        self._xbar_group.tick(now)
+        self._bank_group.tick(now)
 
     def get_stats(self) -> dict:
         stats = {

@@ -14,6 +14,7 @@ from base.clock_domain import ClockDomain
 from base.clocked_object import Clocked
 from base.core import Core
 from base.eventq import EventQueue
+from base.sched import CompositeClocked
 from base.sim import Sim
 from memory.backend import Backend, SharedDRAMBurstChannel
 from memory.dram import DRAM
@@ -386,6 +387,19 @@ class RoundRobinBackendTicker(Clocked):
             backend.tick(time)
 
 
+# Tick phases. Stated once here rather than being re-specified as a list
+# literal at every call site -- which is how the backends and the DRAM came to
+# be omitted from the driving list in some harnesses. Data flows in this order
+# within a cycle, so a producer can hand work to a later phase and have it
+# picked up the same cycle, exactly as the old flat list did.
+PHASE_CORE = 10        # VectorCore: issues memory and systolic requests
+PHASE_VLS = 20         # VLS <-> scratchpad frontends
+PHASE_SYSARR = 30      # GSAU <-> systolic array
+PHASE_SPAD = 40        # scratchpad internals (frontends, crossbars, banks)
+PHASE_BACKEND = 50     # scratchpad backends / DRAM
+PHASE_HARNESS = 90     # experiment harness, observes everything above
+
+
 @dataclass
 class TPUPlatform:
     eq: EventQueue
@@ -401,6 +415,19 @@ class TPUPlatform:
     vls_bridges: List[Any]
     sysarr_bridge: GSAUTPUBridge
     mirror: Optional[TPUReference]
+    root: Optional[CompositeClocked] = None
+
+    def add_component(self, component, *, phase: int = PHASE_HARNESS):
+        """Attach an extra clocked component (an experiment harness, say)."""
+        return self.root.add_child(component, phase=phase)
+
+    def tick(self, time=None) -> None:
+        """Advance every component of the platform by one cycle."""
+        self.root.tick(time)
+
+    def attach_to(self, clock_domain: ClockDomain) -> None:
+        """Drive the whole platform from `clock_domain`."""
+        clock_domain.objects = [self.root]
 
 
 def _build_shared_dram_backends(
@@ -525,6 +552,18 @@ def build_tpu_platform(
     )
     vls_bridge = vls_bridges[0] if vls_bridges else None
     sa, sysarr_bridge = build_tpu_compute_path(vc=vc, size=int(size), dtype=str(dtype), mirror=mirror_obj)
+
+    # The component tree. Ticking the root ticks the whole platform in phase
+    # order; nothing has to be enumerated again by the caller.
+    root = CompositeClocked("tpu_platform")
+    root.add_child(vc, phase=PHASE_CORE)
+    for bridge in vls_bridges:
+        root.add_child(bridge, phase=PHASE_VLS)
+    root.add_child(sysarr_bridge, phase=PHASE_SYSARR)
+    root.add_child(spad, phase=PHASE_SPAD)
+    for backend_obj in backends:
+        root.add_child(backend_obj, phase=PHASE_BACKEND)
+
     return TPUPlatform(
         eq=eq,
         clk=clk,
@@ -539,6 +578,7 @@ def build_tpu_platform(
         vls_bridges=vls_bridges,
         sysarr_bridge=sysarr_bridge,
         mirror=mirror_obj,
+        root=root,
     )
 
 
@@ -547,6 +587,7 @@ class SysArrTPUSystem:
         self.size = int(size)
         self.dtype = str(dtype)
         platform = build_tpu_platform(size=self.size, dtype=self.dtype, mirror=mirror)
+        self.platform = platform
         self.eq = platform.eq
         self.clk = platform.clk
         self.sim = platform.sim
@@ -775,7 +816,12 @@ class SysArrTPUSystem:
             return True
 
         _issue_weight_load()
-        self.clk.objects = [self.vc, self.vls_bridge, self.sysarr_bridge, self.spad, harness]
+        # The platform ticks its own components; the clock domain only has to
+        # drive the root. The harness joins the tree as the last phase so it
+        # observes everything the cycle produced, as it did when it sat at the
+        # end of the old hand-written list.
+        self.platform.add_component(harness, phase=PHASE_HARNESS)
+        self.platform.attach_to(self.clk)
         self.clk.schedule_next(0.0)
         self.sim.run()
 

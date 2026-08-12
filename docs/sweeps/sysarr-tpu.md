@@ -96,7 +96,7 @@ python3.11 tools/plot_blocked_mn_reuse_roofline.py
 ```
 
 The detailed workflow, outputs, and metric definitions are documented in
-`docs/blocked_mn_reuse_roofline_sweeps.md`.
+`docs/sweeps/blocked-mn-roofline.md`.
 The runner now writes each invocation into a fresh timestamped run directory
 under `logs/roofline_study/blocked_mn_reuse_1024/`, and the plotter resolves
 the latest run automatically when `--input-dir` is omitted.

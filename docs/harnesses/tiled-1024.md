@@ -36,7 +36,7 @@ It also reuses pieces from
 So the tiled flow shares the same machine blocks and tracing style as the single-tile TPU experiment path.
 
 For a high-level class view of the assembled simulator stack, see
-[sysarr_tpu_system_uml.md](sysarr_tpu_system_uml.md).
+[../architecture/platform-uml.md](../architecture/platform-uml.md).
 
 ## Dataflow
 
@@ -172,7 +172,7 @@ That writes the block overview, one-weight flow, compute-detail, and reuse
 balance PNGs next to the input log.
 
 See
-[presentation_graphs_at_test_scratchpad_vector_core_sysarr_tpu_tiled_1024_blocked_mn.md](presentation_graphs_at_test_scratchpad_vector_core_sysarr_tpu_tiled_1024_blocked_mn.md)
+[../results/presentation-graphs.md](../results/presentation-graphs.md)
 for notes on what each presentation graph is meant to communicate.
 
 ## What Is Still Simplified

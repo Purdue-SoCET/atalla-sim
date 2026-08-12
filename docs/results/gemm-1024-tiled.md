@@ -3,7 +3,7 @@
 This note explains the metrics emitted by `stats.log` for
 `tests/atalla/test_scratchpad_vector_core_sysarr_tpu_tiled_1024.py`.
 
-It is the tiled counterpart to `metrics_at_test_scratchpad_vector_core_sysarr_tpu.md`.
+It is the tiled counterpart to `gemm-32.md`.
 
 Current modeled path:
 
@@ -95,7 +95,7 @@ The accumulation itself is done inside the vector core
 
 For a focused explanation of the full tiled harness, see:
 
-- [harness_at_test_scratchpad_vector_core_sysarr_tpu_tiled_1024.md](/home/asicfab/a/socet149/atalla-sim/docs/harness_at_test_scratchpad_vector_core_sysarr_tpu_tiled_1024.md)
+- [../harnesses/tiled-1024.md](../harnesses/tiled-1024.md)
 
 Using the first output tile in `schedule.log` to make the pattern explicit:
 
