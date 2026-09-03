@@ -1,7 +1,4 @@
-import os
-import sys
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..", "src")))
+import pytest
 
 from memory.dram import DRAM
 
@@ -30,5 +27,4 @@ def test_sparse_dram_cross_block_write_and_overwrite():
     assert dram.read(6, 4) == b"\x01\xAA\xBB\xCC"
 
 if __name__ == "__main__":
-    test_sparse_dram_is_lazily_allocated_and_zero_initialized()
-    test_sparse_dram_cross_block_write_and_overwrite()
+    raise SystemExit(pytest.main([__file__]))

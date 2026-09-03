@@ -1,7 +1,9 @@
 # tests/test_veggie.py
-import os, sys
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..//..", "src")))
+import pytest
 
+import os, sys
+
+from base.testing import build_sim
 from base.eventq import EventQueue
 from base.clock_domain import ClockDomain
 from base.core import Core
@@ -23,14 +25,6 @@ class IO:
         self.vreg = {}
         self.vmask = {}
 
-def build_sim():
-    eq = EventQueue()
-    clk = ClockDomain(eq, period=1.0)
-    core = Core(eq)
-    core.add_clock_domain(clk)
-    sim = Sim()
-    sim.init(eq, core)
-    return eq, clk, sim
 
 def test_vector_pipeline():
     eq, clk, sim = build_sim()
@@ -96,4 +90,4 @@ def test_vector_pipeline():
     print("Test passed")
 
 if __name__ == "__main__":
-    test_vector_pipeline()
+    raise SystemExit(pytest.main([__file__]))

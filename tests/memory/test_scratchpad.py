@@ -1,6 +1,8 @@
-import os, sys
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..", "src")))
+import pytest
 
+import os, sys
+
+from base.testing import build_sim
 from base.eventq import EventQueue
 from base.clock_domain import ClockDomain
 from base.core import Core
@@ -32,14 +34,6 @@ def _write_swizzled_row(spad: Scratchpad, tile_id: int, slot: int, row_bytes: by
         off = lane * spad.elem_bytes
         tile.banks[bank].mem[slot] = row_bytes[off : off + spad.elem_bytes]
 
-def build_sim():
-    eq = EventQueue()
-    clk = ClockDomain(eq, period=1.0)
-    core = Core(eq)
-    core.add_clock_domain(clk)
-    sim = Sim()
-    sim.init(eq, core)
-    return eq, clk, sim
 
 def test_scratchpad_full():
     eq, clk, sim = build_sim()
@@ -199,6 +193,4 @@ def test_frontend_writes_are_not_dropped_when_write_xbar_is_pipelined():
     assert _read_swizzled_row(spad, tile_id=0, slot=1) == row1
 
 if __name__ == "__main__":
-    test_scratchpad_full()
-    test_backends_can_attach_to_scratchpad_slots_and_dram()
-    test_frontend_writes_are_not_dropped_when_write_xbar_is_pipelined()
+    raise SystemExit(pytest.main([__file__]))

@@ -1,23 +1,9 @@
-import os
-import sys
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..//..", "src")))
-
+from base.testing import build_sim
 from base.clock_domain import ClockDomain
 from base.core import Core
 from base.eventq import EventQueue
 from base.sim import Sim
 from systolic_array.systolic_array_meissa_blackbox import SystolicArrayMEISSABlackbox
-
-
-def build_sim():
-    eq = EventQueue()
-    clk = ClockDomain(eq, period=1.0)
-    core = Core(eq)
-    core.add_clock_domain(clk)
-    sim = Sim()
-    sim.init(eq, core)
-    return eq, clk, sim
 
 
 def test_meissa_blackbox_latency_and_matmul():

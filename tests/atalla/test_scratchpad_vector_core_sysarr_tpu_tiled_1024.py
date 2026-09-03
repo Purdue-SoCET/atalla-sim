@@ -1,5 +1,3 @@
-import os
-import sys
 import argparse
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -7,7 +5,6 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'src')))
 
 from atalla.sysarr_tpu_experiment import MetricsVLSFrontendBridge, QUEUE_NAMES
 from atalla.sysarr_tpu_system import build_tpu_compute_path, build_tpu_platform

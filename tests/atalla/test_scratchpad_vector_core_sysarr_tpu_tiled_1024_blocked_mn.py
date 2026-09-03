@@ -1484,6 +1484,5 @@ def main() -> None:
     print(stats)
 
 
-
 if __name__ == "__main__":
     main()

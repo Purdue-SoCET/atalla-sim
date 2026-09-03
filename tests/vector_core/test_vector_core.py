@@ -1,24 +1,12 @@
-import os
-import sys
+import pytest
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..//..", "src")))
-
+from base.testing import build_sim
 from base.eventq import EventQueue
 from base.clock_domain import ClockDomain
 from base.core import Core
 from base.sim import Sim
 
 from vector_core.vector_core import VectorCore
-
-
-def build_sim():
-    eq = EventQueue()
-    clk = ClockDomain(eq, period=1.0)
-    core = Core(eq)
-    core.add_clock_domain(clk)
-    sim = Sim()
-    sim.init(eq, core)
-    return eq, clk, sim
 
 
 def _run_core_until(
@@ -227,6 +215,4 @@ def test_vector_core_sim_gsau_round_trip_with_rd_queue():
 
 
 if __name__ == "__main__":
-    test_vector_core_sim_compute_writeback()
-    test_vector_core_sim_vlsu_store_then_load_round_trip()
-    test_vector_core_sim_gsau_round_trip_with_rd_queue()
+    raise SystemExit(pytest.main([__file__]))

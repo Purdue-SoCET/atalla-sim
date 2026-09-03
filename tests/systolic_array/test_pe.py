@@ -1,7 +1,4 @@
-import os
-import sys
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..//..', 'src')))
+import pytest
 
 from systolic_array.systolic_array_tpu import TPUCell4Input
 
@@ -31,6 +28,5 @@ def test_tpu_cell_counts_grouped_mac_ops():
     assert cell.psum_adds == 1
 
 
-if __name__ == '__main__':
-    test_tpu_cell_latches_group_inputs_and_weights()
-    test_tpu_cell_counts_grouped_mac_ops()
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__]))

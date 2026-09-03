@@ -1,12 +1,12 @@
-import os
-import sys
+import pytest
+
 from pathlib import Path
 from typing import List, Dict, Optional
 
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..//..", "src")))
 
+from base.testing import build_sim
 from base.clock_domain import ClockDomain
 from base.clocked_object import Clocked
 from base.core import Core
@@ -20,16 +20,6 @@ from memory.scratchpad import Scratchpad
 from systolic_array.systolic_array_tpu import SystolicArrayTPU
 from vector_core.vector_core import VectorCore
 from atalla.sysarr_tpu_system import RoundRobinBackendTicker, TPUMetrics
-
-
-def build_sim():
-    eq = EventQueue()
-    clk = ClockDomain(eq, period=1.0)
-    core = Core(eq)
-    core.add_clock_domain(clk)
-    sim = Sim()
-    sim.init(eq, core)
-    return eq, clk, sim
 
 
 def _encode_vector_u16(vec):
@@ -1313,4 +1303,4 @@ def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
 
 
 if __name__ == "__main__":
-    test_scratchpad_vector_core_sysarr_tpu_end_to_end()
+    raise SystemExit(pytest.main([__file__]))

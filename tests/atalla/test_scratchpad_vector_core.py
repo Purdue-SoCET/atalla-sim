@@ -1,8 +1,6 @@
-import os
-import sys
+import pytest
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..//..", "src")))
-
+from base.testing import build_sim
 from base.eventq import EventQueue
 from base.clock_domain import ClockDomain
 from base.clocked_object import Clocked
@@ -12,15 +10,6 @@ from base.sim import Sim
 from memory.sc_sram_banks import _xor_bank
 from memory.scratchpad import Scratchpad
 from vector_core.vector_core import VectorCore
-
-def build_sim():
-    eq = EventQueue()
-    clk = ClockDomain(eq, period=1.0)
-    core = Core(eq)
-    core.add_clock_domain(clk)
-    sim = Sim()
-    sim.init(eq, core)
-    return eq, clk, sim
 
 
 def _encode_vector_u16(vec):
@@ -191,4 +180,4 @@ def test_scratchpad_vector_core_load_compute_store_back():
 
 
 if __name__ == "__main__":
-    test_scratchpad_vector_core_load_compute_store_back()
+    raise SystemExit(pytest.main([__file__]))

@@ -1,24 +1,12 @@
-import os
-import sys
+import pytest
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..//..', 'src')))
-
+from base.testing import build_sim
 from base.clock_domain import ClockDomain
 from base.clocked_object import Clocked
 from base.core import Core
 from base.eventq import EventQueue
 from base.sim import Sim
 from systolic_array.systolic_array_tpu import SystolicArrayTPU
-
-
-def build_sim():
-    eq = EventQueue()
-    clk = ClockDomain(eq, period=1.0)
-    core = Core(eq)
-    core.add_clock_domain(clk)
-    sim = Sim()
-    sim.init(eq, core)
-    return eq, clk, sim
 
 
 class WeightPreloadHarness(Clocked):
@@ -187,8 +175,5 @@ def test_systolic_array_tpu_gemm_32x32():
     assert out == wgt
 
 
-if __name__ == '__main__':
-    test_systolic_array_weight_preload_shifts_right()
-    test_systolic_array_start_to_value_ready_latency()
-    test_systolic_array_stall_freezes_and_resumes()
-    test_systolic_array_tpu_gemm_32x32()
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__]))

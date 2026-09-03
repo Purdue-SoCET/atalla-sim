@@ -1,7 +1,4 @@
-import os
-import sys
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..//..", "src")))
+import pytest
 
 from atalla.sysarr_tpu_experiment import SysArrTPUExperimentConfig, run_sysarr_tpu_experiment
 
@@ -27,4 +24,4 @@ def test_sysarr_tpu_experiment_reports_two_shared_backends():
 
 
 if __name__ == "__main__":
-    test_sysarr_tpu_experiment_reports_two_shared_backends()
+    raise SystemExit(pytest.main([__file__]))

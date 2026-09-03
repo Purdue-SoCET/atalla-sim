@@ -1,23 +1,12 @@
-import os
-import sys
+import pytest
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..//..", "src")))
-
+from base.testing import build_sim
 from base.eventq import EventQueue
 from base.clock_domain import ClockDomain
 from base.core import Core
 from base.sim import Sim
 
 from vector_core.vector_lanes import VectorDatapath
-
-def build_sim():
-    eq = EventQueue()
-    clk = ClockDomain(eq, period=1.0)
-    core = Core(eq)
-    core.add_clock_domain(clk)
-    sim = Sim()
-    sim.init(eq, core)
-    return eq, clk, sim
 
 
 def _run_until_result(sim: Sim, eq: EventQueue, vd: VectorDatapath, max_cycles: int = 128):
@@ -233,9 +222,4 @@ def test_vector_datapath_integration_regular_and_reduction_results():
 
 
 if __name__ == "__main__":
-    test_global_reduction_sum_partial_zero_mode()
-    test_global_reduction_min_partial_passthru_mode()
-    test_global_reduction_max_broadcast_mode()
-    test_global_reduction_latency_is_n_minus_one_times_alu_latency()
-    test_vector_datapath_integration_mixed_ops_across_lanes()
-    test_vector_datapath_integration_regular_and_reduction_results()
+    raise SystemExit(pytest.main([__file__]))

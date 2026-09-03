@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "atalla-sim"
+version = "0.1.0"
+description = "Cycle-accurate simulator for the Atalla accelerator"
+requires-python = ">=3.9"
+dependencies = ["numpy"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+# The source tree uses implicit namespace packages (no __init__.py outside
+# base/ and native/), so plain find_packages would only pick up those two.
+where = ["src"]
+namespaces = true
+exclude = ["*.__pycache__*"]
+
+[tool.pytest.ini_options]
+# Makes src/ importable without the per-file sys.path preamble the tests used
+# to carry. Requires pytest >= 7.
+pythonpath = ["src"]
+testpaths = ["tests"]

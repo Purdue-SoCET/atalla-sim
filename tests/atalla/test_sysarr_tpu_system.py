@@ -1,7 +1,4 @@
-import os
-import sys
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..//..", "src")))
+import pytest
 
 from atalla.sysarr_tpu_system import SysArrTPUSystem, build_tpu_platform
 
@@ -84,6 +81,4 @@ def test_sysarr_tpu_system_end_to_end():
 
 
 if __name__ == "__main__":
-    test_build_tpu_platform_attaches_two_backends_to_shared_dram()
-    test_shared_backends_issue_one_dram_burst_per_cycle()
-    test_sysarr_tpu_system_end_to_end()
+    raise SystemExit(pytest.main([__file__]))

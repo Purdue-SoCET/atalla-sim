@@ -1,6 +1,8 @@
-import os, sys
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..", "src")))
+import pytest
 
+import os, sys
+
+from base.testing import build_sim
 from base.eventq import EventQueue
 from base.clock_domain import ClockDomain
 from base.core import Core
@@ -9,14 +11,6 @@ from base.sim import Sim
 from memory.scratchpad import Scratchpad
 from memory.backend import Backend
 
-def build_sim():
-    eq = EventQueue()
-    clk = ClockDomain(eq, period=1.0)
-    core = Core(eq)
-    core.add_clock_domain(clk)
-    sim = Sim()
-    sim.init(eq, core)
-    return eq, clk, sim
 
 def test_scratchpad_stalls():
     eq, clk, sim = build_sim()
@@ -77,4 +71,4 @@ def test_scratchpad_stalls():
     print("Scratchpad stall test passed.")
 
 if __name__ == "__main__":
-    test_scratchpad_stalls()
+    raise SystemExit(pytest.main([__file__]))

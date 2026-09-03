@@ -10,15 +10,14 @@ Two properties matter and are checked separately:
 Everything here is skipped cleanly when the .so has not been built.
 """
 
-import os
+
 import random
 import struct
-import sys
+
 
 import numpy as np
 import pytest
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..//..', 'src')))
 
 from base.clock_domain import ClockDomain
 from base.core import Core

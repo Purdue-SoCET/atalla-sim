@@ -1,23 +1,11 @@
-import os
-import sys
+import pytest
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..//..", "src")))
-
+from base.testing import build_sim
 from base.eventq import EventQueue
 from base.clock_domain import ClockDomain
 from base.core import Core
 from base.sim import Sim
 from vector_core.vector_load_store import VLSU
-
-
-def build_sim():
-    eq = EventQueue()
-    clk = ClockDomain(eq, period=1.0)
-    core = Core(eq)
-    core.add_clock_domain(clk)
-    sim = Sim()
-    sim.init(eq, core)
-    return eq, clk, sim
 
 
 def test_vlsu_load_issue_tracks_destination_per_scratchpad():
@@ -133,7 +121,4 @@ def test_vlsu_writeback_callback_consumes_completed_load():
 
 
 if __name__ == "__main__":
-    test_vlsu_load_issue_tracks_destination_per_scratchpad()
-    test_vlsu_load_response_maps_back_to_dest_fifo_order()
-    test_vlsu_store_is_pass_through_and_uses_vrf_read_callback()
-    test_vlsu_writeback_callback_consumes_completed_load()
+    raise SystemExit(pytest.main([__file__]))
