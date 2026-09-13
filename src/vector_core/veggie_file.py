@@ -34,7 +34,8 @@ class Veggie(Clocked):
 
         # internal state
         self.conflict = False
-        self.pending_reqs = []
+        #: Read ports that lost their bank this cycle and must be re-driven.
+        self.conflict_ports = []
 
     def connect(self, inp, out):
         self.inp = inp
@@ -59,12 +60,13 @@ class Veggie(Clocked):
         self.conflict = any(len(v) > 1 for v in bank_rreqs.values()) or \
                         any(len(v) > 1 for v in bank_wreqs.values())
 
-        if self.conflict:
-            # hold off and retry next tick
-            self.pending_reqs.append((read_reqs, write_reqs))
-            if self.out:
-                self.out.ready = False
-            return
+        # One read and one write are granted per bank per cycle; the rest are
+        # reported as not-granted and the caller re-drives them next cycle.
+        # (This used to append to pending_reqs, which nothing ever read, so a
+        # conflicting request was simply lost.)
+        self.conflict_ports = [
+            req["port"] for reqs in bank_rreqs.values() for req in reqs[1:]
+        ]
 
         read_results = {}
         for bank_id, reqs in bank_rreqs.items():
@@ -118,16 +120,48 @@ class OpBuffer(Clocked):
                 self.vmask_tmp[i] = vmask[i]
                 self.mready[i] = True
 
-        # For this test, mark valid if we have *any operand* and mask
-        ivalid = [any(self.dready) and any(self.mready)]
+        # A slot is complete only when BOTH its operands and its mask have
+        # landed. Slot i owns read ports 2i and 2i+1 and mask i.
+        ivalid = [
+            self.dready[2 * i] and self.dready[2 * i + 1] and self.mready[i]
+            for i in range(self.num_pairs)
+        ]
 
         if self.out:
-            self.out.ivalid = ivalid
+            self.out.ivalid = list(ivalid)
             self.out.vreg = self.vreg_tmp.copy()
             self.out.vmask = self.vmask_tmp.copy()
-            self.out.ready = all(ivalid)
+            self.out.ready = any(ivalid)
 
-        # Reset once consumed
-        if all(ivalid):
-            self.dready = [False] * (2 * self.num_pairs)
-            self.mready = [False] * self.num_pairs
+    def take(self, slot: int):
+        """Hand a completed slot's operands over and free it.
+
+        Kept separate from tick() so a consumer that cannot accept this cycle
+        leaves the operands held, which is the point of a collector.
+        """
+        if not (0 <= slot < self.num_pairs):
+            raise ValueError("slot out of range: %s" % slot)
+        pair = (self.vreg_tmp[2 * slot], self.vreg_tmp[2 * slot + 1])
+        mask = self.vmask_tmp[slot]
+        self.dready[2 * slot] = self.dready[2 * slot + 1] = False
+        self.mready[slot] = False
+        self.vreg_tmp[2 * slot] = self.vreg_tmp[2 * slot + 1] = None
+        self.vmask_tmp[slot] = None
+        return pair, mask
+
+    def present(self, port: int, value) -> None:
+        """Hand the collector an operand directly.
+
+        Immediates never go through a bank, but the slot still has to see both
+        of its operands before it can report ready, so they are presented here.
+        """
+        self.vreg_tmp[port] = value
+        self.dready[port] = True
+
+    def present_mask(self, slot: int, mask) -> None:
+        self.vmask_tmp[slot] = mask
+        self.mready[slot] = True
+
+    def slot_ready(self, slot: int) -> bool:
+        return (self.dready[2 * slot] and self.dready[2 * slot + 1]
+                and self.mready[slot])

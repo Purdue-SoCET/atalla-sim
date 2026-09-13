@@ -12,6 +12,27 @@ Time = float
 FLOAT_SLOT_BITS = 16
 
 
+def slice_width(vector_len: int, lane_count: int) -> int:
+    """Elements each lane handles per instruction."""
+    return vector_len // lane_count
+
+
+def slice_to_lane(elem: int, slice_w: int) -> tuple:
+    """Element -> (lane, position within that lane's slice).
+
+    Contiguous: lane L owns elements [L*slice_w, (L+1)*slice_w). The whole
+    vector is cut into lane_count adjacent pieces rather than dealt out
+    round-robin, so neighbouring elements share a lane.
+    """
+    return elem // slice_w, elem % slice_w
+
+
+def lane_slice_indices(lane_id: int, slice_w: int) -> list:
+    """The vector element indices belonging to one lane, in order."""
+    base = lane_id * slice_w
+    return list(range(base, base + slice_w))
+
+
 def _safe_div(a: float, b: float) -> float:
     if b == 0:
         return float("inf") if a >= 0 else float("-inf")
@@ -200,6 +221,9 @@ class ResultCollector(Clocked):
         super().__init__()
         self.lane_count = lane_count
         self.vector_len = vector_len
+        #: Must match the slicer: element e of lane L is vector element
+        #: L*slice_w + e, so results reassemble in the order they were cut.
+        self.slice_w = slice_width(vector_len, lane_count)
         self._tick = -1
         self.sink_capacity = max(1, sink_capacity)
         self.reduction_alu_latency = max(1, reduction_alu_latency)
@@ -268,7 +292,7 @@ class ResultCollector(Clocked):
 
     def lane_result(self, inst_id: int, lane_id: int, lane_elem_idx: int, value: float) -> None:
         state = self.inflight[inst_id]
-        vector_idx = lane_id + lane_elem_idx * self.lane_count
+        vector_idx = lane_id * self.slice_w + lane_elem_idx
         if vector_idx < self.vector_len:
             state["vector"][vector_idx] = value
         state["lane_pending"][lane_id] -= 1
@@ -409,7 +433,8 @@ class VectorLane(Clocked):
             self.meta_fifo[fu] = SimQueue(fu_capacity)
 
     def _lane_indices(self, vector_len: int) -> List[int]:
-        return list(range(self.lane_id, vector_len, self.lane_count))
+        """This lane's contiguous slice of the vector."""
+        return lane_slice_indices(self.lane_id, slice_width(vector_len, self.lane_count))
 
     def is_idle(self) -> bool:
         """True when every stage of tick() would find nothing to do.
@@ -564,7 +589,15 @@ class VectorDatapath(Clocked):
         self.veggie_size = veggie_size
         self.dtype = normalize_dtype(dtype, default=None)
         self.vector_len = veggie_size // FLOAT_SLOT_BITS
-        self.lane_count = min(lane_count, self.vector_len)
+        # The slicer cuts the vector into lane_count equal pieces, so the lane
+        # count has to divide it. Silently clamping instead (as this did) gives
+        # a machine with a different width than the caller asked for.
+        if self.vector_len % lane_count != 0:
+            raise ValueError(
+                "lane_count %d does not divide a %d-element vector"
+                % (lane_count, self.vector_len))
+        self.lane_count = lane_count
+        self.slice_w = slice_width(self.vector_len, self.lane_count)
         self.issue_width = issue_width
         self._tick = -1
         self.next_inst_id = 0

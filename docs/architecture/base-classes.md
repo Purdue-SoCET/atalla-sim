@@ -70,12 +70,6 @@ eq.run_all()                          # drain until the queue is empty
 `run_until` advances `_time` to each popped event's timestamp before invoking
 it, so a callback always sees the correct `now()`.
 
-Two things to know:
-
-- **`cancel()` is an unimplemented stub.** The `Event.cancelled` field exists
-  but is never consulted. Nothing currently needs cancellation because the
-  clock domain keeps exactly one event in flight; if you add per-object events
-  you will have to implement it (lazy tombstoning is the usual approach).
 - **`run_all()` terminates only when the queue empties.** Since `ClockDomain`
   reschedules itself forever, a run ends when something calls `clk.stop()`.
 
@@ -110,8 +104,6 @@ def tick(self, time=None):
     ...
 ```
 
-It does three things:
-
 1. **Quantises time to integer cycles.** Float times within `1e-6` of an
    integer snap to it, so float drift never produces a half cycle.
 2. **Makes a repeated tick idempotent.** Called twice for the same cycle, the
@@ -143,7 +135,7 @@ clk.schedule_next(0.0)
 sim.run()
 ```
 
-Each firing does exactly this:
+Each firing:
 
 ```
    ClockDomain.tick(t):
@@ -152,8 +144,6 @@ Each firing does exactly this:
            obj.tick(t)
        schedule_next(t)             ← push one event at t + period
 ```
-
-Two consequences worth stating plainly:
 
 - **Order is list order, and it is load-bearing.** A component that reads
   another's output queue in the same cycle only sees it if it ticks later. Any
@@ -170,7 +160,7 @@ Two consequences worth stating plainly:
 ## 5. Scheduling: SimClock, WakeGroup, CompositeClocked
 
 Ticking every component every cycle wastes most of its work. Measured on a
-16×16 GEMM, **92% of tick calls changed no state at all** — an SRAM bank whose
+16×16 tiled GEMM, **92% of tick calls changed no state at all** — an SRAM bank whose
 ready-heap is empty, a functional-unit pipeline with nothing in flight. `sched.py`
 lets a parent skip those.
 
@@ -182,7 +172,7 @@ def next_wake(self, now: int) -> Optional[int]:
 ```
 
 Return the earliest cycle at which this object *must* run, or `None` if it is
-quiescent. Two rules:
+quiescent.
 
 - The **default is `now + 1`**, which reproduces the old tick-everything
   behaviour exactly. An unconverted component keeps working untouched, so
@@ -239,7 +229,7 @@ naturally, because its groups are ticked in the direction data flows:
              ticked first                  then                      then
 ```
 
-### Stale time — the trap to know about
+### Stale time
 
 A sleeping object stops observing cycles, so anything it derives from *"when
 did I last run"* goes stale. `SimClock` is a one-field shared object giving any
@@ -428,7 +418,10 @@ Cycle *t* of the TPU platform, showing where each class acts:
          └─► CompositeClocked "tpu_platform" .tick(t)
                │
                ├─ phase 10  VectorCore.tick(t)
-               │              issues memory / GSAU requests into SimQueues
+               │              issues one VLIW packet, up to three slots:
+               │                vlsu     ──► memory requests
+               │                datapath ──► SIMD lanes + tree reduction
+               │                gsau     ──► systolic array
                │
                ├─ phase 20  VLSFrontendBridge.tick(t)
                │              VLSU req_q  ──► Frontend.read/write  (+request_wake)

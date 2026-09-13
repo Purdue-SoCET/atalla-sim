@@ -1,7 +1,7 @@
 """Wake scheduling for clocked objects.
 
 The simulator used to advance by ticking every object every cycle. Measured on
-a 16x16 GEMM, 92% of those tick calls changed no state: an SRAM bank with an
+a 16x16 tiled GEMM, 92% of those tick calls changed no state: an SRAM bank with an
 empty ready-heap, a functional-unit pipeline with nothing in flight, and so on.
 
 This module lets a parent skip children that have nothing to do. A `WakeGroup`

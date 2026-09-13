@@ -5,9 +5,16 @@ from typing import Dict, List, Optional, Sequence, Tuple, Union
 from base.dtype import DType, cast_vector, normalize_dtype
 from vector_core.vector_lanes import VectorDatapath
 from vector_core.vector_load_store import VLSU
-from vector_core.veggie_file import Veggie
+from vector_core.veggie_file import OpBuffer, Veggie
 
 Time = float
+
+
+class _Bundle:
+    """Loose signal bundle for the Veggie/OpBuffer connect() protocol."""
+
+    def __init__(self, **fields):
+        self.__dict__.update(fields)
 
 
 class WBBuffer(Clocked):
@@ -217,7 +224,7 @@ class VectorCore(Clocked):
         lane_count: int = 1,
         dtype: Optional[object] = None,
         issue_width: int = 1,
-        vls_count: int = 2,
+        vls_count: int = 4,   # one per scratchpad
         wb_depth: int = 128,
         scheduler_depth: int = 128,
         fu_latencies: Optional[Dict[str, int]] = None,
@@ -246,6 +253,19 @@ class VectorCore(Clocked):
         self.max_vregs = self.veggie.bank_count * self.veggie.regs_per_bank # number of vregs available
 
         self.wb_buffer = WBBuffer(depth=wb_depth)
+
+        # Operand collection: datapath sources are read out of the register
+        # file through its ports and gathered here before the instruction can
+        # issue, so bank arbitration is part of the timing instead of being
+        # bypassed by a direct data_banks[] read.
+        self._veggie_in = _Bundle(read_reqs=[], write_reqs=[])
+        self._veggie_out = _Bundle(vreg={}, dvalid={}, mvalid={}, vmask={}, ready=True)
+        self.veggie.connect(self._veggie_in, self._veggie_out)
+        self.op_buffer = OpBuffer(num_pairs=max(1, issue_width))
+        self._opbuf_out = _Bundle(ivalid=[], vreg=[], vmask=[], ready=False)
+        self.op_buffer.connect(self._veggie_out, self._opbuf_out)
+        #: One in-flight operand fetch per collector slot.
+        self._fetch = [None] * self.op_buffer.num_pairs
         self.gsau = GSAU(max_vregs=self.max_vregs)
         self.gsau_slots = 1
         self.vlsu_slots = 4
@@ -461,21 +481,65 @@ class VectorCore(Clocked):
         if dst is None:
             raise ValueError("datapath instruction missing dst")
 
-        src0_spec = inst.get("src0", inst.get("vs1"))
-        src1_spec = inst.get("src1", inst.get("vs2"))
+        slot = next((i for i, f in enumerate(self._fetch) if f is None), None)
+        if slot is None:
+            return False            # every collector slot is occupied
+        self._fetch[slot] = {"inst": inst, "op": op, "dst": int(dst)}
+        return True
+
+    def _start_operand_fetch(self, slot: int) -> None:
+        """Drive this slot's register reads at the VRF."""
+        fetch = self._fetch[slot]
+        inst = fetch["inst"]
         dtype_hint = inst.get("dtype")
-        src0, dtype0 = self._resolve_operand_with_dtype(src0_spec, default_zero=False, dtype_hint=inst.get("src0_dtype", dtype_hint))
-        src1, dtype1 = self._resolve_operand_with_dtype(src1_spec, default_zero=True, dtype_hint=inst.get("src1_dtype", dtype_hint) or dtype0)
+        specs = (
+            (inst.get("src0", inst.get("vs1")), False,
+             inst.get("src0_dtype", dtype_hint)),
+            (inst.get("src1", inst.get("vs2")), True,
+             inst.get("src1_dtype", dtype_hint)),
+        )
+        for i, (spec, default_zero, hint) in enumerate(specs):
+            port = 2 * slot + i
+            # Ask the collector, not the fetch record: an operand that has
+            # already landed is held there until the slot completes. Re-driving
+            # it would make it win its bank again every cycle and starve the
+            # sibling it collided with.
+            if self.op_buffer.dready[port]:
+                continue
+            if isinstance(spec, int):
+                bank, addr = self._reg_to_bank_addr(spec)
+                # dtype is register metadata, not data on the read port.
+                _, dtype = self.read_vreg_with_dtype(spec)
+                fetch["dtype%d" % i] = dtype
+                self._veggie_in.read_reqs.append(
+                    {"port": port, "bank": bank, "addr": addr, "reg": spec})
+            else:
+                # An immediate needs no bank, but the slot still has to see it.
+                vec, dtype = self._resolve_operand_with_dtype(
+                    spec, default_zero=default_zero, dtype_hint=hint)
+                fetch["dtype%d" % i] = dtype
+                self.op_buffer.present(port, vec)
+
+    def _complete_operand_fetch(self, slot: int) -> bool:
+        """True once both operands are in hand and the instruction issued."""
+        fetch = self._fetch[slot]
+        if fetch.get("got0") is None or fetch.get("got1") is None:
+            return False
+        inst = fetch["inst"]
+        src0, src1 = fetch["got0"], fetch["got1"]
+        dtype0 = fetch.get("dtype0")
+        dtype1 = fetch.get("dtype1", dtype0)
         if dtype0 != dtype1:
             raise ValueError("datatype mismatch: src0=%s src1=%s" % (dtype0, dtype1))
         mask = self._resolve_mask(inst.get("mask"))
+        op, dst = fetch["op"], fetch["dst"]
 
         inst_id = self.datapath.enqueue(
             src0=src0,
             src1=src1,
             mask=mask,
             op=op,
-            dst=int(dst),
+            dst=dst,
             reduce=bool(inst.get("reduce", False)),
             reduce_op=inst.get("reduce_op", "sum"),
             reduce_out_mode=inst.get("reduce_out_mode", "partial_zero"),
@@ -483,6 +547,34 @@ class VectorCore(Clocked):
         )
         self.last_datapath_inst_id = inst_id
         return True
+
+    def _operand_cycle(self, cycle) -> None:
+        """Pull every outstanding operand out of the register file.
+
+        Reads go through the VRF's ports, so two sources in one bank serialise
+        and the loser is re-driven next cycle; the collector holds whatever has
+        arrived until a slot has its whole pair.
+        """
+        self._veggie_in.read_reqs = []
+        self._veggie_in.write_reqs = []
+        for slot, fetch in enumerate(self._fetch):
+            if fetch is None:
+                continue
+            self._start_operand_fetch(slot)
+            self.op_buffer.present_mask(slot, True)
+
+        if self._veggie_in.read_reqs:
+            self.veggie.tick(cycle)
+            self.op_buffer.tick(cycle)
+
+        for slot, fetch in enumerate(self._fetch):
+            if fetch is None:
+                continue
+            if self.op_buffer.slot_ready(slot):
+                (a, b), _mask = self.op_buffer.take(slot)
+                fetch["got0"], fetch["got1"] = a, b
+            if self._complete_operand_fetch(slot):
+                self._fetch[slot] = None
 
     def _issue_vlsu(self, inst: Dict) -> bool:
         vls_id = int(inst.get("vls", 0))
@@ -698,7 +790,10 @@ class VectorCore(Clocked):
         # 1) Consume one VLIW packet when target units can accept its slots.
         self._try_issue_scheduler()
 
-        # 2) Advance compute and memory units.
+        # 2) Collect operands out of the register file for anything waiting.
+        self._operand_cycle(cycle)
+
+        # 3) Advance compute and memory units.
         self.datapath.tick(cycle)
         for vls in self.vls_units:
             vls.tick(cycle)
