@@ -26,16 +26,23 @@ THE MODELED SYSTEM
                   └───────────────────────┬───────────────────────┘
                                           │
                   ┌───────────────────────▼───────────────────────┐
-                  │                 Scratchpad                    │
+                  │           Scratchpad  —  2 MB local           │
                   │   frontends ──► crossbars ──► SRAM banks      │
-                  │   (queues)      (swizzle)     (2 tiles x N)   │
+                  │   (queues)      (swizzle)     (4 pads x 0.5MB)│
+                  │   pad 0 act │ pad 1 wgt │ pad 2 psum │ 3 out  │
+                  │   one pad, one frontend, one backend, one VLSU│
                   └───────┬───────────────────────────▲───────────┘
                      load │                           │ store
                   ┌───────▼───────────────────────────┴───────────┐
                   │                 Vector Core                   │
-                  │   VLSU ──► Veggie (VRF) ──► lanes / GSAU      │
+                  │   scheduler issues one VLIW packet:           │
+                  │     vlsu x4   load / store, one pad each      │
+                  │     datapath  SIMD lanes + tree reduction     │
+                  │     transpose tile transpose, rows <-> cols   │
+                  │     gsau      feeds the systolic array        │
+                  │   results return to Veggie (VRF) via wb_buffer│
                   └───────────────────────┬───────────────────────┘
-                                          │ rows
+                                          │ rows, via GSAU
                   ┌───────────────────────▼───────────────────────┐
                   │              SystolicArrayTPU                 │
                   │   grouped MAC cells, weight + psum shift      │
@@ -90,7 +97,8 @@ Start at `docs/README.md`. The one to read first is
 `docs/architecture/base-classes.md`, which covers the tick/cycle model, the
 scheduler, and how to write a component.
 
-    docs/architecture/   base-classes, platform-uml, queue-glossary
+    docs/architecture/   base-classes, platform-uml, queue-glossary,
+                         gem5-roadmap (what else is worth borrowing)
     docs/harnesses/      how experiments drive the platform
     docs/results/        measurements from specific runs
     docs/sweeps/         parameter studies

@@ -340,6 +340,9 @@ class SysArrTPUExperimentConfig:
         tile=32,
         dtype="fp16",
         lane_count=4,
+        # This experiment drives a single bridge by hand (see clk.objects
+        # below), so it uses one VLSU / one pad. Raising this would build
+        # bridges that never get ticked.
         vls_count=1,
         spad_num_banks=None,
         spad_bank_size=None,

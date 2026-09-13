@@ -35,43 +35,50 @@ class Scratchpad(Clocked):
         xbar_delay: int = 3,
         elem_bytes: int = 2,
         frontend_queue_size: int = 2,
+        num_tiles: int = 2,
     ):
         super().__init__()
         self.num_banks = int(num_banks)
         self.bank_size = int(bank_size)    # slots per bank (rows)
         self.elem_bytes = int(elem_bytes)
+        #: Independent pads. Each is a bank array with its own crossbar pair,
+        #: its own frontend and its own backend, so one pad per VLSU gives every
+        #: load/store unit a private path to memory.
+        self.num_tiles = int(num_tiles)
+        if self.num_tiles < 1:
+            raise ValueError("num_tiles must be >= 1, got %s" % num_tiles)
         self.now = 0
-        self.backend_write_inflight = [0, 0]
-        self.backend_read_inflight = [0, 0]
+        self.backend_write_inflight = [0] * self.num_tiles
+        self.backend_read_inflight = [0] * self.num_tiles
 
         # Shared view of the current cycle. Banks read this instead of their
         # own last-tick counter, which goes stale once they are allowed to
         # sleep through cycles where nothing is due.
         self.clock = SimClock()
 
-        # two tiles (tile 0 and tile 1). each tile is a SRAMBanks instance
+        # One SRAMBanks instance per tile.
         self.tiles: List[SRAMBanks] = [
             SRAMBanks(bank_count=self.num_banks, bank_size=self.bank_size, read_latency=read_latency,
                       write_latency=write_latency, clock=self.clock)
-            for _ in range(2)
+            for _ in range(self.num_tiles)
         ]
 
         # per-tile crossbars (separate read/write per tile)
         self.tile_write_xbars: List[Xbar] = [
-            Xbar(delay=xbar_delay, num_banks=self.num_banks) for _ in range(2)
+            Xbar(delay=xbar_delay, num_banks=self.num_banks) for _ in range(self.num_tiles)
         ]
         self.tile_read_xbars: List[Xbar] = [
-            Xbar(delay=xbar_delay, num_banks=self.num_banks) for _ in range(2)
+            Xbar(delay=xbar_delay, num_banks=self.num_banks) for _ in range(self.num_tiles)
         ]
 
         # Optional per-tile backend references (set via attach_backend / attach_backends).
-        self.backends: List[Optional[backend.Backend]] = [None, None]
+        self.backends: List[Optional[backend.Backend]] = [None] * self.num_tiles
         # Backward-compatible alias for the first attached backend.
         self.backend: Optional[backend.Backend] = None
 
         self.frontends = [
-            Frontend(0, self, queue_size=frontend_queue_size),
-            Frontend(1, self, queue_size=frontend_queue_size)
+            Frontend(tile_id, self, queue_size=frontend_queue_size)
+            for tile_id in range(self.num_tiles)
         ]
 
         # Wake groups, ticked in the order data flows: a frontend hands work to
@@ -90,6 +97,16 @@ class Scratchpad(Clocked):
                 self._bank_group.add(b)
         self.wake_groups = [self._fe_group, self._xbar_group, self._bank_group]
 
+    @property
+    def tile_bytes(self) -> int:
+        """Capacity of one pad."""
+        return self.num_banks * self.bank_size * self.elem_bytes
+
+    @property
+    def total_bytes(self) -> int:
+        """Capacity of the whole scratchpad -- the chip's local memory."""
+        return self.tile_bytes * self.num_tiles
+
     def _write_path_can_accept(self, tile_id: int) -> bool:
         tile_id = self._normalize_tile_id(tile_id)
         xbar = self.tile_write_xbars[tile_id]
@@ -102,12 +119,21 @@ class Scratchpad(Clocked):
 
     def _tile_and_slot(self, sp_addr: int) -> tuple[int, int]:
         """
-        Simple linear split of address space into two equal tiles.
-        sp_addr is a slot index (as produced by Backend: base_sp + row)
+        Linear split of the address space into num_tiles equal pads.
+        sp_addr is a slot index (as produced by Backend: base_sp + row).
+
+        Only used when a caller does not name a tile. Every VLSU path names one
+        (the bridge passes tile_id=frontend_id), so each pad is addressed from
+        zero and this is the backend/DMA fallback.
         """
         tile_sz = self.bank_size
-        tile = 0 if sp_addr < tile_sz else 1
-        slot = sp_addr % tile_sz
+        tile = int(sp_addr) // tile_sz
+        if tile < 0 or tile >= self.num_tiles:
+            raise ValueError(
+                "scratchpad address %s falls outside %d pads of %d slots"
+                % (sp_addr, self.num_tiles, tile_sz)
+            )
+        slot = int(sp_addr) % tile_sz
         return tile, slot
 
     def _normalize_tile_id(self, tile_id: int) -> int:

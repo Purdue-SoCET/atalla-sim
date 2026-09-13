@@ -400,6 +400,30 @@ PHASE_BACKEND = 50     # scratchpad backends / DRAM
 PHASE_HARNESS = 90     # experiment harness, observes everything above
 
 
+# The chip's local memory: one scratchpad of SPAD_TOTAL_BYTES, split into
+# SPAD_NUM_PADS equal pads. Each pad has its own bank array, crossbar pair,
+# frontend and DRAM backend, and is paired 1:1 with one of the vector core's
+# VLSUs -- so every VLSU has a private path to memory:
+#
+#   DRAM -> Backend[p] -> banks[p] -> Frontend[p] -> VLSU[p] -> VRF -> GSAU -> SA
+#
+# DRAM bandwidth does NOT scale with the pad count: every backend shares one
+# SharedDRAMBurstChannel, one burst launch per cycle in total. More pads means
+# each gets a smaller share, never more aggregate bandwidth.
+SPAD_TOTAL_BYTES = 2 * 1024 * 1024
+SPAD_NUM_PADS = 4
+SPAD_NUM_BANKS = 32
+SPAD_ELEM_BYTES = 2
+SPAD_BANK_SIZE = SPAD_TOTAL_BYTES // (SPAD_NUM_PADS * SPAD_NUM_BANKS * SPAD_ELEM_BYTES)
+
+# Which pad holds what. A convention for callers, not something the hardware
+# enforces -- any pad can hold anything.
+PAD_ACT = 0     # activations
+PAD_WGT = 1     # weights
+PAD_PSUM = 2    # partial sums
+PAD_OUT = 3     # outputs
+
+
 @dataclass
 class TPUPlatform:
     eq: EventQueue
@@ -496,9 +520,10 @@ def build_tpu_platform(
     size: int = 32,
     dtype: str = "fp16",
     lane_count: int = 4,
-    vls_count: int = 1,
-    spad_num_banks: int = 32,
-    spad_bank_size: int = 128,
+    vls_count: int = SPAD_NUM_PADS,
+    spad_num_banks: int = SPAD_NUM_BANKS,
+    spad_bank_size: int = SPAD_BANK_SIZE,
+    spad_num_tiles: int = SPAD_NUM_PADS,
     spad_read_latency: int = 1,
     spad_write_latency: int = 1,
     spad_xbar_delay: int = 1,
@@ -512,6 +537,7 @@ def build_tpu_platform(
     vls_bridge_cls: Callable[..., Any] = VLSFrontendBridge,
     vls_bridge_kwargs: Optional[Dict[str, Any]] = None,
 ) -> TPUPlatform:
+    """Build the TPU platform."""
     eq, clk, sim = build_sim()
     vc = VectorCore(
         veggie_size=int(size) * 16,
@@ -526,8 +552,9 @@ def build_tpu_platform(
         read_latency=int(spad_read_latency),
         write_latency=int(spad_write_latency),
         xbar_delay=int(spad_xbar_delay),
-        elem_bytes=2,
+        elem_bytes=SPAD_ELEM_BYTES,
         frontend_queue_size=int(spad_frontend_queue_size),
+        num_tiles=int(spad_num_tiles),
     )
     dram = DRAM(block_bytes=int(dram_block_bytes))
     backends: List[Backend] = []
@@ -561,8 +588,12 @@ def build_tpu_platform(
         root.add_child(bridge, phase=PHASE_VLS)
     root.add_child(sysarr_bridge, phase=PHASE_SYSARR)
     root.add_child(spad, phase=PHASE_SPAD)
-    for backend_obj in backends:
-        root.add_child(backend_obj, phase=PHASE_BACKEND)
+    # Backends go in behind the round-robin ticker, not as siblings. Children
+    # tick in registration order, so adding them directly would hand backend 0
+    # the shared burst channel every cycle and let backend 3 issue only when
+    # 0, 1 and 2 are all idle -- already unfair at two pads, worse at four.
+    if backends:
+        root.add_child(RoundRobinBackendTicker(backends), phase=PHASE_BACKEND)
 
     return TPUPlatform(
         eq=eq,
@@ -583,10 +614,15 @@ def build_tpu_platform(
 
 
 class SysArrTPUSystem:
-    def __init__(self, size: int = 32, dtype: str = "fp16", mirror: bool = True):
+    def __init__(self, size: int = 32, dtype: str = "fp16", mirror: bool = True,
+                 **platform_kwargs):
+        """Extra keywords go straight to build_tpu_platform, so a test that only
+        cares about wiring can ask for a small scratchpad instead of the chip's
+        full 2 MB."""
         self.size = int(size)
         self.dtype = str(dtype)
-        platform = build_tpu_platform(size=self.size, dtype=self.dtype, mirror=mirror)
+        platform = build_tpu_platform(size=self.size, dtype=self.dtype,
+                                      mirror=mirror, **platform_kwargs)
         self.platform = platform
         self.eq = platform.eq
         self.clk = platform.clk
@@ -603,9 +639,15 @@ class SysArrTPUSystem:
         self.DRAM_ACT = 0x1000
         self.DRAM_WGT = 0x2000
         self.DRAM_OUT = 0x3000
+        # Each role gets its own pad, so each base is a slot index inside that
+        # pad rather than an offset carving up one shared address space. Pad p
+        # is reached through VLSU p, so the pad index is also the "vls" field.
+        self.ACT_PAD = PAD_ACT
+        self.WGT_PAD = PAD_WGT
+        self.OUT_PAD = PAD_OUT
         self.SPAD_ACT_BASE = 0
-        self.SPAD_WGT_BASE = self.size
-        self.SPAD_OUT_BASE = self.size * 2
+        self.SPAD_WGT_BASE = 0
+        self.SPAD_OUT_BASE = 0
 
         self.W_REG = 1
         self.A_REG = 2
@@ -626,11 +668,11 @@ class SysArrTPUSystem:
             slot = int(self.SPAD_ACT_BASE + r) % self.spad.bank_size
             for lane, value in enumerate(act_row):
                 bank = _xor_bank(slot, lane, self.spad.num_banks)
-                self.spad.tiles[0].banks[bank].mem[slot] = int(value).to_bytes(2, "little", signed=False)
+                self.spad.tiles[self.ACT_PAD].banks[bank].mem[slot] = int(value).to_bytes(2, "little", signed=False)
             slot = int(self.SPAD_WGT_BASE + r) % self.spad.bank_size
             for lane, value in enumerate(wgt_row):
                 bank = _xor_bank(slot, lane, self.spad.num_banks)
-                self.spad.tiles[0].banks[bank].mem[slot] = int(value).to_bytes(2, "little", signed=False)
+                self.spad.tiles[self.WGT_PAD].banks[bank].mem[slot] = int(value).to_bytes(2, "little", signed=False)
 
     def run(self, max_cycles: int = 20000) -> Tuple[List[List[int]], Optional[List[List[int]]], int, "TPUMetrics"]:
         row_bytes = self.size * 2
@@ -648,8 +690,8 @@ class SysArrTPUSystem:
             "store_inflight": {},
             "completed_rows": set(),
             "weights_done": False,
-            "load_issue_window": self.spad.frontends[self.vls_bridge.frontend_id].readq.max_size + 1,
-            "store_issue_window": self.spad.frontends[self.vls_bridge.frontend_id].writeq.max_size + 1,
+            "load_issue_window": self.spad.frontends[self.WGT_PAD].readq.max_size + 1,
+            "store_issue_window": self.spad.frontends[self.OUT_PAD].writeq.max_size + 1,
         }
 
         class RunHarness(Clocked):
@@ -736,7 +778,7 @@ class SysArrTPUSystem:
                     spad_vec = []
                     for lane in range(self_outer.vc.vector_len):
                         bank = _xor_bank(slot, lane, self_outer.spad.num_banks)
-                        blob = self_outer.spad.tiles[0].banks[bank].mem[slot]
+                        blob = self_outer.spad.tiles[self_outer.OUT_PAD].banks[bank].mem[slot]
                         blob = bytes(blob) if blob is not None else b"\x00\x00"
                         if len(blob) < 2:
                             blob = blob + (b"\x00" * (2 - len(blob)))
@@ -759,7 +801,7 @@ class SysArrTPUSystem:
                     assert self_outer.vc.enqueue_memory(
                         {
                             "kind": "store",
-                            "vls": 0,
+                            "vls": self_outer.OUT_PAD,
                             "data": row_data,
                             "addr": self_outer.SPAD_OUT_BASE + row_idx,
                             "dtype": self_outer.dtype,
@@ -787,7 +829,7 @@ class SysArrTPUSystem:
             assert self.vc.enqueue_memory(
                 {
                     "kind": "load",
-                    "vls": 0,
+                    "vls": self.WGT_PAD,
                     "dst": self.W_REG,
                     "addr": self.SPAD_WGT_BASE + state["weight_issue_row"],
                     "dtype": self.dtype,
@@ -803,7 +845,7 @@ class SysArrTPUSystem:
             assert self.vc.enqueue_memory(
                 {
                     "kind": "load",
-                    "vls": 0,
+                    "vls": self.ACT_PAD,
                     "dst": self.A_REG,
                     "addr": self.SPAD_ACT_BASE + state["act_issue_row"],
                     "dtype": self.dtype,

@@ -11,7 +11,8 @@ class VectorLoadStoreUnit(Clocked):
 
     Design points:
     - One issue can be accepted per cycle when downstream can accept.
-    - Two independent scratchpad frontends are supported by default.
+    - Each VLSU is built with one scratchpad frontend: the platform pairs one
+      VLSU with one 0.5 MB scratchpad pad. See docs/architecture/scratchpad-pads.md.
     - Each scratchpad has a dedicated synchronous FIFO that tracks destination
       registers for outstanding loads.
     - Stores are pass-through requests (no destination tracking required).

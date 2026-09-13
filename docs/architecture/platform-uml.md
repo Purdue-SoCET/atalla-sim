@@ -11,14 +11,25 @@ top to bottom, and the arrows are `SimQueue` FIFOs.
 
 ```
    phase 10   VectorCore ────────────────────────────────────────────┐
-                │  scheduler builds VLIW packets                     │
-                ├──► vliw_q ──► VLSU.issue_q ──► VLSU.req_q          │
+                │  scheduler builds VLIW packets; one packet carries │
+                │  up to three slots, issued in the same cycle:      │
+                │                                                    │
+                ├─ vlsu ─────► vliw_q ─► VLSU.issue_q ─► VLSU.req_q  │
                 │              (+ load_dst_fifos: dst metadata)      │
-                └──► gsau.to_systolic                                │
-                     (+ gsau.rd_queue: awaited destinations)         │
+                │                                                    │
+                ├─ datapath ─► VectorDatapath.pending_issue          │
+                │                ─► lane0..laneN  (elements striped  │
+                │                   round-robin across lanes)        │
+                │                   FUs: alu sqrt exp div shift      │
+                │                ─► ResultCollector                  │
+                │                   tree reduce: sum / min / max     │
+                │                ─► wb_buffer ─► Veggie              │
+                │                                                    │
+                └─ gsau ─────► gsau.to_systolic                      │
+                              (+ gsau.rd_queue: awaited dests)       │
                                                                      │
-   phase 20   VLSFrontendBridge                                      │
-                VLSU.req_q ──► Frontend.readq / .writeq              │
+   phase 20   VLSFrontendBridge x4, one per pad                       │
+                VLSU[p].req_q ──► Frontend[p].readq / .writeq        │
                                                                      │
    phase 30   GSAUTPUBridge                                          │
                 gsau.to_systolic ──► SystolicArrayTPU                │
@@ -32,7 +43,9 @@ top to bottom, and the arrows are `SimQueue` FIFOs.
                 Frontend.writeq ──► tile_write_xbars[t] ──► banks    │
                 banks ──► (callback) ──► frontend cb ──► VLSU rsp    │
                                                                      │
-   phase 50   Backend ──► DRAM burst channel ──► Scratchpad          │
+   phase 50   RoundRobinBackendTicker ──► Backend[p] x4               │
+                one shared DRAM burst channel: one launch per cycle  │
+                across all four, so pad count does not buy bandwidth │
                                                                      │
    phase 90   Harness  ◄────── wb_valid / last_wb ────────────────────┘
                 observes writeback, issues the next work,

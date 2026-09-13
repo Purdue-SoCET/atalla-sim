@@ -18,6 +18,9 @@ TILE = 32
 MATRIX = 1024
 NUM_TILES = MATRIX // TILE
 SPAD_TOTAL_BYTES = 2 * 1024 * 1024
+# This harness uses pads as double-buffer prefetch slots, not as data roles, so
+# it pins its own geometry (two slots) rather than taking the platform's default
+# of four. Published results in docs/results/ were measured on this.
 SPAD_NUM_TILES = 2
 SPAD_NUM_BANKS = 32
 SPAD_ELEM_BYTES = 2
@@ -570,6 +573,7 @@ class TiledTPUCosim:
             vls_count=2,
             spad_num_banks=SPAD_NUM_BANKS,
             spad_bank_size=SPAD_BANK_SIZE,
+            spad_num_tiles=SPAD_NUM_TILES,
             spad_read_latency=2,
             spad_write_latency=2,
             spad_xbar_delay=3,
@@ -586,7 +590,7 @@ class TiledTPUCosim:
         self.spad = platform.spad
         self.dram = platform.dram
         self.backends = platform.backends
-        assert len(self.backends) == 2
+        assert len(self.backends) == SPAD_NUM_TILES
         assert all(backend.dram is self.dram for backend in self.backends)
         self.backend = self.backends[0]
         self.vls_bridges = platform.vls_bridges
