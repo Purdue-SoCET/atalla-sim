@@ -3,11 +3,17 @@ from base.queue import SimQueue
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 from base.dtype import DType, cast_vector, normalize_dtype
+from vector_core.transpose import TransposeUnit
 from vector_core.vector_lanes import VectorDatapath
 from vector_core.vector_load_store import VLSU
 from vector_core.veggie_file import OpBuffer, Veggie
 
 Time = float
+
+#: One VLIW slot group per functional unit, in issue order. Every packet
+#: carries a list per name and every name has a `<name>_slots` width on the
+#: core, so adding a unit is one entry here plus its issue and writeback hooks.
+PACKET_UNITS = ("gsau", "vlsu", "transpose", "datapath")
 
 
 class _Bundle:
@@ -215,6 +221,7 @@ class VectorCore(Clocked):
     - Veggie (vector register file storage backing)
     - VLSU(s) (scratchpad load/store path)
     - GSAU (systolic-array ingress/egress + rd queue tracking)
+    - TransposeUnit (tile transpose, one row in or one column out per issue)
     - WBBuffer (common result sink before VRF write)
     """
 
@@ -267,8 +274,12 @@ class VectorCore(Clocked):
         #: One in-flight operand fetch per collector slot.
         self._fetch = [None] * self.op_buffer.num_pairs
         self.gsau = GSAU(max_vregs=self.max_vregs)
+        # The transpose tile is as wide as a vector: one row per push, one
+        # column per popped vector.
+        self.transpose = TransposeUnit(vec_len=self.vector_len)
         self.gsau_slots = 1
         self.vlsu_slots = 4
+        self.transpose_slots = 1
         self.datapath_slots = 2
         self.vliw_q = SimQueue(max(1, scheduler_depth))
         self._build_packet = self._empty_packet()
@@ -352,9 +363,11 @@ class VectorCore(Clocked):
         Enqueue one scheduler-issued instruction.
 
         Supported instruction classes:
-        - Compute: {"unit":"datapath", "op", "dst", "src0", "src1?", ...}
-        - Memory:  {"unit":"vlsu", "kind":"load|store", "vls":0/1, ...}
-        - GSAU:    {"unit":"gsau", ...}
+        - Compute:   {"unit":"datapath", "op", "dst", "src0", "src1?", ...}
+        - Memory:    {"unit":"vlsu", "kind":"load|store", "vls":0/1, ...}
+        - GSAU:      {"unit":"gsau", ...}
+        - Transpose: {"unit":"transpose", "kind":"push", "src": reg|vector}
+                     {"unit":"transpose", "kind":"pop", "dst": reg|[regs]}
         """
         entry = dict(inst)
         if not self._packet_append_inst(self._build_packet, entry):
@@ -365,29 +378,22 @@ class VectorCore(Clocked):
         return True
 
     def _empty_packet(self) -> Dict[str, List[Dict]]:
-        return {"gsau": [], "vlsu": [], "datapath": []}
+        return {unit: [] for unit in PACKET_UNITS}
 
     def _packet_has_entries(self, packet: Dict[str, List[Dict]]) -> bool:
-        return bool(packet["gsau"] or packet["vlsu"] or packet["datapath"])
+        return any(packet[unit] for unit in PACKET_UNITS)
+
+    def _slot_width(self, unit: str) -> int:
+        return int(getattr(self, unit + "_slots"))
 
     def _packet_append_inst(self, packet: Dict[str, List[Dict]], inst: Dict) -> bool:
         unit = inst.get("unit", "datapath")
-        if unit == "gsau":
-            if len(packet["gsau"]) >= self.gsau_slots:
-                return False
-            packet["gsau"].append(inst)
-            return True
-        if unit == "vlsu":
-            if len(packet["vlsu"]) >= self.vlsu_slots:
-                return False
-            packet["vlsu"].append(inst)
-            return True
-        if unit == "datapath":
-            if len(packet["datapath"]) >= self.datapath_slots:
-                return False
-            packet["datapath"].append(inst)
-            return True
-        raise ValueError("unsupported scheduler unit: %s" % unit)
+        if unit not in PACKET_UNITS:
+            raise ValueError("unsupported scheduler unit: %s" % unit)
+        if len(packet[unit]) >= self._slot_width(unit):
+            return False
+        packet[unit].append(inst)
+        return True
 
     def _flush_build_packet(self) -> bool:
         if not self._packet_has_entries(self._build_packet):
@@ -405,7 +411,7 @@ class VectorCore(Clocked):
         if not self._flush_build_packet():
             return False
         norm = self._empty_packet()
-        for unit in ("gsau", "vlsu", "datapath"):
+        for unit in PACKET_UNITS:
             items = packet.get(unit, [])
             if isinstance(items, dict):
                 items = [items]
@@ -637,6 +643,44 @@ class VectorCore(Clocked):
             gsau_cmd["dst"] = int(dst)
         return self.gsau.issue(gsau_cmd)
 
+    def _issue_transpose(self, inst: Dict) -> bool:
+        """One transpose instruction: a row in, or a whole tile out.
+
+        push  src   a register index, or an inline vector
+        pop   dst   one register (columns land in dst, dst+1, ...) or a list
+                    of vector_len registers, one per column
+
+        A pop is a single instruction because the unit drains the whole tile
+        off one request -- there is no per-column handshake to issue against.
+        """
+        kind = inst.get("kind", "push")
+        if kind not in ("push", "pop"):
+            raise ValueError("transpose kind must be 'push' or 'pop': %s" % kind)
+
+        if kind == "push":
+            src = inst.get("src", inst.get("vs"))
+            if src is None:
+                raise ValueError("transpose push requires src")
+            vec = self.read_vreg(src) if isinstance(src, int) \
+                else self._normalize_vector(src)
+            return self.transpose.push(vec)
+
+        dst = inst.get("dst", inst.get("vd"))
+        if dst is None:
+            raise ValueError("transpose pop requires dst")
+        if isinstance(dst, int):
+            dsts = [dst + i for i in range(self.vector_len)]
+        else:
+            dsts = [int(d) for d in dst]
+            if len(dsts) != self.vector_len:
+                raise ValueError(
+                    "transpose pop needs %d destinations, got %d"
+                    % (self.vector_len, len(dsts))
+                )
+        for reg in dsts:
+            self._reg_to_bank_addr(reg)
+        return self.transpose.pop(dsts)
+
     def _try_issue_scheduler(self) -> None:
         _ = self._flush_build_packet()
         packet = self.vliw_q.peek()
@@ -645,6 +689,7 @@ class VectorCore(Clocked):
         for issue_fn, unit in (
             (self._issue_gsau, "gsau"),
             (self._issue_vlsu, "vlsu"),
+            (self._issue_transpose, "transpose"),
             (self._issue_datapath, "datapath"),
         ):
             remaining = []
@@ -736,6 +781,27 @@ class VectorCore(Clocked):
                 )
             )
 
+        wb = self.transpose.peek_writeback()
+        if wb is not None:
+            if "dst" not in wb:
+                raise ValueError("transpose writeback missing dst")
+            bank, _ = self._reg_to_bank_addr(int(wb["dst"]))
+            candidates.append(
+                (
+                    2,
+                    "transpose",
+                    {
+                        "source": "transpose",
+                        "dst": wb["dst"],
+                        "data": wb["data"],
+                        "dtype": self.dtype_default,
+                        "bank": bank,
+                        "meta": {"col": wb["col"]},
+                    },
+                    wb,
+                )
+            )
+
         accepted_datapath = False
         for _prio, src_key, entry, raw in sorted(candidates, key=lambda x: x[0]):
             if not self.wb_buffer.enqueue(entry):
@@ -745,6 +811,8 @@ class VectorCore(Clocked):
                 self._datapath_wb_hold = None
             elif src_key == "gsau":
                 _ = self.gsau.pop_writeback()
+            elif src_key == "transpose":
+                _ = self.transpose.pop_writeback()
             else:
                 _ = self.vls_units[src_key[1]].pop_writeback()
 
@@ -798,6 +866,7 @@ class VectorCore(Clocked):
         for vls in self.vls_units:
             vls.tick(cycle)
         self.gsau.tick(cycle)
+        self.transpose.tick(cycle)
 
         # 3) Funnel unit outputs into shared writeback buffer.
         self.wb_buffer.start_cycle()
@@ -821,13 +890,9 @@ class VectorCore(Clocked):
     def scheduler_backlog(self) -> int:
         total = 0
         if self._packet_has_entries(self._build_packet):
-            total += (
-                len(self._build_packet["gsau"])
-                + len(self._build_packet["vlsu"])
-                + len(self._build_packet["datapath"])
-            )
+            total += sum(len(self._build_packet[unit]) for unit in PACKET_UNITS)
         for packet in self.vliw_q._raw_items:
-            total += len(packet["gsau"]) + len(packet["vlsu"]) + len(packet["datapath"])
+            total += sum(len(packet[unit]) for unit in PACKET_UNITS)
         return total
 
     def scheduler_packet_count(self) -> int:

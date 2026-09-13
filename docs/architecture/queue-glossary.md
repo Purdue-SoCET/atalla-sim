@@ -151,6 +151,20 @@ These queues are part of the modeled system but are not currently reported in `q
   - Definition: latency-holding queue for reduction instructions before they become architecturally complete.
   - Direction: lane partial reductions -> reduction latency queue -> `collector.completed_vectors`.
 
+### Transpose Unit Queues
+
+- `transpose.outputs`
+  - Owner: `TransposeUnit.outputs`
+  - Definition: transposed columns produced by a drain, waiting to be picked up as writebacks. Defaults to one whole tile, so a pop never stalls on its own output; when it is full the FSM parks in `DONE`.
+  - Payload: `{"col", "data", "dst"}` per column.
+  - Direction: Clos crossbar output -> transpose output queue -> `wb_buffer` -> Veggie.
+
+- `transpose.clos._issue_q`
+  - Owner: `TransposeUnit.clos` (a `memory.crossbar.Xbar`)
+  - Definition: the Clos network's own issue queue. The FSM keeps one vector in flight, so this only holds a tail the consumer is backpressuring.
+  - Payload: one permutation request: shift mask plus a vector of bank values.
+  - Direction: transpose FSM -> crossbar pipeline -> row into the banks, or column out.
+
 ### Vector Lane / FU Queues
 
 - `laneX.<fu>.entries`
