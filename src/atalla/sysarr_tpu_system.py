@@ -431,7 +431,7 @@ class TPUPlatform:
     sim: Sim
     vc: VectorCore
     spad: Scratchpad
-    sa: SystolicArrayTPU
+    sa: Any
     dram: DRAM
     backend: Optional[Backend]
     backends: List[Backend]
@@ -509,8 +509,25 @@ def build_tpu_compute_path(
     size: int = 32,
     dtype: str = "fp16",
     mirror: Optional[TPUReference] = None,
-) -> Tuple[SystolicArrayTPU, GSAUTPUBridge]:
-    sa = SystolicArrayTPU(size=int(size), dtype=str(dtype))
+    systolic_array: str = "tpu",
+) -> Tuple[Any, GSAUTPUBridge]:
+    """Build the compute path behind the GSAU.
+
+    systolic_array picks the array model:
+      "tpu"    -- SystolicArrayTPU, grouped MAC cells with a 4-input adder.
+      "meissa" -- SystolicArrayMEISSA, a plain multiplier grid with one
+                  pipelined adder tree per column. Same interface, so the
+                  bridge does not care which one it is driving.
+    """
+    if systolic_array == "meissa":
+        from systolic_array.systolic_array_meissa import SystolicArrayMEISSA
+
+        sa = SystolicArrayMEISSA(size=int(size), dtype=str(dtype))
+    elif systolic_array == "tpu":
+        sa = SystolicArrayTPU(size=int(size), dtype=str(dtype))
+    else:
+        raise ValueError(
+            "systolic_array must be 'tpu' or 'meissa', got %r" % systolic_array)
     sysarr_bridge = GSAUTPUBridge(vc, sa, mirror=mirror)
     return sa, sysarr_bridge
 
@@ -536,6 +553,7 @@ def build_tpu_platform(
     mirror: bool = False,
     vls_bridge_cls: Callable[..., Any] = VLSFrontendBridge,
     vls_bridge_kwargs: Optional[Dict[str, Any]] = None,
+    systolic_array: str = "tpu",
 ) -> TPUPlatform:
     """Build the TPU platform."""
     eq, clk, sim = build_sim()
@@ -578,7 +596,9 @@ def build_tpu_platform(
         bridge_kwargs=vls_bridge_kwargs,
     )
     vls_bridge = vls_bridges[0] if vls_bridges else None
-    sa, sysarr_bridge = build_tpu_compute_path(vc=vc, size=int(size), dtype=str(dtype), mirror=mirror_obj)
+    sa, sysarr_bridge = build_tpu_compute_path(
+        vc=vc, size=int(size), dtype=str(dtype), mirror=mirror_obj,
+        systolic_array=str(systolic_array))
 
     # The component tree. Ticking the root ticks the whole platform in phase
     # order; nothing has to be enumerated again by the caller.
