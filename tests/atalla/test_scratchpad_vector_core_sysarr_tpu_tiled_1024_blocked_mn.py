@@ -15,6 +15,7 @@ if str(REPO_ROOT) not in sys.path:
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from atalla.sysarr_tpu_system import PAD_ACT, PAD_OUT, PAD_PSUM, PAD_WGT
 from base.debug import close_debug, configure_debug, dprintf
 
 
@@ -45,6 +46,7 @@ _write_slot_vector_u16 = legacy._write_slot_vector_u16
 _fp16_from_u16 = legacy._fp16_from_u16
 _decode_fp16_vector = legacy._decode_fp16_vector
 _encode_fp16_vector = legacy._encode_fp16_vector
+SPAD_NUM_TILES = legacy.SPAD_NUM_TILES
 
 
 @dataclass(frozen=True)
@@ -171,6 +173,8 @@ class MNReuseBlockedTPUCosim(TiledTPUCosim):
         dtype: str = "fp16",
         spad_frontend_queue_size: int = 4,
         backend_dram_burst_bytes: int = 32,
+        systolic_array: str = "tpu",
+        spad_num_tiles: int = SPAD_NUM_TILES,
     ):
         self.weight_reuse_m = max(1, int(weight_reuse_m))
         self.activation_reuse_n = max(1, int(activation_reuse_n))
@@ -180,9 +184,27 @@ class MNReuseBlockedTPUCosim(TiledTPUCosim):
             dtype=dtype,
             spad_frontend_queue_size=spad_frontend_queue_size,
             backend_dram_burst_bytes=backend_dram_burst_bytes,
+            systolic_array=systolic_array,
+            spad_num_tiles=spad_num_tiles,
         )
         self.weight_reuse_m = min(self.weight_reuse_m, self.num_tiles)
         self.activation_reuse_n = min(self.activation_reuse_n, self.num_tiles)
+
+    def _preferred_tiles(self, kind: str) -> Tuple[int, ...]:
+        """Which pad each kind of buffer wants, best first.
+
+        Two pads keeps the historical order exactly, so the published blocked
+        results still reproduce. Four gives each kind a pad of its own -- which
+        is the point of the wider scratchpad, and what stops the psum working
+        set from crowding out the activations once the per-pad capacity halves.
+        """
+        n = self.num_slots
+        if n == 2:
+            return {"act": (1, 0), "wgt": (0, 1), "psum": (1, 0)}[kind]
+        first = {"act": [PAD_ACT], "wgt": [PAD_WGT],
+                 "psum": [PAD_PSUM, PAD_OUT]}[kind]
+        first = [t for t in first if t < n]
+        return tuple(first + [t for t in range(n) if t not in first])
 
     def build_stats(self, got: np.ndarray, expected: Optional[np.ndarray] = None) -> Dict[str, object]:
         stats = super().build_stats(got, expected)
@@ -204,6 +226,7 @@ class MNReuseBlockedTPUCosim(TiledTPUCosim):
 
     def _build_reuse_layout(self, block_rows: int, block_cols: int) -> ReuseBlockLayout:
         tile_bytes = self.tile_size * self.tile_row_bytes
+        prefer = self._preferred_tiles
         allocator = ScratchpadLayoutAllocator(
             bank_size=self.spad.bank_size,
             tile_size=self.tile_size,
@@ -212,21 +235,21 @@ class MNReuseBlockedTPUCosim(TiledTPUCosim):
         act_slots = allocator.allocate(
             kind="act",
             count=block_rows,
-            preferred_tiles=(1, 0),
+            preferred_tiles=prefer("act"),
             dram_base=self.DRAM_ACT_STAGE_BASE,
             tile_bytes=tile_bytes,
         )
         wgt_slots = allocator.allocate(
             kind="wgt",
             count=block_cols,
-            preferred_tiles=(0, 1),
+            preferred_tiles=prefer("wgt"),
             dram_base=self.DRAM_WGT_STAGE_BASE,
             tile_bytes=tile_bytes,
         )
         psum_flat = allocator.allocate(
             kind="psum",
             count=block_rows * block_cols,
-            preferred_tiles=(1, 0),
+            preferred_tiles=prefer("psum"),
             dram_base=self.DRAM_PSUM_STAGE_BASE,
             tile_bytes=tile_bytes,
         )
@@ -1456,6 +1479,8 @@ def main() -> None:
     parser.add_argument("--activation-reuse-n", type=int, default=1)
     parser.add_argument("--spad-frontend-queue-size", type=int, default=4)
     parser.add_argument("--backend-dram-burst-bytes", type=int, default=32)
+    parser.add_argument("--systolic-array", choices=("tpu", "meissa"), default="tpu")
+    parser.add_argument("--spad-pads", type=int, default=SPAD_NUM_TILES)
     parser.add_argument(
         "--log-dir",
         type=str,
@@ -1475,6 +1500,8 @@ def main() -> None:
         dtype="fp16",
         spad_frontend_queue_size=args.spad_frontend_queue_size,
         backend_dram_burst_bytes=args.backend_dram_burst_bytes,
+        systolic_array=args.systolic_array,
+        spad_num_tiles=args.spad_pads,
     )
     got, _ = runner.run(act, wgt)
     stats = runner.build_stats(got, expected)
@@ -1486,3 +1513,35 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+def test_both_architectures_run_the_same_reuse_schedule() -> None:
+    """The harness is the control: same decomposition, same reuse policy, only
+    the array and the pad count differ, so a cycle delta is the hardware.
+
+    Also pins that the old configuration is untouched -- every published
+    result in docs/results/ was measured on tpu / 2 pads.
+    """
+    size, tile = 64, 32
+    act = _act_matrix_u16(size)
+    wgt = _weights_matrix_u16(size)
+    expected = _expected_tiled_fp16_accum(act, wgt, tile)
+
+    results = {}
+    for name, kwargs in (
+        ("old", dict(systolic_array="tpu", spad_num_tiles=2)),
+        ("new", dict(systolic_array="meissa", spad_num_tiles=4)),
+    ):
+        runner = MNReuseBlockedTPUCosim(
+            matrix_size=size, tile_size=tile, dtype="fp16",
+            weight_reuse_m=2, activation_reuse_n=2, **kwargs)
+        got, _ = runner.run(act, wgt)
+        assert np.array_equal(got, expected), "%s produced a wrong GEMM" % name
+        results[name] = runner
+
+    old, new = results["old"], results["new"]
+    assert old.spad.num_tiles == 2 and new.spad.num_tiles == 4
+    assert len(old.vc.vls_units) == 2 and len(new.vc.vls_units) == 4
+    # capacity is a property of the chip, not of how it is cut up
+    assert old.spad.total_bytes == new.spad.total_bytes == 2 * 1024 * 1024
+    assert new.num_slots == 4, "the wider scratchpad must widen the double buffer"
+    assert old.global_cycle > 0 and new.global_cycle > 0

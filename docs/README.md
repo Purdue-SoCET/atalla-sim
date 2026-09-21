@@ -10,14 +10,17 @@
    │   ├── vector-core-old-vs-new.md  what changed, and why
    │   ├── transpose.md       the transpose unit: banks, rotation, cost
    │   ├── scratchpad-pads.md 4 pads, 4 VLSUs, and DRAM bandwidth
+   │   ├── meissa.md          the MEISSA systolic array
    │   └── gem5-roadmap.md    what else is worth taking from gem5
    │
    ├── harnesses/        how experiments drive the platform
-   │   └── tiled-1024.md      the 1024x1024 tiled GEMM harness
+   │   ├── tiled-1024.md      the 1024x1024 tiled GEMM harness
+   │   └── arch-comparison.md old vs new architecture, and how to run it
    │
    ├── results/          measurements from specific runs
    │   ├── gemm-32.md              single 32x32 tile, end to end
    │   ├── gemm-1024-tiled.md      1024x1024 tiled, with Gantt
+   │   ├── arch-comparison.md      old vs new architecture, 1024x1024
    │   └── presentation-graphs.md  figure-by-figure notes
    │
    ├── sweeps/           parameter studies
@@ -39,11 +42,14 @@
 | trace data through the platform | [architecture/platform-uml.md](architecture/platform-uml.md) |
 | know what a queue in the stats means | [architecture/queue-glossary.md](architecture/queue-glossary.md) |
 | run or modify the big GEMM | [harnesses/tiled-1024.md](harnesses/tiled-1024.md) |
+| compare the two architectures | [harnesses/arch-comparison.md](harnesses/arch-comparison.md) |
+| see the comparison results | [results/arch-comparison.md](results/arch-comparison.md) |
 | interpret a stats report | [results/gemm-32.md](results/gemm-32.md) |
 | run a parameter sweep | [sweeps/sysarr-tpu.md](sweeps/sysarr-tpu.md) |
 | use the vector core | [architecture/vector-core.md](architecture/vector-core.md) |
 | transpose a tile | [architecture/transpose.md](architecture/transpose.md) |
 | know how memory is laid out | [architecture/scratchpad-pads.md](architecture/scratchpad-pads.md) |
+| use the MEISSA array | [architecture/meissa.md](architecture/meissa.md) |
 | decide what to build next | [architecture/gem5-roadmap.md](architecture/gem5-roadmap.md) |
 
 ## The model in one picture
