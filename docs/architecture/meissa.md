@@ -109,6 +109,60 @@ credits. `drain_cycles()` reports the time the last vector still needs.
 Input backpressure is credit-based, as in the RTL: `pipeline_depth + N - 1`
 credits, one spent per vector injected and returned when one retires.
 
+## Speed
+
+The model's arithmetic is trivial — 1024 multiplies and ~1024 adds per cycle at
+N=32. Everything else was overhead, and it came off in four layers:
+
+| | µs/cycle | vs start |
+|---|---|---|
+| original, scalar numpy per column | 942 | 1.0x |
+| vectorised tree reduction | 171 | 5.5x |
+| lazy activity stats | 128 | 7.4x |
+| AVX kernel, per-cycle `tick()` | 65 | 14.6x |
+| AVX kernel, `run_cycles(128)` | 20 | 47.5x |
+
+**Vectorising the reduction** was the single biggest step and needed no C++: the
+tree is identical for every column, so one array operation per level replaces N
+scalar ones while leaving the pairing and order untouched.
+
+**Batching is what breaks the per-cycle floor.** A cycle is ~25 small numpy or
+ctypes operations, each costing more in dispatch than the arithmetic it
+performs. `tick()` still works and is bit-identical, but `run_cycles(k)` hands
+k cycles to the kernel in one call and amortises all of it — which is why it is
+3x faster again than the per-cycle kernel path.
+
+```python
+sa.run_cycles(n, activations=rows, weights=weight_stream)
+```
+
+Use it wherever the array runs unattended: a tile streamed in one burst, or the
+drain after the last vector. `activations[c]` is what to inject on cycle c, or
+`None` for a bubble.
+
+### The kernel
+
+`atalla_meissa_run` in `src/native/atalla_kernels.cpp`, built by `make native`.
+AVX-512F, AVX2+F16C and scalar paths, chosen by CPUID at load; the Python
+struct points at the same buffers the numpy path uses, so there is one state,
+not two.
+
+The vectorisation axis is the **column**. The tree reduces across the *term*
+index, whose order must be preserved, so that axis is never vectorised —
+columns are mutually independent, and laying the grid out with the column index
+contiguous turns each tree level into a plain elementwise vector add.
+
+Bit-exactness is a test, not a hope: the kernel and the numpy reference are
+compared bit for bit across both tree shapes, with and without the reducer, at
+three array sizes. `ATALLA_NO_NATIVE=1` forces the reference path.
+
+Two details that matter for that:
+
+- a 2-input level is a float32 add; a 4-input level accumulates in double and
+  rounds **once**, matching the reference's evaluation order exactly;
+- no FMA anywhere — products are rounded to float32 before they are summed,
+  which is why the build sets `-ffp-contract=off`.
+
 Transcribed from `sysarr_MEISSA_top.sv`, `mul_grid.sv`,
 `pipelined_adder_tree.sv`, `mixed_pipelined_adder_tree.sv` and
 `output_buffer.sv` on the atalla repo's `systolic_array_arch` branch.

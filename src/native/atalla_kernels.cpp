@@ -694,3 +694,383 @@ ATALLA_EXPORT void atalla_sa_tick(
 //
 // The vector work that IS data-parallel is the whole-vector dtype cast in
 // VectorDatapath.enqueue, and that runs through atalla_cast_array above.
+
+// ===========================================================================
+// MEISSA systolic array
+// ===========================================================================
+//
+// Per cycle the array shifts its activation grid one column right, forms N*N
+// products, and reduces each column's N products through a pipelined adder
+// tree. The columns are mutually independent and the tree is identical for
+// each, so the vectorisation axis is the COLUMN index j -- never the term
+// index i, which is the axis being reduced and whose order must be preserved.
+// Laying the grid out with j contiguous turns every tree level into a plain
+// elementwise vector add over N floats.
+//
+// BIT-EXACTNESS, as for the TPU kernel above, but note the different type:
+// MEISSA carries products and tree sums in FLOAT32 (the RTL's FP32 datapath),
+// not double. Two consequences:
+//   * a 2-input level is a float32 add, rounding once per level;
+//   * a 4-input level accumulates in double and rounds ONCE on the way out,
+//     which is what a real 4-input FP adder does and what makes it differ
+//     from three cascaded 2-input adds. The double adds run left to right so
+//     they match the reference's a+b+c+d evaluation order exactly.
+// No FMA anywhere: products are rounded to float32 before they are summed.
+
+typedef struct {
+    int32_t  N, depth, out_depth, head;
+    int32_t  levels4, levels2, do_reduce, collect_stats;
+    float*   act;          // N*N, act[i*N + j] -- j contiguous
+    float*   wgt;          // N*N
+    int64_t* col_seq;      // N, -1 marks a bubble
+    float*   tree_vals;    // depth*N ring buffer
+    int64_t* tree_seq;     // depth*N
+    float*   bank_vals;    // N*out_depth, one bank per column
+    int64_t* bank_seq;     // N*out_depth
+    int32_t* bank_head;    // N
+    int32_t* bank_count;   // N
+    int32_t  next_seq, credits, max_credits;
+} MeissaState;
+
+enum { MM_ACTIVE_PES = 0, MM_MUL_OPS = 1, MM_ADD_OPS = 2, MM_OUT_ROWS = 3,
+       MM_ACT_SHIFT_NNZ = 4,   // nonzero activations that moved a column
+       MM_WGT_SHIFT_NNZ = 5,   // nonzero weights that moved a column
+       MM_OUT_NNZ = 6,         // nonzero values written into the banks
+       MM_OVERFLOW = 7,        // finite tree sums the reducer sent to infinity
+       MM_MAX_ACTIVE = 8,      // peak active PEs in any one cycle
+       MM_LIVE_CYCLES = 9,     // cycles with at least one live column
+       MM_COUNT = 10 };
+
+// -- elementwise product, one tree level, over n contiguous columns ----------
+
+static void mul_f32_scalar(float* d, const float* a, const float* b, int n) {
+    for (int k = 0; k < n; ++k) d[k] = a[k] * b[k];
+}
+__attribute__((target("avx2")))
+static void mul_f32_avx2(float* d, const float* a, const float* b, int n) {
+    int k = 0;
+    for (; k + 8 <= n; k += 8)
+        _mm256_storeu_ps(d + k, _mm256_mul_ps(_mm256_loadu_ps(a + k),
+                                              _mm256_loadu_ps(b + k)));
+    for (; k < n; ++k) d[k] = a[k] * b[k];
+}
+__attribute__((target("avx512f")))
+static void mul_f32_avx512(float* d, const float* a, const float* b, int n) {
+    int k = 0;
+    for (; k + 16 <= n; k += 16)
+        _mm512_storeu_ps(d + k, _mm512_mul_ps(_mm512_loadu_ps(a + k),
+                                              _mm512_loadu_ps(b + k)));
+    for (; k < n; ++k) d[k] = a[k] * b[k];
+}
+static inline void mul_f32(float* d, const float* a, const float* b, int n) {
+    switch (isa()) {
+        case ISA_AVX512: mul_f32_avx512(d, a, b, n); return;
+        case ISA_AVX2:   mul_f32_avx2(d, a, b, n);   return;
+        default:         mul_f32_scalar(d, a, b, n);
+    }
+}
+
+static void add2_f32_scalar(float* d, const float* a, const float* b, int n) {
+    for (int k = 0; k < n; ++k) d[k] = a[k] + b[k];
+}
+__attribute__((target("avx2")))
+static void add2_f32_avx2(float* d, const float* a, const float* b, int n) {
+    int k = 0;
+    for (; k + 8 <= n; k += 8)
+        _mm256_storeu_ps(d + k, _mm256_add_ps(_mm256_loadu_ps(a + k),
+                                              _mm256_loadu_ps(b + k)));
+    for (; k < n; ++k) d[k] = a[k] + b[k];
+}
+__attribute__((target("avx512f")))
+static void add2_f32_avx512(float* d, const float* a, const float* b, int n) {
+    int k = 0;
+    for (; k + 16 <= n; k += 16)
+        _mm512_storeu_ps(d + k, _mm512_add_ps(_mm512_loadu_ps(a + k),
+                                              _mm512_loadu_ps(b + k)));
+    for (; k < n; ++k) d[k] = a[k] + b[k];
+}
+static inline void add2_f32(float* d, const float* a, const float* b, int n) {
+    switch (isa()) {
+        case ISA_AVX512: add2_f32_avx512(d, a, b, n); return;
+        case ISA_AVX2:   add2_f32_avx2(d, a, b, n);   return;
+        default:         add2_f32_scalar(d, a, b, n);
+    }
+}
+
+// A 4-input adder: accumulate in double, round to float32 exactly once.
+static void add4_f32_scalar(float* d, const float* a, const float* b,
+                            const float* c, const float* e, int n) {
+    for (int k = 0; k < n; ++k)
+        d[k] = (float)((((double)a[k] + (double)b[k]) + (double)c[k])
+                       + (double)e[k]);
+}
+__attribute__((target("avx2")))
+static void add4_f32_avx2(float* d, const float* a, const float* b,
+                          const float* c, const float* e, int n) {
+    int k = 0;
+    for (; k + 4 <= n; k += 4) {
+        __m256d s = _mm256_cvtps_pd(_mm_loadu_ps(a + k));
+        s = _mm256_add_pd(s, _mm256_cvtps_pd(_mm_loadu_ps(b + k)));
+        s = _mm256_add_pd(s, _mm256_cvtps_pd(_mm_loadu_ps(c + k)));
+        s = _mm256_add_pd(s, _mm256_cvtps_pd(_mm_loadu_ps(e + k)));
+        _mm_storeu_ps(d + k, _mm256_cvtpd_ps(s));
+    }
+    for (; k < n; ++k)
+        d[k] = (float)((((double)a[k] + (double)b[k]) + (double)c[k])
+                       + (double)e[k]);
+}
+__attribute__((target("avx512f")))
+static void add4_f32_avx512(float* d, const float* a, const float* b,
+                            const float* c, const float* e, int n) {
+    int k = 0;
+    for (; k + 8 <= n; k += 8) {
+        __m512d s = _mm512_cvtps_pd(_mm256_loadu_ps(a + k));
+        s = _mm512_add_pd(s, _mm512_cvtps_pd(_mm256_loadu_ps(b + k)));
+        s = _mm512_add_pd(s, _mm512_cvtps_pd(_mm256_loadu_ps(c + k)));
+        s = _mm512_add_pd(s, _mm512_cvtps_pd(_mm256_loadu_ps(e + k)));
+        _mm256_storeu_ps(d + k, _mm512_cvtpd_ps(s));
+    }
+    for (; k < n; ++k)
+        d[k] = (float)((((double)a[k] + (double)b[k]) + (double)c[k])
+                       + (double)e[k]);
+}
+static inline void add4_f32(float* d, const float* a, const float* b,
+                            const float* c, const float* e, int n) {
+    switch (isa()) {
+        case ISA_AVX512: add4_f32_avx512(d, a, b, c, e, n); return;
+        case ISA_AVX2:   add4_f32_avx2(d, a, b, c, e, n);   return;
+        default:         add4_f32_scalar(d, a, b, c, e, n);
+    }
+}
+
+// The reducer: round float32 to IEEE binary16 and back, nearest-even. This is
+// what base.dtype resolves BF16 to on a numpy without bfloat16, so it must
+// match cast_vector bit for bit.
+static void half_round_scalar(float* d, const float* s, int n) {
+    for (int k = 0; k < n; ++k) {
+        double v = (double)s[k];
+        int32_t dummy = 0;
+        d[k] = (float)atalla_cast_scalar(v, 0, &dummy);
+    }
+}
+__attribute__((target("avx2,f16c")))
+static void half_round_f16c(float* d, const float* s, int n) {
+    int k = 0;
+    for (; k + 8 <= n; k += 8) {
+        __m128i h = _mm256_cvtps_ph(_mm256_loadu_ps(s + k),
+                                    _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+        _mm256_storeu_ps(d + k, _mm256_cvtph_ps(h));
+    }
+    for (; k < n; ++k) {
+        __m128i h = _mm_cvtps_ph(_mm_set_ss(s[k]),
+                                 _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+        d[k] = _mm_cvtss_f32(_mm_cvtph_ps(h));
+    }
+}
+static inline void half_round(float* d, const float* s, int n) {
+    if (isa() >= ISA_AVX2) half_round_f16c(d, s, n);
+    else                   half_round_scalar(d, s, n);
+}
+
+// -- scratch ----------------------------------------------------------------
+static float* g_mscratch = nullptr;
+static size_t g_mscratch_n = 0;
+
+static float* mscratch(size_t need) {
+    if (g_mscratch_n < need) {
+        free(g_mscratch);
+        g_mscratch = (float*)malloc(need * sizeof(float));
+        g_mscratch_n = g_mscratch ? need : 0;
+    }
+    return g_mscratch;
+}
+
+// The Python side sizes the metrics buffer from its own copy of MM_COUNT.
+// Export the kernel's value so a mismatch is a failing test rather than a
+// heap overrun.
+ATALLA_EXPORT int32_t atalla_meissa_metric_count(void) { return MM_COUNT; }
+
+ATALLA_EXPORT void atalla_meissa_free_scratch(void) {
+    free(g_mscratch);
+    g_mscratch = nullptr;
+    g_mscratch_n = 0;
+}
+
+// Reduce every column at once. `terms` is N*N with j contiguous; `out` is N.
+// `buf` must hold 2*N*N floats. Taking it as an argument rather than calling
+// mscratch() here is deliberate: one allocation per cycle, so a realloc can
+// never invalidate a pointer another part of the cycle is still holding.
+static void reduce_columns(const MeissaState* st, const float* terms, float* out,
+                           float* buf, int64_t* metrics) {
+    const int N = st->N;
+    float* cur = buf;
+    float* nxt = buf + (size_t)N * N;
+
+    memcpy(cur, terms, (size_t)N * N * sizeof(float));
+    int rows = N;                       // live terms per column
+
+    for (int l = 0; l < st->levels4; ++l) {
+        int pairs = rows / 4;
+        for (int k = 0; k < pairs; ++k)
+            add4_f32(nxt + (size_t)k * N,
+                     cur + (size_t)(4 * k) * N, cur + (size_t)(4 * k + 1) * N,
+                     cur + (size_t)(4 * k + 2) * N, cur + (size_t)(4 * k + 3) * N, N);
+        metrics[MM_ADD_OPS] += (int64_t)pairs * N;
+        rows = pairs;
+        float* t = cur; cur = nxt; nxt = t;
+        if (rows <= 1) break;
+    }
+    while (rows > 1) {
+        int pairs = rows / 2;
+        for (int k = 0; k < pairs; ++k)
+            add2_f32(nxt + (size_t)k * N,
+                     cur + (size_t)(2 * k) * N, cur + (size_t)(2 * k + 1) * N, N);
+        metrics[MM_ADD_OPS] += (int64_t)pairs * N;
+        rows = pairs;
+        float* t = cur; cur = nxt; nxt = t;
+    }
+    memcpy(out, cur, (size_t)N * sizeof(float));
+}
+
+// -- one cycle --------------------------------------------------------------
+static void meissa_cycle(MeissaState* st, const float* inject, int has_inject,
+                         const float* wgt_push, int has_wgt,
+                         float* out_row, int* emitted, int64_t* metrics) {
+    const int N = st->N;
+    if (N < 1) { *emitted = 0; return; }
+    // Shifting moves N-1 columns; stated as a size_t the compiler can bound so
+    // it need not assume N could be 0 and the count could wrap.
+    const size_t shift_n = (size_t)(N - 1);
+    const size_t NN = (size_t)N * N;
+    *emitted = 0;
+
+    // One allocation for the whole cycle, carved into disjoint regions:
+    //   [0, 2NN)        adder-tree ping-pong workspace
+    //   [2NN, 3NN)      this cycle's products
+    //   [3NN, 3NN+N)    the reduced row on its way to the banks
+    float* const work = mscratch(3 * NN + (size_t)N);
+    if (!work) return;
+    float* const tree_buf = work;
+    float* const prod = work + 2 * NN;
+    float* const red = work + 3 * NN;
+
+    // weights shift only while weight_en is held
+    if (has_wgt) {
+        for (int i = 0; i < N; ++i) {
+            float* row = st->wgt + (size_t)i * N;
+            if (st->collect_stats)
+                for (int j = 0; j < N - 1; ++j)
+                    if (row[j] != 0.0f) metrics[MM_WGT_SHIFT_NNZ]++;
+            memmove(row + 1, row, shift_n * sizeof(float));
+            row[0] = wgt_push[i];
+        }
+    }
+
+    // activations shift every cycle; column 0 takes a vector or a zero bubble
+    for (int i = 0; i < N; ++i) {
+        float* row = st->act + (size_t)i * N;
+        if (st->collect_stats)
+            for (int j = 0; j < N - 1; ++j)
+                if (row[j] != 0.0f) metrics[MM_ACT_SHIFT_NNZ]++;
+        memmove(row + 1, row, shift_n * sizeof(float));
+        row[0] = has_inject ? inject[i] : 0.0f;
+    }
+    memmove(st->col_seq + 1, st->col_seq, shift_n * sizeof(int64_t));
+    if (has_inject) {
+        st->col_seq[0] = st->next_seq++;
+        if (st->credits > 0) st->credits--;
+    } else {
+        st->col_seq[0] = -1;
+    }
+
+    // retire whatever falls out of the tree ring, then push this cycle in
+    const int slot = st->head;
+    int64_t* dseq = st->tree_seq + (size_t)slot * N;
+    int any_done = 0;
+    for (int j = 0; j < N; ++j) if (dseq[j] >= 0) { any_done = 1; break; }
+    if (any_done) {
+        float* dval = st->tree_vals + (size_t)slot * N;
+        if (st->do_reduce) half_round(red, dval, N);
+        else               memcpy(red, dval, (size_t)N * sizeof(float));
+        if (st->collect_stats && st->do_reduce) {
+            // The reducer narrows FP32 to FP16, so a finite sum can leave it
+            // as an infinity. That is a modelled outcome worth counting.
+            for (int j = 0; j < N; ++j)
+                if (dseq[j] >= 0 && std::isfinite(dval[j]) && !std::isfinite(red[j]))
+                    metrics[MM_OVERFLOW]++;
+        }
+        for (int j = 0; j < N; ++j) {
+            if (dseq[j] < 0 || st->bank_count[j] >= st->out_depth) continue;
+            int pos = (st->bank_head[j] + st->bank_count[j]) % st->out_depth;
+            st->bank_vals[(size_t)j * st->out_depth + pos] = red[j];
+            st->bank_seq[(size_t)j * st->out_depth + pos] = dseq[j];
+            st->bank_count[j]++;
+            if (st->collect_stats && red[j] != 0.0f) metrics[MM_OUT_NNZ]++;
+        }
+    }
+
+    int live = 0;
+    for (int j = 0; j < N; ++j) if (st->col_seq[j] >= 0) live++;
+    float* sums = st->tree_vals + (size_t)slot * N;
+    if (live) {
+        mul_f32(prod, st->act, st->wgt, (int)NN);
+        metrics[MM_MUL_OPS] += (int64_t)live * N;
+        reduce_columns(st, prod, sums, tree_buf, metrics);
+    } else {
+        memset(sums, 0, (size_t)N * sizeof(float));
+    }
+    memcpy(st->tree_seq + (size_t)slot * N, st->col_seq, (size_t)N * sizeof(int64_t));
+    st->head = (slot + 1) % st->depth;
+
+    // a vector leaves only once every bank holds it -- the de-skew
+    int ready = 1;
+    int64_t seq0 = -1;
+    for (int j = 0; j < N; ++j) {
+        if (st->bank_count[j] == 0) { ready = 0; break; }
+        int64_t s = st->bank_seq[(size_t)j * st->out_depth + st->bank_head[j]];
+        if (j == 0) seq0 = s;
+        else if (s != seq0) { ready = 0; break; }
+    }
+    if (ready) {
+        for (int j = 0; j < N; ++j) {
+            int h = st->bank_head[j];
+            out_row[j] = st->bank_vals[(size_t)j * st->out_depth + h];
+            st->bank_head[j] = (h + 1) % st->out_depth;
+            st->bank_count[j]--;
+        }
+        *emitted = 1;
+        metrics[MM_OUT_ROWS]++;
+        if (st->credits < st->max_credits) st->credits++;
+    }
+
+    if (st->collect_stats) {
+        int64_t active = 0;
+        for (size_t k = 0; k < NN; ++k)
+            if (st->act[k] != 0.0f && st->wgt[k] != 0.0f) active++;
+        metrics[MM_ACTIVE_PES] += active;
+        if (active > metrics[MM_MAX_ACTIVE]) metrics[MM_MAX_ACTIVE] = active;
+        if (live) metrics[MM_LIVE_CYCLES]++;
+    }
+}
+
+// Run `cycles` cycles without returning to Python. inject/wgt_push are
+// cycles*N float32 planes; inject_valid/wgt_en are per-cycle flags. Completed
+// result vectors land in out_rows (cycles*N) and out_count says how many.
+ATALLA_EXPORT void atalla_meissa_run(
+        MeissaState* st, int32_t cycles,
+        const float* inject, const uint8_t* inject_valid,
+        const float* wgt_push, const uint8_t* wgt_en,
+        float* out_rows, int32_t* out_count, int64_t* metrics) {
+    const int N = st->N;
+    for (int i = 0; i < MM_COUNT; ++i) metrics[i] = 0;
+    int produced = 0;
+    for (int32_t c = 0; c < cycles; ++c) {
+        int emitted = 0;
+        meissa_cycle(st,
+                     inject + (size_t)c * N, inject_valid ? inject_valid[c] : 0,
+                     wgt_push + (size_t)c * N, wgt_en ? wgt_en[c] : 0,
+                     out_rows + (size_t)produced * N, &emitted, metrics);
+        produced += emitted;
+    }
+    *out_count = produced;
+}

@@ -209,3 +209,133 @@ def test_a_stall_freezes_the_array():
     sa.set_control(stall=False)
     sa.tick(6.0)
     assert not np.array_equal(sa._act, frozen)
+
+
+def test_a_four_input_adder_rounds_once():
+    """The point of the mixed tree is not just depth: a 4-input adder rounds
+    ONCE, where the three cascaded 2-input adds it replaces round three times.
+    2^24 + 1 + 1 + 1 is the smallest case that shows it in FP32.
+    """
+    terms = [2.0 ** 24, 1.0, 1.0, 1.0]
+
+    def sum_with(mixed):
+        sa = SystolicArrayMEISSA(size=4, dtype=None, use_mixed_adder=mixed)
+        sa.load_weights([[1.0] * 4 for _ in range(4)])
+        out, _ = _drive(sa, [terms])
+        return out[0][0]
+
+    # pairwise: (2^24 + 1) loses the 1, then + (1 + 1) lands on 2^24 + 2
+    assert sum_with(mixed=False) == 16777218.0
+    # one rounding of the exact 2^24 + 3, which ties up to 2^24 + 4
+    assert sum_with(mixed=True) == 16777220.0
+
+
+# --- the native kernel -----------------------------------------------------
+
+def _schedule(sa, w, a):
+    """Weights in (reversed, as the shift register wants), then activations."""
+    n = sa.size
+    weights = [list(w[:, n - 1 - k]) for k in range(n)]
+    acts = [None] * n + [list(r) for r in a]
+    pad = n + sa.pipeline_depth + 8
+    total = max(len(weights), len(acts)) + pad
+    weights += [None] * (total - len(weights))
+    acts += [None] * (total - len(acts))
+    return total, acts, weights
+
+
+@pytest.mark.parametrize("size", [8, 16, 32])
+@pytest.mark.parametrize("mixed", [False, True])
+@pytest.mark.parametrize("dtype", ["fp16", None])
+def test_the_kernel_is_bit_identical_to_the_numpy_path(size, mixed, dtype):
+    """The kernel is an optimisation, not a second model: every bit it
+    produces must match the reference, for both tree shapes and with or
+    without the reducer."""
+    rng = np.random.default_rng(size * 31 + int(mixed))
+    w = (rng.random((size, size), dtype=np.float32) * 8 - 4)
+    a = (rng.random((size, size), dtype=np.float32) * 8 - 4)
+
+    out = []
+    for native in (True, False):
+        sa = SystolicArrayMEISSA(size=size, dtype=dtype, use_mixed_adder=mixed,
+                                 use_native=native)
+        if native and not sa.use_native:
+            pytest.skip("native kernel not built")
+        total, acts, weights = _schedule(sa, w, a)
+        sa.run_cycles(total, activations=acts, weights=weights)
+        out.append(np.array(sa.get_buffer(), dtype=np.float32))
+
+    assert out[0].shape == out[1].shape == (size, size)
+    assert np.array_equal(out[0].view(np.uint32), out[1].view(np.uint32)), \
+        "kernel and reference diverged"
+
+
+def test_batched_and_per_cycle_agree():
+    """run_cycles must produce exactly what the same schedule produces one
+    tick() at a time -- batching changes when Python runs, not what happens."""
+    n = 8
+    rng = np.random.default_rng(3)
+    w = (rng.random((n, n), dtype=np.float32) * 4 - 2)
+    a = (rng.random((n, n), dtype=np.float32) * 4 - 2)
+
+    batch = SystolicArrayMEISSA(size=n, dtype="fp16")
+    total, acts, weights = _schedule(batch, w, a)
+    batch.run_cycles(total, activations=acts, weights=weights)
+
+    step = SystolicArrayMEISSA(size=n, dtype="fp16")
+    for c in range(total):
+        if weights[c] is not None:
+            step.enqueue_weights(weights[c])
+            step.set_control(weight_en=True)
+        else:
+            step.set_control(weight_en=False)
+        if acts[c] is not None:
+            assert step.enqueue(acts[c])
+        step.tick(float(c))
+
+    assert np.array_equal(np.array(batch.get_buffer(), dtype=np.float32).view(np.uint32),
+                          np.array(step.get_buffer(), dtype=np.float32).view(np.uint32))
+
+
+def test_activity_stats_are_off_until_asked_for():
+    n = 8
+    quiet = SystolicArrayMEISSA(size=n, dtype="fp16")
+    loud = SystolicArrayMEISSA(size=n, dtype="fp16", collect_stats=True)
+    for sa in (quiet, loud):
+        sa.load_weights([[1.0] * n for _ in range(n)])
+        for c in range(20):
+            sa.enqueue([1.0] * n)
+            sa.tick(float(c))
+
+    assert quiet.active_pe_sum == 0, "counted PEs nobody asked for"
+    assert loud.active_pe_sum > 0
+    # the cycle counter is free and always runs
+    assert quiet.compute_window_cycles == loud.compute_window_cycles == 20
+    # and turning them off must not change what the array computes
+    assert quiet.get_buffer() == loud.get_buffer()
+
+
+def test_the_reducer_matches_cast_vector():
+    """The reducer stopped crossing the ctypes boundary per row; it still has
+    to round exactly as base.dtype does."""
+    from base.dtype import cast_vector, normalize_dtype
+
+    dt = normalize_dtype("fp16")
+    sa = SystolicArrayMEISSA(size=32, dtype="fp16")
+    rng = np.random.default_rng(11)
+    vals = (rng.random(32, dtype=np.float32) * 1000 - 500)
+
+    mine = sa._reduce_to_dtype(vals)
+    theirs = np.array(cast_vector([float(v) for v in vals], dt), dtype=np.float32)
+    assert np.array_equal(mine.view(np.uint32), theirs.view(np.uint32))
+
+
+def test_the_metrics_buffer_matches_the_kernel():
+    """Python sizes the metrics buffer from its own MM_COUNT; if the kernel's
+    enum grows past it the kernel writes off the end of the heap. Ask the
+    kernel rather than trusting the two copies to stay in step."""
+    from native import kernels as _native
+
+    if not _native.HAVE_NATIVE:
+        pytest.skip("native kernel not built")
+    assert _native.lib.atalla_meissa_metric_count() == _native.MM_COUNT

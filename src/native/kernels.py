@@ -19,6 +19,8 @@ _LIB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                          "libatalla_kernels.so")
 
 _c_dbl_p = ctypes.POINTER(ctypes.c_double)
+_c_flt_p = ctypes.POINTER(ctypes.c_float)
+_c_i32_p = ctypes.POINTER(ctypes.c_int32)
 _c_i64_p = ctypes.POINTER(ctypes.c_int64)
 _c_u8_p = ctypes.POINTER(ctypes.c_uint8)
 
@@ -35,6 +37,40 @@ class SaState(ctypes.Structure):
         ("mul", _c_dbl_p),
         ("acc", _c_dbl_p),
     ]
+
+
+class MeissaState(ctypes.Structure):
+    """Mirror of the MeissaState struct in atalla_kernels.cpp."""
+
+    _fields_ = [
+        ("N", ctypes.c_int32), ("depth", ctypes.c_int32),
+        ("out_depth", ctypes.c_int32), ("head", ctypes.c_int32),
+        ("levels4", ctypes.c_int32), ("levels2", ctypes.c_int32),
+        ("do_reduce", ctypes.c_int32), ("collect_stats", ctypes.c_int32),
+        ("act", _c_flt_p), ("wgt", _c_flt_p),
+        ("col_seq", _c_i64_p),
+        ("tree_vals", _c_flt_p), ("tree_seq", _c_i64_p),
+        ("bank_vals", _c_flt_p), ("bank_seq", _c_i64_p),
+        ("bank_head", _c_i32_p), ("bank_count", _c_i32_p),
+        ("next_seq", ctypes.c_int32), ("credits", ctypes.c_int32),
+        ("max_credits", ctypes.c_int32),
+    ]
+
+
+# Indices into the metrics array filled by atalla_meissa_run. MUST match the
+# enum in atalla_kernels.cpp: the kernel writes MM_COUNT entries into a buffer
+# this constant sizes, so a mismatch corrupts the heap.
+MM_ACTIVE_PES = 0
+MM_MUL_OPS = 1
+MM_ADD_OPS = 2
+MM_OUT_ROWS = 3
+MM_ACT_SHIFT_NNZ = 4
+MM_WGT_SHIFT_NNZ = 5
+MM_OUT_NNZ = 6
+MM_OVERFLOW = 7
+MM_MAX_ACTIVE = 8
+MM_LIVE_CYCLES = 9
+MM_COUNT = 10
 
 
 def _bind(lib):
@@ -64,6 +100,19 @@ def _bind(lib):
 
     lib.atalla_sa_free_scratch.restype = None
     lib.atalla_sa_free_scratch.argtypes = []
+
+    lib.atalla_meissa_run.restype = None
+    lib.atalla_meissa_run.argtypes = [
+        ctypes.POINTER(MeissaState), ctypes.c_int32,
+        _c_flt_p, _c_u8_p,          # inject, inject_valid
+        _c_flt_p, _c_u8_p,          # wgt_push, wgt_en
+        _c_flt_p, _c_i32_p,         # out_rows, out_count
+        _c_i64_p,                   # metrics
+    ]
+    lib.atalla_meissa_free_scratch.restype = None
+    lib.atalla_meissa_free_scratch.argtypes = []
+    lib.atalla_meissa_metric_count.restype = ctypes.c_int32
+    lib.atalla_meissa_metric_count.argtypes = []
     return lib
 
 
@@ -188,3 +237,20 @@ class SaArrays:
                    has_dtype, cast_mode, track_sat,
                    psum, valid, shift_in, issued, issued_out, metrics)
         return self.metrics
+
+
+def fptr(arr):
+    """float32 array -> c_float*. The array must be C-contiguous."""
+    return arr.ctypes.data_as(_c_flt_p)
+
+
+def i32ptr(arr):
+    return arr.ctypes.data_as(_c_i32_p)
+
+
+def i64ptr(arr):
+    return arr.ctypes.data_as(_c_i64_p)
+
+
+def u8ptr(arr):
+    return arr.ctypes.data_as(_c_u8_p)
