@@ -127,6 +127,15 @@ destinations ride along and come back attached to each column's writeback.
 `PACKET_UNITS` in `vector_core.py` is the slot list. Adding a unit is an entry
 there plus an `_issue_<unit>` and a writeback candidate.
 
+## The ISA spec disagrees
+
+The Atalla ISA spreadsheet defines `tpus.vi` (79, `transpose_unit <= vs1`) and
+`tpop.vi` (78, `vs1 <= transpose_unit`), and its `tpop.vi` writes **one**
+vector register per instruction. The RTL has neither opcode, and its
+`transpose_unit.sv` drains the whole tile off a single `pop_req`. This model
+follows the RTL: one pop instruction, 32 destination registers. The scheduler
+model cannot issue either instruction until the RTL decodes them.
+
 ## What the model leaves out
 
 - **Clos port ordering.** The RTL reverses indices within each output module
