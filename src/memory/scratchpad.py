@@ -1,30 +1,107 @@
-from typing import Callable, Optional, List, Any
+"""The scratchpad: independent pads of SRAM banks, timed like the RTL.
+
+rtl/modules/memory/scratchpad/ (atalla, transpose_integration b1ba35ff). Per
+pad the RTL is
+
+    frontend --+
+               +-- head --> wxbar --> scpad_cntrl --> 32 x sram_bank --> rxbar --> tail
+    backend  --+   (1/cycle,   (FIFO)   (read FIFO,      (read 2,          (FIFO)
+                    backend             write FIFO,       write 2)
+                    first)              32 deep each)
+
+and there is no crossbar: wxbar and rxbar are FIFO pass-throughs, so lane i
+of a row lives in bank i at slot `row`, and every bank of a pad takes part in
+every row access. This model keeps that behaviour at the level the rest of
+the simulator sees -- when a request is accepted, when it reaches the banks,
+when its data comes back -- without modelling each FIFO:
+
+  * A pad accepts one request per cycle, from its frontend or its backend
+    (head). It stalls both when either controller queue is full.
+  * A request reaches the banks no sooner than INGRESS_CYCLES (2) after it is
+    accepted.
+  * Reads and writes are separate channels (scpad_cntrl's two FIFOs), each a
+    row-wide sram_bank: one enable when the channel is not busy, then busy
+    until done -- done_delay(2) = 3 cycles -- so each direction does at most
+    one row every 3 cycles, and the two run side by side.
+  * The banks are read and written on the enable's edge; a read and a write
+    of one row on the same edge read the old row.
+  * Read data reaches the requester EGRESS_CYCLES (2) after done: 5 cycles
+    after the enable, 7 after acceptance for an uncontended read.
+
+Measured against a Questa run of the RTL scratchpad -- single reads and
+writes, back-to-back streams of each, interleaved traffic, read-after-write,
+and backend DMA loads and stores -- this reproduces every accept, bank enable
+and response cycle; tests/memory/test_scratchpad_rtl_timing.py replays them.
+What it approximates: when the frontend and the backend both offer a request
+in one cycle, the RTL grants the backend; here the first caller of the cycle
+wins (the frontend's bridge runs earlier in the cycle). Queue capacity counts
+requests in flight to the controller as well as those queued in it.
+
+Callers pass `now`, the cycle they are in: the VLSU bridges run before the
+scratchpad ticks, so self.now is still the previous cycle when they call.
+"""
+
+import heapq
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Any, Callable, Deque, List, Optional, Tuple
 
 from base.clocked_object import Clocked
-
-from base.sched import SimClock, WakeGroup
-
-from memory.sc_sram_banks import SRAMBanks, _xor_bank
-from memory.crossbar import Xbar
 from memory import backend
 from memory.frontend import Frontend
+from memory.sram_bank import SramChannel
+
+#: head + wxbar: accepted to bank enable, at the earliest.
+INGRESS_CYCLES = 2
+#: rxbar + tail: read done to data at the requester.
+EGRESS_CYCLES = 2
+#: scpad_cntrl.sv FIFO_DEPTH = NUM_COLS.
+QUEUE_DEPTH = 32
+
+
+def bank_of_lane(lane: int) -> int:
+    """No crossbar, no swizzle: lane i of a row is in bank i."""
+    return int(lane)
+
+
+class _Bank:
+    """One bank's storage: `mem[slot]` holds that lane's element bytes."""
+
+    def __init__(self, slots: int):
+        self.mem: List[bytes] = [b"" for _ in range(int(slots))]
+
+
+@dataclass
+class _Request:
+    write: bool
+    slot: int
+    lanes: Optional[List[bytes]]
+    ready: int
+    callback: Optional[Callable] = None
+
+
+@dataclass
+class _Pad:
+    banks: List[_Bank]
+    read: SramChannel
+    write: SramChannel
+    depth: int
+    rq: Deque[_Request] = field(default_factory=deque)
+    wq: Deque[_Request] = field(default_factory=deque)
+    read_free: int = 0
+    write_free: int = 0
+    accepted_at: int = -1
+    #: (due cycle, seq, callback, payload) -- reads in flight to the requester
+    out: List[Tuple[int, int, Callable, Any]] = field(default_factory=list)
+    reads: int = 0
+    writes: int = 0
+    stalls: int = 0
+
+    def idle(self) -> bool:
+        return not (self.rq or self.wq or self.out)
+
 
 class Scratchpad(Clocked):
-    """
-    Top-level software-managed Scratchpad composed of:
-            - two tiles of SRAM banks (each tile: NUM_BANKS x BANK_SIZE slots)
-            - per-tile crossbars for read/write (to perform swizzle / deswizzle)
-            - ability to attach one Backend instance per tile/slot
-
-    Notes / simplifications:
-      - Backend/frontend write path: incoming logical row (sequence of elements) is
-        split into per-lane element bytes, routed through the write Xbar using the
-        XOR swizzle (bank = _xor_bank(slot, lane, num_banks)) and then each resulting
-        lane is written into its bank's slot via the SRAMBanks bank interface.
-      - We expose a simple frontend_write / attach_backend hook. Full cycle-accurate
-        frontend read path (coordinating per-lane SRAMBanks enqueue_read and
-        collecting completions) can be added similarly when needed.
-    """
 
     def __init__(
         self,
@@ -32,71 +109,39 @@ class Scratchpad(Clocked):
         bank_size: int = 32,
         read_latency: int = 2,
         write_latency: int = 2,
-        xbar_delay: int = 3,
         elem_bytes: int = 2,
-        frontend_queue_size: int = 2,
+        queue_depth: int = QUEUE_DEPTH,
         num_tiles: int = 2,
     ):
         super().__init__()
         self.num_banks = int(num_banks)
-        self.bank_size = int(bank_size)    # slots per bank (rows)
+        self.bank_size = int(bank_size)    # slots per bank (rows per pad)
         self.elem_bytes = int(elem_bytes)
-        #: Independent pads. Each is a bank array with its own crossbar pair,
-        #: its own frontend and its own backend, so one pad per VLSU gives every
-        #: load/store unit a private path to memory.
+        self.read_latency = int(read_latency)
+        self.write_latency = int(write_latency)
+        #: Independent pads, each with its own frontend and backend, so one pad
+        #: per VLSU gives every load/store unit a private path to memory.
         self.num_tiles = int(num_tiles)
         if self.num_tiles < 1:
             raise ValueError("num_tiles must be >= 1, got %s" % num_tiles)
         self.now = 0
-        self.backend_write_inflight = [0] * self.num_tiles
-        self.backend_read_inflight = [0] * self.num_tiles
+        self._seq = 0
+        #: Optional callable taking {"kind": "read"|"write", "tile", "slot",
+        #: "cycle"} whenever a pad enables its banks.
+        self.trace_hook: Optional[Callable[[dict], None]] = None
 
-        # Shared view of the current cycle. Banks read this instead of their
-        # own last-tick counter, which goes stale once they are allowed to
-        # sleep through cycles where nothing is due.
-        self.clock = SimClock()
-
-        # One SRAMBanks instance per tile.
-        self.tiles: List[SRAMBanks] = [
-            SRAMBanks(bank_count=self.num_banks, bank_size=self.bank_size, read_latency=read_latency,
-                      write_latency=write_latency, clock=self.clock)
+        self.tiles: List[_Pad] = [
+            _Pad(banks=[_Bank(self.bank_size) for _ in range(self.num_banks)],
+                 read=SramChannel(read_latency), write=SramChannel(write_latency),
+                 depth=max(1, int(queue_depth)))
             for _ in range(self.num_tiles)
         ]
-
-        # per-tile crossbars (separate read/write per tile)
-        self.tile_write_xbars: List[Xbar] = [
-            Xbar(delay=xbar_delay, num_banks=self.num_banks) for _ in range(self.num_tiles)
-        ]
-        self.tile_read_xbars: List[Xbar] = [
-            Xbar(delay=xbar_delay, num_banks=self.num_banks) for _ in range(self.num_tiles)
-        ]
-
-        # Optional per-tile backend references (set via attach_backend / attach_backends).
         self.backends: List[Optional[backend.Backend]] = [None] * self.num_tiles
-        # Backward-compatible alias for the first attached backend.
+        #: Backward-compatible alias for the first attached backend.
         self.backend: Optional[backend.Backend] = None
+        self.frontends = [Frontend(tile_id, self) for tile_id in range(self.num_tiles)]
 
-        self.frontends = [
-            Frontend(tile_id, self, queue_size=frontend_queue_size)
-            for tile_id in range(self.num_tiles)
-        ]
-
-        # Wake groups, ticked in the order data flows: a frontend hands work to
-        # a crossbar, which hands it to a bank. Because each group runs after
-        # the one that feeds it, a producer can wake a consumer for the current
-        # cycle and the consumer still runs on time.
-        self._fe_group = WakeGroup("spad.frontends")
-        self._xbar_group = WakeGroup("spad.xbars")
-        self._bank_group = WakeGroup("spad.banks")
-        for fe in self.frontends:
-            self._fe_group.add(fe)
-        for xb in self.tile_write_xbars + self.tile_read_xbars:
-            self._xbar_group.add(xb)
-        for tile in self.tiles:
-            for b in getattr(tile, "banks", []):
-                self._bank_group.add(b)
-        self.wake_groups = [self._fe_group, self._xbar_group, self._bank_group]
-
+    # -- geometry ----------------------------------------------------------------
     @property
     def tile_bytes(self) -> int:
         """Capacity of one pad."""
@@ -107,237 +152,180 @@ class Scratchpad(Clocked):
         """Capacity of the whole scratchpad -- the chip's local memory."""
         return self.tile_bytes * self.num_tiles
 
-    def _write_path_can_accept(self, tile_id: int) -> bool:
-        tile_id = self._normalize_tile_id(tile_id)
-        xbar = self.tile_write_xbars[tile_id]
-        return int(self.backend_write_inflight[tile_id]) < int(xbar.max_size) and xbar.can_accept()
-
-    def _read_path_can_accept(self, tile_id: int) -> bool:
-        tile_id = self._normalize_tile_id(tile_id)
-        xbar = self.tile_read_xbars[tile_id]
-        return int(self.backend_read_inflight[tile_id]) < int(xbar.max_size) and xbar.can_accept()
-
-    def _tile_and_slot(self, sp_addr: int) -> tuple[int, int]:
-        """
-        Linear split of the address space into num_tiles equal pads.
-        sp_addr is a slot index (as produced by Backend: base_sp + row).
-
-        Only used when a caller does not name a tile. Every VLSU path names one
-        (the bridge passes tile_id=frontend_id), so each pad is addressed from
-        zero and this is the backend/DMA fallback.
-        """
-        tile_sz = self.bank_size
-        tile = int(sp_addr) // tile_sz
-        if tile < 0 or tile >= self.num_tiles:
-            raise ValueError(
-                "scratchpad address %s falls outside %d pads of %d slots"
-                % (sp_addr, self.num_tiles, tile_sz)
-            )
-        slot = int(sp_addr) % tile_sz
-        return tile, slot
-
     def _normalize_tile_id(self, tile_id: int) -> int:
         tile_id = int(tile_id)
         if tile_id < 0 or tile_id >= len(self.tiles):
             raise ValueError(f"tile_id out of range: {tile_id}")
         return tile_id
 
-    def _refresh_backend_alias(self) -> None:
-        self.backend = self.backends[0]
-        if self.backend is None:
-            self.backend = next((be for be in self.backends if be is not None), None)
+    def _tile_and_slot(self, sp_addr: int, tile_id: Optional[int]) -> Tuple[int, int]:
+        """A named pad addresses from zero. Without one, the address space is
+        split linearly into num_tiles pads -- the backend/DMA fallback."""
+        if tile_id is not None:
+            return self._normalize_tile_id(tile_id), int(sp_addr) % self.bank_size
+        tile, slot = divmod(int(sp_addr), self.bank_size)
+        if tile < 0 or tile >= self.num_tiles:
+            raise ValueError("scratchpad address %s falls outside %d pads of %d slots"
+                             % (sp_addr, self.num_tiles, self.bank_size))
+        return tile, slot
 
-    def _accept_backend_write(self, sp_addr: int, row_bytes: bytes, row_idx: int, tx_id: int, tile_id: int = None, frontend_cb=None) -> bool:
-        """
-        Backend -> Scratchpad write path:
-          - split row_bytes into elem_bytes lanes (pad with zeros to full NUM_BANKS)
-          - compute shift_mask mapping lane -> bank using XOR swizzle
-          - submit through tile's write Xbar; when xbar completes, write outputs into per-bank slot
-        Returns True if the write was accepted (xbar submission succeeded).
-        """
-        if tile_id is None:
-            tile_id, slot = self._tile_and_slot(sp_addr)
-        else:
-            tile_id = self._normalize_tile_id(tile_id)
-            slot = sp_addr % self.bank_size
-        tile = self.tiles[tile_id]
-        xbar = self.tile_write_xbars[tile_id]
+    def _lanes(self, row_bytes: bytes) -> List[bytes]:
+        """Split a row into per-lane element bytes. Only the lanes the row
+        covers are written, as the RTL's valid_mask does."""
+        eb = self.elem_bytes
+        n = min(self.num_banks, (len(row_bytes) + eb - 1) // eb) if eb else 0
+        return [bytes(row_bytes[i * eb:(i + 1) * eb]).ljust(eb, b"\x00") for i in range(n)]
 
-        # build lane inputs: one element per lane (NUM_BANKS). pad with zero bytes for lanes past cols.
-        lanes: List[bytes] = []
-        total_lanes = self.num_banks
-        # compute number of cols from row_bytes length
-        cols = (len(row_bytes) + self.elem_bytes - 1) // self.elem_bytes if self.elem_bytes else 0
+    def _cycle(self, now: Optional[int]) -> int:
+        return int(self.now) if now is None else int(now)
 
-        for lane in range(total_lanes):
-            off = lane * self.elem_bytes
-            if off < len(row_bytes):
-                lanes.append(row_bytes[off : off + self.elem_bytes])
-            else:
-                lanes.append(b"\x00" * self.elem_bytes)
+    # -- the request port (head) ---------------------------------------------------
+    def can_accept(self, tile_id: int, now: Optional[int] = None) -> bool:
+        """head's grant: one request per cycle, none while either controller
+        queue is full (w_stall stalls both directions)."""
+        pad = self.tiles[self._normalize_tile_id(tile_id)]
+        return (pad.accepted_at != self._cycle(now)
+                and len(pad.rq) < pad.depth and len(pad.wq) < pad.depth)
 
-        # shift mask: lane i -> target bank = _xor_bank(slot, i, num_banks)
-        shift_mask: List[Optional[int]] = [None] * total_lanes
-        for i in range(total_lanes):
-            shift_mask[i] = _xor_bank(slot, i, self.num_banks)
+    def submit_write(self, tile_id: int, slot: int, row_bytes: bytes,
+                     callback: Optional[Callable[[], None]] = None,
+                     now: Optional[int] = None) -> bool:
+        """Accept a row write this cycle, or refuse it (the caller retries).
+        `callback` fires when the banks' write done is visible."""
+        return self._submit(tile_id, True, slot, self._lanes(row_bytes), callback, now)
 
-        # callback invoked when xbar routes lanes to bank-indexed output slots
-        def _xbar_cb(routed_out: List[Any]) -> None:
-            bank_writes = []
-            for bank_idx, val in enumerate(routed_out):
-                if not val:
-                    continue
-                if not tile.banks[bank_idx].can_accept_enqueue():
-                    return False
-                bank_writes.append((bank_idx, bytes(val)))
+    def submit_read(self, tile_id: int, slot: int,
+                    callback: Callable[[List[bytes]], None],
+                    now: Optional[int] = None) -> bool:
+        """Accept a row read this cycle, or refuse it. `callback(lanes)` gets
+        one bytes object per bank when the data reaches the requester."""
+        return self._submit(tile_id, False, slot, None, callback, now)
 
-            for bank_idx, lane_bytes in bank_writes:
-                tile.banks[bank_idx].enqueue_write(slot, lane_bytes)
-
-            self.backend_write_inflight[tile_id] = max(0, int(self.backend_write_inflight[tile_id]) - 1)
-            if frontend_cb:
-                frontend_cb()
-            return True
-
-        # submit to xbar (operation queued). We don't block on xbar completion here.
-        try:
-            op_id = xbar.enqueue(shift_mask, lanes, callback=_xbar_cb)
-        except Exception:
+    def _submit(self, tile_id, write, slot, lanes, callback, now) -> bool:
+        tile_id = self._normalize_tile_id(tile_id)
+        pad = self.tiles[tile_id]
+        cycle = self._cycle(now)
+        if not self.can_accept(tile_id, cycle):
+            pad.stalls += 1
             return False
-        if op_id == -1:
-            return False
-        self.backend_write_inflight[tile_id] = int(self.backend_write_inflight[tile_id]) + 1
+        req = _Request(write=write, slot=int(slot) % self.bank_size, lanes=lanes,
+                       ready=cycle + INGRESS_CYCLES, callback=callback)
+        (pad.wq if write else pad.rq).append(req)
+        pad.accepted_at = cycle
+        self.request_wake(cycle)
         return True
-    
+
+    # -- legacy entry points ---------------------------------------------------------
+    def frontend_write(self, base_sp_addr: int, row_bytes: bytes, row_idx: int,
+                       tile_id: Optional[int] = None, now: Optional[int] = None) -> bool:
+        tile_id, slot = self._tile_and_slot(base_sp_addr, tile_id)
+        return self.submit_write(tile_id, slot, row_bytes, now=now)
+
+    def read_row_now(self, sp_addr: int, tile_id: Optional[int] = None) -> bytes:
+        """The row as stored, with no timing -- for checks and debug only."""
+        tile_id, slot = self._tile_and_slot(sp_addr, tile_id)
+        eb = self.elem_bytes
+        return b"".join(bytes(b.mem[slot] or b"").ljust(eb, b"\x00")[:eb]
+                        for b in self.tiles[tile_id].banks)
+
+    def backend_read_row(self, sp_addr: int, row_idx: int, tx_id: int) -> bytes:
+        return self.read_row_now(sp_addr)
+
+    # -- backends ------------------------------------------------------------------
     def attach_backends(self, backend_objs):
         if len(backend_objs) != len(self.tiles):
             raise ValueError(f"expected {len(self.tiles)} backends, got {len(backend_objs)}")
-        attached = []
-        for tile_id, backend_obj in enumerate(backend_objs):
-            attached.append(self.attach_backend(backend_obj, tile_id=tile_id))
-        return attached
+        return [self.attach_backend(b, tile_id=t) for t, b in enumerate(backend_objs)]
 
-    def attach_backend(self, backend_obj, tile_id: int = None):
+    def attach_backend(self, backend_obj, tile_id: Optional[int] = None):
+        """Wire a backend's SRAM side to one pad. Its writes (DMA loads) and
+        reads (DMA stores) go through the pad's request port like the
+        frontend's, at the backend's own cycle."""
         if isinstance(backend_obj, (list, tuple)):
             return self.attach_backends(list(backend_obj))
-
         if tile_id is None:
-            for candidate, attached in enumerate(self.backends):
-                if attached is None:
-                    tile_id = candidate
-                    break
-            else:
+            free = [t for t, b in enumerate(self.backends) if b is None]
+            if not free:
                 raise ValueError("all scratchpad backend slots are already occupied")
-
+            tile_id = free[0]
         tile_id = self._normalize_tile_id(tile_id)
         self.backends[tile_id] = backend_obj
 
-        def _send_sram_write(sp_addr: int, row_bytes: bytes, row_idx: int, tx_id: int, _tile_id: int = tile_id) -> bool:
-            return self._accept_backend_write(sp_addr, row_bytes, row_idx, tx_id, tile_id=_tile_id)
+        def _send_sram_write(sp_addr, row_bytes, row_idx, tx_id, _t=tile_id, _b=backend_obj):
+            return self.submit_write(_t, sp_addr, row_bytes, now=_b._tick)
 
-        def _send_sram_read(sp_addr: int, row_idx: int, tx_id: int, _tile_id: int = tile_id) -> bytes:
-            return self._backend_read_row_for_tile(sp_addr, row_idx, tx_id, tile_id=_tile_id)
+        def _request_sram_read(sp_addr, row_idx, tx_id, _t=tile_id, _b=backend_obj):
+            def _done(lanes, _tx=tx_id, _row=row_idx):
+                _b.queue_sram_read_response(_tx, _row, b"".join(lanes))
+            return self.submit_read(_t, sp_addr, _done, now=_b._tick)
 
         backend_obj.send_sram_write = _send_sram_write
-        backend_obj.send_sram_read = _send_sram_read
-        self._refresh_backend_alias()
+        backend_obj.request_sram_read = _request_sram_read
+        backend_obj.send_sram_read = None
+        self.backend = next((b for b in self.backends if b is not None), None)
         return backend_obj
 
-    def _backend_read_row_for_tile(self, sp_addr: int, row_idx: int, tx_id: int, tile_id: int = None) -> bytes:
-        if tile_id is None:
-            tile_id, slot = self._tile_and_slot(sp_addr)
-        else:
-            tile_id = self._normalize_tile_id(tile_id)
-            slot = sp_addr % self.bank_size
-        tile = self.tiles[tile_id]
-        lanes: List[bytes] = []
-        for lane in range(self.num_banks):
-            bank = _xor_bank(slot, lane, self.num_banks)
-            blob = tile.banks[bank].mem[slot]
-            lane_bytes = bytes(blob) if blob is not None else b""
-            if len(lane_bytes) < self.elem_bytes:
-                lane_bytes = lane_bytes + (b"\x00" * (self.elem_bytes - len(lane_bytes)))
-            lanes.append(lane_bytes[: self.elem_bytes])
-        return b"".join(lanes)
+    def write_path_idle(self, tile_id: Optional[int] = None) -> bool:
+        """Every accepted write has reached the banks (on one pad, or all)."""
+        pads = self.tiles if tile_id is None else [self.tiles[self._normalize_tile_id(tile_id)]]
+        return all(not pad.wq for pad in pads)
 
-    def backend_read_row(self, sp_addr: int, row_idx: int, tx_id: int) -> bytes:
-        return self._backend_read_row_for_tile(sp_addr, row_idx, tx_id)
+    # -- one cycle -----------------------------------------------------------------
+    def next_wake(self, now: int) -> Optional[int]:
+        if all(pad.idle() for pad in self.tiles):
+            return None
+        return now + 1
 
-    # minimal frontend helpers (write uses same swizzle path)
-    def frontend_write(self, base_sp_addr: int, row_bytes: bytes, row_idx: int, tile_id: int = None) -> bool:
-        """
-        Frontend initiates a write into scratchpad (row-major).
-        This enqueues the write in the appropriate frontend for arbitration.
-        """
-        if tile_id is None:
-            tile_id, _ = self._tile_and_slot(base_sp_addr)
-        return self.frontends[tile_id].write(base_sp_addr, row_bytes, row_idx)
-
-    def _accept_backend_read(self, sp_addr: int, row_idx: int, tx_id: int, tile_id: int = None, frontend_cb=None) -> bool:
-        """
-        Backend/Frontend -> Scratchpad read path:
-          - gather per-bank slot data for the row
-          - deswizzle using XOR mapping
-          - call frontend_cb with the list of lane bytes
-        """
-        if tile_id is None:
-            tile_id, slot = self._tile_and_slot(sp_addr)
-        else:
-            tile_id = self._normalize_tile_id(tile_id)
-            slot = sp_addr % self.bank_size
-        tile = self.tiles[tile_id]
-        xbar = self.tile_read_xbars[tile_id]
-
-        # Gather per-bank data (bank order)
-        per_bank = []
-        for bank in range(self.num_banks):
-            val = tile.banks[bank].mem[slot]
-            per_bank.append(val if val is not None else b"\x00" * self.elem_bytes)
-
-        # Callback after crossbar delay
-        def _xbar_cb(routed_out: List[Any]) -> None:
-            self.backend_read_inflight[tile_id] = max(0, int(self.backend_read_inflight[tile_id]) - 1)
-            if frontend_cb:
-                # For each lane, get the value from the bank where it was stored
-                unswizzled = [routed_out[_xor_bank(slot, lane, self.num_banks)] for lane in range(self.num_banks)]
-                frontend_cb(unswizzled)
-        try:
-            op_id = xbar.enqueue(list(range(self.num_banks)), per_bank, callback=_xbar_cb)
-        except Exception:
-            return False
-        if op_id == -1:
-            return False
-        self.backend_read_inflight[tile_id] = int(self.backend_read_inflight[tile_id]) + 1
-        return True
-
-    # tick() to advance internal xbars and banks; call this from simulator each cycle
     def tick(self, time=None) -> None:
-        now = time if time is not None else getattr(self, 'now', 0)
+        now = int(time) if time is not None else int(self.now) + 1
         self.now = now
-        self.clock.advance_to(int(now))
-        # These loops used to be wrapped in blanket `except Exception: pass`,
-        # which silently discarded any failure inside the memory pipeline.
-        # Nothing was actually being swallowed, and hiding errors here makes
-        # the scheduling changes undebuggable, so the handlers are gone.
-        self._fe_group.tick(now)
-        self._xbar_group.tick(now)
-        self._bank_group.tick(now)
+        for pad in self.tiles:
+            if pad.idle():
+                continue
+            self._step_pad(pad, now)
+
+    def _step_pad(self, pad: _Pad, now: int) -> None:
+        eb = self.elem_bytes
+        hook = self.trace_hook
+        # Read before write: on one edge a read sees the row as it was.
+        if pad.rq and pad.rq[0].ready <= now and now >= pad.read_free:
+            req = pad.rq.popleft()
+            lanes = [bytes(b.mem[req.slot] or b"") for b in pad.banks]
+            pad.read_free = pad.read.next_enable(now)
+            due = pad.read_free + EGRESS_CYCLES
+            self._seq += 1
+            heapq.heappush(pad.out, (due, self._seq, req.callback, lanes))
+            pad.reads += 1
+            if hook is not None:
+                hook({"kind": "read", "tile": self.tiles.index(pad),
+                      "slot": req.slot, "cycle": now})
+        if pad.wq and pad.wq[0].ready <= now and now >= pad.write_free:
+            req = pad.wq.popleft()
+            for lane, data in enumerate(req.lanes or []):
+                pad.banks[bank_of_lane(lane)].mem[req.slot] = data[:eb]
+            pad.write_free = pad.write.next_enable(now)
+            if req.callback is not None:
+                self._seq += 1
+                heapq.heappush(pad.out, (pad.write_free, self._seq, req.callback, None))
+            pad.writes += 1
+            if hook is not None:
+                hook({"kind": "write", "tile": self.tiles.index(pad),
+                      "slot": req.slot, "cycle": now})
+        while pad.out and pad.out[0][0] <= now:
+            _due, _seq, callback, payload = heapq.heappop(pad.out)
+            if callback is None:
+                continue
+            if payload is None:
+                callback()
+            else:
+                callback(payload)
 
     def get_stats(self) -> dict:
-        stats = {
-            "tiles": [],
-            "backend_slots": [
-                {"tile": tid, "attached": be is not None}
-                for tid, be in enumerate(self.backends)
-            ],
-            "frontend_stalls": [
-                {"tile": tid, "write_stalled": fe.write_stalled, "read_stalled": fe.read_stalled}
-                for tid, fe in enumerate(self.frontends)
-            ]
+        return {
+            "tiles": [{"tile": t, "reads": p.reads, "writes": p.writes,
+                       "stalls": p.stalls, "read_queue": len(p.rq),
+                       "write_queue": len(p.wq)}
+                      for t, p in enumerate(self.tiles)],
+            "backend_slots": [{"tile": t, "attached": b is not None}
+                              for t, b in enumerate(self.backends)],
         }
-        for tid, tile in enumerate(self.tiles):
-            per = {"tile": tid, "banks": []}
-            for i, b in enumerate(getattr(tile, "banks", [])):
-                per["banks"].append({"bank": i, "cycles_busy": getattr(b, "cycles_busy", 0), "enqueue_stalls": getattr(b, "enqueue_stalls", 0), "queue_len": len(getattr(b, "_pending", []))})
-            stats["tiles"].append(per)
-        return stats

@@ -11,7 +11,6 @@ import pytest
 
 from atalla.sysarr_tpu_system import (
     PAD_ACT, PAD_OUT, PAD_PSUM, PAD_WGT, SPAD_NUM_PADS, build_tpu_platform)
-from memory.sc_sram_banks import _xor_bank
 
 VEC = 8
 
@@ -20,7 +19,7 @@ def _small_platform(**kw):
     """A 4-pad platform small enough to be instant."""
     opts = dict(size=VEC, dtype="fp16", lane_count=2, spad_num_banks=VEC,
                 spad_bank_size=64, spad_read_latency=1, spad_write_latency=1,
-                spad_xbar_delay=1, backend_dram_latency=4,
+                backend_dram_latency=4,
                 backend_dram_burst_bytes=32)
     opts.update(kw)
     return build_tpu_platform(**opts)
@@ -30,7 +29,7 @@ def _read_pad_row(spad, pad, slot):
     """Undo the bank swizzle and read one row straight out of a pad's banks."""
     out = []
     for lane in range(spad.num_banks):
-        bank = _xor_bank(slot, lane, spad.num_banks)
+        bank = lane
         blob = bytes(spad.tiles[pad].banks[bank].mem[slot] or b"")
         blob = blob + b"\x00" * (2 - len(blob))
         out.append(int.from_bytes(blob[:2], "little", signed=False))

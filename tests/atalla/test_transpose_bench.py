@@ -16,11 +16,14 @@ from vector_core.transpose import TransposeUnit
 
 PUSH = TransposeUnit().push_cycles                  # 9
 DRAIN = 32 * TransposeUnit().column_cycles          # 256
-#: Spad bench, overlapped: from the first load's issue until the unit takes
-#: row 0 (the load's round trip), and from the last column's writeback until
-#: its store has committed to the pad's banks.
-LOAD_LEAD = 6
-STORE_TAIL = 4
+#: Spad bench, overlapped. Lead: the first load's 7-cycle scratchpad read,
+#: a cycle for the VLSU to write the row back, a cycle to issue the push.
+#: Tail: the last column's store is issued the cycle after its writeback and
+#: reaches the banks 2 cycles after the pad accepts it.
+LOAD_LEAD = 9
+STORE_TAIL = 3
+#: A pad direction takes one row every 3 cycles (sram_bank read/write 2).
+ROW_INTERVAL = 3
 
 
 @pytest.mark.parametrize("rows", [1, 8, 32])
@@ -37,32 +40,34 @@ def test_vrf_bench_costs_the_unit_and_nothing_more(rows):
 
 @pytest.mark.parametrize("rows", [1, 8, 32])
 def test_spad_bench_hides_loads_and_stores_under_the_unit(rows):
-    """Loads arrive every 2 cycles and stores leave every 2, both faster than
-    the unit's 9 a row and 8 a column, so with overlap only the first load
-    and the last store show: 6 cycles before the transpose and 4 after it."""
+    """Loads arrive every 3 cycles and stores leave every 3 -- one row per
+    sram_bank access -- both faster than the unit's 9 a row and 8 a column,
+    so with overlap only the first load and the last store show."""
     r = run_spad_bench(rows, load_window=4)
     assert r.cycles == LOAD_LEAD + PUSH * rows + DRAIN + STORE_TAIL
 
 
 @pytest.mark.parametrize("rows", [1, 8, 32])
 def test_spad_bench_serialized_adds_every_phase(rows):
-    """One phase at a time: 2M + 4 to load, the transpose, 66 to store all
-    32 columns (one every 2 cycles, plus the commit)."""
+    """One phase at a time: a row loaded every 3 cycles (3M + 6, the last
+    one's read latency included), the transpose, then 32 column stores at
+    one every 3 cycles."""
     r = run_spad_bench(rows, overlap=False)
-    load = 2 * rows + 4
-    store = 2 * 32 + 2
+    load = ROW_INTERVAL * rows + 6
+    store = ROW_INTERVAL * 32
     assert r.cycles == load + PUSH * rows + DRAIN + store
     lo, hi = r.phases["load"]
     assert hi - lo + 1 == load
 
 
-def test_queueing_every_load_up_front_delays_the_first_push():
-    """Packets issue in order. With all 32 loads queued in cycle 0, the first
-    push waits behind the ones the core has not issued yet."""
+def test_queueing_every_load_up_front_costs_nothing():
+    """The pad takes a request every cycle into a 32-deep queue, so loads
+    queued all at once drain out of the VLSU at once and never hold up the
+    first push behind them."""
     eager = run_spad_bench(32)
     windowed = run_spad_bench(32, load_window=4)
-    assert windowed.cycles == LOAD_LEAD + PUSH * 32 + DRAIN + STORE_TAIL
-    assert eager.cycles == windowed.cycles + 2
+    assert eager.cycles == windowed.cycles == \
+        LOAD_LEAD + PUSH * 32 + DRAIN + STORE_TAIL
 
 
 def test_a_second_pad_for_the_stores_does_not_help_one_tile():

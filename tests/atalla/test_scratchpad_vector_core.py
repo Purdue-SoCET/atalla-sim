@@ -7,7 +7,6 @@ from base.clocked_object import Clocked
 from base.core import Core
 from base.sim import Sim
 
-from memory.sc_sram_banks import _xor_bank
 from memory.scratchpad import Scratchpad
 from vector_core.vector_core import VectorCore
 
@@ -50,34 +49,37 @@ class VLSFrontendBridge(Clocked):
         assert self.vc.push_scratchpad_response(self.vls_id, {"addr": addr, "data": data})
 
     def tick(self, time: float = None) -> None:
-        while True:
-            req = self.vc.pop_scratchpad_request(self.vls_id)
-            if req is None:
-                break
+        """Hand the pad at most one request a cycle, as its head takes them."""
+        now = int(time) if time is not None else 0
+        req = self.vc.vls_units[self.vls_id].req_q.peek()
+        if req is None or not self.spad.frontends[self.frontend_id].can_accept(now):
+            return
+        req = self.vc.pop_scratchpad_request(self.vls_id)
+        addr = int(req.get("addr", 0))
+        if req["kind"] == "store":
+            self.stores_seen += 1
+            self.store_addrs.append(addr)
+            assert self.spad.frontend_write(
+                addr,
+                _encode_vector_u16(req["data"]),
+                row_idx=0,
+                tile_id=self.frontend_id,
+                now=now,
+            )
+            return
 
-            addr = int(req.get("addr", 0))
-            if req["kind"] == "store":
-                self.stores_seen += 1
-                self.store_addrs.append(addr)
-                assert self.spad.frontend_write(
-                    addr,
-                    _encode_vector_u16(req["data"]),
-                    row_idx=0,
-                    tile_id=self.frontend_id,
-                )
-                continue
+        if req["kind"] == "load":
+            load_id = self._next_load_id
+            self._next_load_id += 1
+            assert self.spad.frontends[self.frontend_id].read(
+                addr,
+                0,
+                lambda lanes, _lid=load_id, _addr=addr: self._on_frontend_read(_lid, _addr, lanes),
+                now=now,
+            )
+            return
 
-            if req["kind"] == "load":
-                load_id = self._next_load_id
-                self._next_load_id += 1
-                assert self.spad.frontends[self.frontend_id].read(
-                    addr,
-                    0,
-                    lambda lanes, _lid=load_id, _addr=addr: self._on_frontend_read(_lid, _addr, lanes),
-                )
-                continue
-
-            raise ValueError("unsupported request kind: %s" % req["kind"])
+        raise ValueError("unsupported request kind: %s" % req["kind"])
 
 
 def _read_slot_vector_u16(spad: Scratchpad, addr: int, vector_len: int):
@@ -85,7 +87,7 @@ def _read_slot_vector_u16(spad: Scratchpad, addr: int, vector_len: int):
     slot = int(addr) % spad.bank_size
     out = []
     for lane in range(vector_len):
-        bank = _xor_bank(slot, lane, spad.num_banks)
+        bank = lane
         blob = spad.tiles[tile].banks[bank].mem[slot]
         blob = bytes(blob) if blob is not None else b"\x00\x00"
         if len(blob) < 2:
@@ -98,7 +100,7 @@ def _write_slot_vector_u16(spad: Scratchpad, addr: int, values):
     tile = 0
     slot = int(addr) % spad.bank_size
     for lane, value in enumerate(list(values)):
-        bank = _xor_bank(slot, lane, spad.num_banks)
+        bank = lane
         spad.tiles[tile].banks[bank].mem[slot] = int(value).to_bytes(2, "little", signed=False)
 
 
@@ -108,11 +110,8 @@ def test_scratchpad_vector_core_load_compute_store_back():
     spad = Scratchpad(
         num_banks=8,
         bank_size=32,
-        read_latency=1,
-        write_latency=1,
-        xbar_delay=1,
         elem_bytes=2,
-        frontend_queue_size=4,
+        num_tiles=1,
     )
 
     bridge = VLSFrontendBridge(vc, spad, vls_id=0, frontend_id=0)

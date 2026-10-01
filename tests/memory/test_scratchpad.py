@@ -8,7 +8,6 @@ from base.clock_domain import ClockDomain
 from base.core import Core
 from base.sim import Sim
 
-from memory.sc_sram_banks import _xor_bank
 from memory.dram import DRAM
 from memory.scratchpad import Scratchpad
 from memory.backend import Backend
@@ -18,27 +17,25 @@ def _pack_row(values):
     return b"".join(int(value).to_bytes(2, "little") for value in values)
 
 
-def _read_swizzled_row(spad: Scratchpad, tile_id: int, slot: int) -> bytes:
+def _read_row(spad: Scratchpad, tile_id: int, slot: int) -> bytes:
     tile = spad.tiles[tile_id]
     lane_bytes = []
-    for lane in range(spad.num_banks):
-        bank = _xor_bank(slot, lane, spad.num_banks)
-        lane_bytes.append(tile.banks[bank].mem[slot])
+    for lane in range(spad.num_banks):            # lane i lives in bank i
+        lane_bytes.append(tile.banks[lane].mem[slot])
     return b"".join(lane_bytes)
 
 
-def _write_swizzled_row(spad: Scratchpad, tile_id: int, slot: int, row_bytes: bytes) -> None:
+def _write_row(spad: Scratchpad, tile_id: int, slot: int, row_bytes: bytes) -> None:
     tile = spad.tiles[tile_id]
     for lane in range(spad.num_banks):
-        bank = _xor_bank(slot, lane, spad.num_banks)
         off = lane * spad.elem_bytes
-        tile.banks[bank].mem[slot] = row_bytes[off : off + spad.elem_bytes]
+        tile.banks[lane].mem[slot] = row_bytes[off : off + spad.elem_bytes]
 
 
 def test_scratchpad_full():
     eq, clk, sim = build_sim()
 
-    spad = Scratchpad(num_banks=32, bank_size=32, read_latency=2, write_latency=2, xbar_delay=2, elem_bytes=2)
+    spad = Scratchpad(num_banks=32, bank_size=32, read_latency=2, write_latency=2, elem_bytes=2)
     clk.add_clocked(spad)
     clk.schedule_next(0)
 
@@ -82,22 +79,20 @@ def test_scratchpad_full():
     vals0 = [tile0.banks[b].mem[10] for b in range(32)]
     expected0 = [b'' for _ in range(32)]
     for lane in range(32):
-        bank = _xor_bank(10, lane, 32)
-        expected0[bank] = (lane+1).to_bytes(2, 'little')
+        expected0[lane] = (lane+1).to_bytes(2, 'little')
     assert vals0 == expected0, f"Tile0 slot10 mismatch: {vals0} vs {expected0}"
 
     vals1 = [tile1.banks[b].mem[8] for b in range(32)]
     expected1 = [b'' for _ in range(32)]
     for lane in range(32):
-        bank = _xor_bank(8, lane, 32)
-        expected1[bank] = (100+lane).to_bytes(2, 'little')
+        expected1[lane] = (100+lane).to_bytes(2, 'little')
     assert vals1 == expected1, f"Tile1 slot8 mismatch: {vals1} vs {expected1}"
 
     # --- Check backend writes (load) land in the correct tile-specific slot ---
     assert backend0.get_stats()["tx_completed"] == 1
     assert backend1.get_stats()["tx_completed"] == 1
-    assert _read_swizzled_row(spad, tile_id=0, slot=20) == backend0_row
-    assert _read_swizzled_row(spad, tile_id=1, slot=4) == backend1_row
+    assert _read_row(spad, tile_id=0, slot=20) == backend0_row
+    assert _read_row(spad, tile_id=1, slot=4) == backend1_row
 
     print("Scratchpad frontend/two-backend arbitration and data path test passed.")
     print(spad.get_stats())
@@ -125,7 +120,7 @@ def test_scratchpad_full():
 def test_backends_can_attach_to_scratchpad_slots_and_dram():
     eq, clk, sim = build_sim()
     dram = DRAM(block_bytes=16)
-    spad = Scratchpad(num_banks=4, bank_size=16, read_latency=1, write_latency=1, xbar_delay=1, elem_bytes=2)
+    spad = Scratchpad(num_banks=4, bank_size=16, read_latency=1, write_latency=1, elem_bytes=2)
     backend0 = Backend(dram_latency=1, dram_q_depth=8, dram_burst_bytes=4, elem_bytes=2)
     backend1 = Backend(dram_latency=1, dram_q_depth=8, dram_burst_bytes=4, elem_bytes=2)
 
@@ -155,13 +150,13 @@ def test_backends_can_attach_to_scratchpad_slots_and_dram():
 
     sim.run(until=8.0)
 
-    assert _read_swizzled_row(spad, tile_id=0, slot=3) == load_row0
-    assert _read_swizzled_row(spad, tile_id=1, slot=5) == load_row1
+    assert _read_row(spad, tile_id=0, slot=3) == load_row0
+    assert _read_row(spad, tile_id=1, slot=5) == load_row1
 
     store_row0 = _pack_row([21, 22, 23, 24])
     store_row1 = _pack_row([31, 32, 33, 34])
-    _write_swizzled_row(spad, tile_id=0, slot=6, row_bytes=store_row0)
-    _write_swizzled_row(spad, tile_id=1, slot=7, row_bytes=store_row1)
+    _write_row(spad, tile_id=0, slot=6, row_bytes=store_row0)
+    _write_row(spad, tile_id=1, slot=7, row_bytes=store_row1)
 
     tx_id2 = backend0.driver_to_backend_start_store(base_sp_addr=6, base_dram_addr=0x200, rows=1, cols=4)
     tx_id3 = backend1.driver_to_backend_start_store(base_sp_addr=7, base_dram_addr=0x220, rows=1, cols=4)
@@ -174,9 +169,11 @@ def test_backends_can_attach_to_scratchpad_slots_and_dram():
     assert dram.read(0x220, len(store_row1)) == store_row1
 
 
-def test_frontend_writes_are_not_dropped_when_write_xbar_is_pipelined():
+def test_a_pad_takes_one_request_a_cycle_and_drops_none():
+    """head grants one request per cycle per pad: a second write in the same
+    cycle is refused, goes up the next cycle, and both land."""
     eq, clk, sim = build_sim()
-    spad = Scratchpad(num_banks=8, bank_size=16, read_latency=1, write_latency=2, xbar_delay=3, elem_bytes=2, frontend_queue_size=4)
+    spad = Scratchpad(num_banks=8, bank_size=16, elem_bytes=2, queue_depth=4)
 
     clk.add_clocked(spad)
     clk.schedule_next(0.0)
@@ -184,13 +181,14 @@ def test_frontend_writes_are_not_dropped_when_write_xbar_is_pipelined():
     row0 = _pack_row([10 + i for i in range(8)])
     row1 = _pack_row([30 + i for i in range(8)])
 
-    assert spad.frontend_write(0, row0, row_idx=0, tile_id=0)
-    assert spad.frontend_write(1, row1, row_idx=1, tile_id=0)
+    assert spad.frontend_write(0, row0, row_idx=0, tile_id=0, now=0)
+    assert not spad.frontend_write(1, row1, row_idx=1, tile_id=0, now=0)
+    assert spad.frontend_write(1, row1, row_idx=1, tile_id=0, now=1)
 
     sim.run(until=12.0)
 
-    assert _read_swizzled_row(spad, tile_id=0, slot=0) == row0
-    assert _read_swizzled_row(spad, tile_id=0, slot=1) == row1
+    assert _read_row(spad, tile_id=0, slot=0) == row0
+    assert _read_row(spad, tile_id=0, slot=1) == row1
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))

@@ -605,7 +605,7 @@ class MNReuseBlockedTPUCosim(TiledTPUCosim):
                 job.accum_load_rows[row_idx] = {"data": list(next_item["data"]), "age": 0}
                 job.accum_loads_inflight += 1
 
-            psum_store_window = self.spad.frontends[job.psum_buffer.tile_id].writeq.max_size + 1
+            psum_store_window = self.spad.tiles[job.psum_buffer.tile_id].depth
             while job.pending_sum_rows and len(job.store_inflight) < psum_store_window:
                 next_item = job.pending_sum_rows.pop(0)
                 row_idx = next_item["row"]
@@ -904,7 +904,7 @@ class MNReuseBlockedTPUCosim(TiledTPUCosim):
                     job.accum_load_rows[row_idx] = {"data": list(next_item["data"]), "age": 0}
                     job.accum_loads_inflight += 1
 
-                psum_store_window = self.spad.frontends[job.psum_buffer.tile_id].writeq.max_size + 1
+                psum_store_window = self.spad.tiles[job.psum_buffer.tile_id].depth
                 while (
                     job.pending_sum_rows
                     and job.psum_buffer is not None

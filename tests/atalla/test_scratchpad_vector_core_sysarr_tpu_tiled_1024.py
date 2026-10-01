@@ -10,7 +10,6 @@ from atalla.sysarr_tpu_experiment import MetricsVLSFrontendBridge, QUEUE_NAMES
 from atalla.sysarr_tpu_system import build_tpu_compute_path, build_tpu_platform
 from base.debug import close_debug, configure_debug, dprintf
 from memory.dram import DRAM
-from memory.sc_sram_banks import _xor_bank
 from memory.scratchpad import Scratchpad
 
 
@@ -79,7 +78,7 @@ def _read_slot_vector_u16(spad: Scratchpad, addr: int, vector_len: int, tile_id:
     slot = int(addr) % spad.bank_size
     out = []
     for lane in range(vector_len):
-        bank = _xor_bank(slot, lane, spad.num_banks)
+        bank = lane
         blob = spad.tiles[tile].banks[bank].mem[slot]
         blob = bytes(blob) if blob is not None else b"\x00\x00"
         if len(blob) < 2:
@@ -95,7 +94,7 @@ def _write_slot_vector_u16(spad: Scratchpad, addr: int, values: List[int], tile_
     for lane in range(len(padded), spad.num_banks):
         padded.append(0)
     for lane, value in enumerate(padded[: spad.num_banks]):
-        bank = _xor_bank(slot, lane, spad.num_banks)
+        bank = lane
         spad.tiles[tile].banks[bank].mem[slot] = int(value).to_bytes(2, "little", signed=False)
 
 
@@ -610,7 +609,6 @@ class TiledTPUCosim:
             spad_num_tiles=self.spad_num_tiles,
             spad_read_latency=2,
             spad_write_latency=2,
-            spad_xbar_delay=3,
             spad_frontend_queue_size=self.spad_frontend_queue_size,
             dram_block_bytes=256,
             backend_dram_latency=28,
@@ -631,8 +629,8 @@ class TiledTPUCosim:
         self.vls_bridge = platform.vls_bridge
         for bridge in self.vls_bridges:
             bridge.trace_hook = self._trace_vls_event
-        self.load_issue_window = self.spad.frontends[0].readq.max_size + 1
-        self.store_issue_window = self.spad.frontends[0].writeq.max_size + 1
+        self.load_issue_window = self.spad.tiles[0].depth
+        self.store_issue_window = self.spad.tiles[0].depth
         self.tile_row_bytes = self.tile_size * 2
         self._reset_compute_pipeline()
 

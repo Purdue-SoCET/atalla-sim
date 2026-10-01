@@ -41,6 +41,8 @@ class BackendTransaction:
     issued_subreqs: List[set] = field(default_factory=list)
     total_subreqs: int = 0
     completed_subreqs: int = 0
+    #: Store: rows whose SRAM read has been requested from the scratchpad.
+    next_read_row: int = 0
 
 
 @dataclass
@@ -92,6 +94,11 @@ class Backend(Clocked):
         self.elem_bytes = int(elem_bytes)
         self.send_sram_write = send_sram_write
         self.send_sram_read = send_sram_read
+        #: Asynchronous SRAM read, set by Scratchpad.attach_backend:
+        #: (sp_addr, row_idx, tx_id) -> accepted. The row comes back later
+        #: through queue_sram_read_response, after the pad's read latency.
+        #: When unset, stores fall back to the untimed send_sram_read.
+        self.request_sram_read: Optional[Callable[[int, int, int], bool]] = None
         self.dram: Optional[DRAM] = None
         self.shared_burst_channel = shared_burst_channel
 
@@ -231,6 +238,24 @@ class Backend(Clocked):
             self.total_backend_stalls += 1
             return -1
         return tx_id
+
+    def queue_sram_read_response(self, tx_id: int, row_idx: int, row_bytes: bytes) -> None:
+        """A row read for a store has come back from the scratchpad. It is
+        handled on the backend's next tick, so its DRAM bursts launch at the
+        backend's own cycle."""
+        self._pending_sram_reads.append((tx_id, row_idx, row_bytes))
+        self.request_wake(self._tick + 1)
+
+    def _request_store_rows(self) -> None:
+        """Ask the scratchpad for the next row of each store, one per cycle:
+        the pad takes one request a cycle, and refuses when it is busy."""
+        for tx in list(self._active_txs.values()):
+            if not tx.is_store or tx.next_read_row >= tx.rows:
+                continue
+            r = tx.next_read_row
+            if self.request_sram_read(tx.base_sp + r, r, tx.tx_id):
+                tx.next_read_row += 1
+            return
 
     # Called by Body/other unit when it produces a SRAM-read response for a store transaction.
     def body_to_backend_sram_read_response(self, tx_id: int, row_idx: int, row_bytes: bytes) -> None:
@@ -470,13 +495,16 @@ class Backend(Clocked):
                 self._active_txs[tx.tx_id] = tx
                 if not tx.is_store:
                     self.backend_to_dram_issue_row_load_subreqs(tx)
-                else:
-                    # For store: request all rows from scratchpad if not present
+                elif self.request_sram_read is None:
+                    # Untimed fallback: read every row at once.
                     if self.send_sram_read:
                         for row_idx in range(tx.rows):
                             if all(x is None for x in tx.row_bufs[row_idx]):
                                 row_bytes = self.send_sram_read(tx.base_sp + row_idx, row_idx, tx.tx_id)
                                 self.body_to_backend_sram_read_response(tx.tx_id, row_idx, row_bytes)
+
+            if self.request_sram_read is not None:
+                self._request_store_rows()
 
             # 2) Progress only the bursts whose due cycle has arrived.
             while self._dram_ready_heap and self._dram_ready_heap[0][0] <= self._tick:

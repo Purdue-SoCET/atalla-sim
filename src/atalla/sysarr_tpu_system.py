@@ -18,7 +18,6 @@ from base.sched import CompositeClocked
 from base.sim import Sim
 from memory.backend import Backend, SharedDRAMBurstChannel
 from memory.dram import DRAM
-from memory.sc_sram_banks import _xor_bank
 from memory.scratchpad import Scratchpad
 from systolic_array.systolic_array_tpu import SystolicArrayTPU
 from vector_core.vector_core import VectorCore
@@ -145,7 +144,7 @@ class VLSFrontendBridge(Clocked):
 
         addr = int(req.get("addr", 0))
         if req["kind"] == "store":
-            if self.spad.frontends[self.frontend_id].writeq.is_full():
+            if not self.spad.frontends[self.frontend_id].can_accept(int(self.now)):
                 return
             req = self.vc.pop_scratchpad_request(self.vls_id)
             if req is None:
@@ -169,11 +168,12 @@ class VLSFrontendBridge(Clocked):
                 _encode_vector_u16(req["data"]),
                 row_idx=0,
                 tile_id=self.frontend_id,
+                now=int(self.now),
             )
             return
 
         if req["kind"] == "load":
-            if self.spad.frontends[self.frontend_id].readq.is_full():
+            if not self.spad.frontends[self.frontend_id].can_accept(int(self.now)):
                 return
             req = self.vc.pop_scratchpad_request(self.vls_id)
             if req is None:
@@ -198,6 +198,7 @@ class VLSFrontendBridge(Clocked):
                 lambda lanes, _lid=load_id, _addr=addr, _meta=meta: self._on_frontend_read(
                     _lid, _addr, lanes, _meta
                 ),
+                now=int(self.now),
             )
             return
 
@@ -541,10 +542,9 @@ def build_tpu_platform(
     spad_num_banks: int = SPAD_NUM_BANKS,
     spad_bank_size: int = SPAD_BANK_SIZE,
     spad_num_tiles: int = SPAD_NUM_PADS,
-    spad_read_latency: int = 1,
-    spad_write_latency: int = 1,
-    spad_xbar_delay: int = 1,
-    spad_frontend_queue_size: int = 4,
+    spad_read_latency: int = 2,
+    spad_write_latency: int = 2,
+    spad_frontend_queue_size: int = 32,
     dram_block_bytes: int = 256,
     backend_dram_latency: Optional[int] = None,
     backend_dram_q_depth: int = 16,
@@ -555,7 +555,12 @@ def build_tpu_platform(
     vls_bridge_kwargs: Optional[Dict[str, Any]] = None,
     systolic_array: str = "tpu",
 ) -> TPUPlatform:
-    """Build the TPU platform."""
+    """Build the TPU platform.
+
+    The scratchpad defaults are the RTL's: sram_bank read and write latency 2
+    (scratchpad body.sv), 32-deep controller queues (scpad_cntrl.sv), and no
+    crossbar. spad_frontend_queue_size sets that queue depth.
+    """
     eq, clk, sim = build_sim()
     vc = VectorCore(
         veggie_size=int(size) * 16,
@@ -569,9 +574,8 @@ def build_tpu_platform(
         bank_size=int(spad_bank_size),
         read_latency=int(spad_read_latency),
         write_latency=int(spad_write_latency),
-        xbar_delay=int(spad_xbar_delay),
         elem_bytes=SPAD_ELEM_BYTES,
-        frontend_queue_size=int(spad_frontend_queue_size),
+        queue_depth=int(spad_frontend_queue_size),
         num_tiles=int(spad_num_tiles),
     )
     dram = DRAM(block_bytes=int(dram_block_bytes))
@@ -687,11 +691,11 @@ class SysArrTPUSystem:
             wgt_row = _decode_row_u16(self.dram.read(self.DRAM_WGT + r * row_bytes, row_bytes), self.size)
             slot = int(self.SPAD_ACT_BASE + r) % self.spad.bank_size
             for lane, value in enumerate(act_row):
-                bank = _xor_bank(slot, lane, self.spad.num_banks)
+                bank = lane
                 self.spad.tiles[self.ACT_PAD].banks[bank].mem[slot] = int(value).to_bytes(2, "little", signed=False)
             slot = int(self.SPAD_WGT_BASE + r) % self.spad.bank_size
             for lane, value in enumerate(wgt_row):
-                bank = _xor_bank(slot, lane, self.spad.num_banks)
+                bank = lane
                 self.spad.tiles[self.WGT_PAD].banks[bank].mem[slot] = int(value).to_bytes(2, "little", signed=False)
 
     def run(self, max_cycles: int = 20000) -> Tuple[List[List[int]], Optional[List[List[int]]], int, "TPUMetrics"]:
@@ -710,8 +714,8 @@ class SysArrTPUSystem:
             "store_inflight": {},
             "completed_rows": set(),
             "weights_done": False,
-            "load_issue_window": self.spad.frontends[self.WGT_PAD].readq.max_size + 1,
-            "store_issue_window": self.spad.frontends[self.OUT_PAD].writeq.max_size + 1,
+            "load_issue_window": self.spad.tiles[self.WGT_PAD].depth,
+            "store_issue_window": self.spad.tiles[self.OUT_PAD].depth,
         }
 
         class RunHarness(Clocked):
@@ -797,7 +801,7 @@ class SysArrTPUSystem:
                     slot = int(self_outer.SPAD_OUT_BASE + row_idx) % self_outer.spad.bank_size
                     spad_vec = []
                     for lane in range(self_outer.vc.vector_len):
-                        bank = _xor_bank(slot, lane, self_outer.spad.num_banks)
+                        bank = lane
                         blob = self_outer.spad.tiles[self_outer.OUT_PAD].banks[bank].mem[slot]
                         blob = bytes(blob) if blob is not None else b"\x00\x00"
                         if len(blob) < 2:

@@ -235,23 +235,15 @@ A sleeping object stops observing cycles, so anything it derives from *"when
 did I last run"* goes stale. `SimClock` is a one-field shared object giving any
 component the current cycle in O(1) without being ticked.
 
-`SRAMBank` is the worked example. It computes an operation's due cycle as
-`base + latency`, where `base` used to be its own last-tick counter. Once the
-bank can sleep, that counter lags and every latency computed from it is wrong —
-silently, in the direction of completing *too early*. It now reads the shared
-clock instead.
+The scratchpad is the worked example. Its requesters — the VLSU bridges at
+phase 20 — run before it ticks at phase 40, so its own `now` is still last
+cycle's when they call, and further behind if it slept. Every latency computed
+from that would come out a cycle or more short — silently, in the direction of
+completing *too early*. So requesters pass the cycle they are in (`now=`).
 
-The same hazard hits **any counter incremented once per tick**. `cycles_busy`
-was `+= 1` per tick while ops were outstanding; sleeping through the wait would
-under-report utilisation. It now accumulates by elapsed cycles:
-
-```python
-if self._pending:
-    start = max(prev_tick + 1, self._busy_from)
-    if start <= cycle:
-        self.cycles_busy += cycle - start + 1     # reduces to += 1 when
-                                                  # ticked every cycle
-```
+The same hazard hits **any counter incremented once per tick**: sleeping
+through a wait under-reports anything accumulated per tick. Accumulate by
+elapsed cycles instead.
 
 **When converting a component, audit every per-tick counter first.** These
 counters are the simulator's output; getting them wrong corrupts results
@@ -430,9 +422,9 @@ Cycle *t* of the TPU platform, showing where each class acts:
                │              pops systolic request, drives SystolicArrayTPU.tick(t)
                │
                ├─ phase 40  Scratchpad.tick(t)
-               │              clock.advance_to(t)
-               │              WakeGroup frontends ─► WakeGroup xbars ─► WakeGroup banks
-               │              (only members whose next_wake <= t actually run)
+               │              each busy pad: enable its read and write channels
+               │              when free, hand back reads that are due
+               │              (idle pads return at once)
                │
                ├─ phase 50  Backend.tick(t)          [when DRAM is attached]
                │

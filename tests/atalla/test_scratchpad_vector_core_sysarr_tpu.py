@@ -15,7 +15,6 @@ from base.eventq import EventQueue
 from base.sim import Sim
 from memory.backend import Backend, SharedDRAMBurstChannel
 from memory.dram import DRAM
-from memory.sc_sram_banks import _xor_bank
 from memory.scratchpad import Scratchpad
 from systolic_array.systolic_array_tpu import SystolicArrayTPU
 from vector_core.vector_core import VectorCore
@@ -45,7 +44,7 @@ def _read_slot_vector_u16(spad: Scratchpad, addr: int, vector_len: int, tile_id:
     slot = int(addr) % spad.bank_size
     out = []
     for lane in range(vector_len):
-        bank = _xor_bank(slot, lane, spad.num_banks)
+        bank = lane
         blob = spad.tiles[tile].banks[bank].mem[slot]
         blob = bytes(blob) if blob is not None else b"\x00\x00"
         if len(blob) < 2:
@@ -58,7 +57,7 @@ def _write_slot_vector_u16(spad: Scratchpad, addr: int, values, tile_id: int = 0
     tile = int(tile_id)
     slot = int(addr) % spad.bank_size
     for lane, value in enumerate(list(values)):
-        bank = _xor_bank(slot, lane, spad.num_banks)
+        bank = lane
         spad.tiles[tile].banks[bank].mem[slot] = int(value).to_bytes(2, "little", signed=False)
 
 
@@ -390,6 +389,7 @@ class VLSFrontendBridge(Clocked):
 
     def tick(self, time: Optional[float] = None) -> None:
         self.activity_this_cycle = False
+        self.now = int(time) if time is not None else getattr(self, "now", -1) + 1
         vls = self.vc.vls_units[self.vls_id]
         req = vls.req_q.peek()
         if req is None:
@@ -397,7 +397,7 @@ class VLSFrontendBridge(Clocked):
 
         addr = int(req.get("addr", 0))
         if req["kind"] == "store":
-            if self.spad.frontends[self.frontend_id].writeq.is_full():
+            if not self.spad.frontends[self.frontend_id].can_accept(int(self.now)):
                 return
             req = self.vc.pop_scratchpad_request(self.vls_id)
             if req is None:
@@ -410,11 +410,12 @@ class VLSFrontendBridge(Clocked):
                 _encode_vector_u16(req["data"]),
                 row_idx=0,
                 tile_id=self.frontend_id,
+                now=int(self.now),
             )
             return
 
         if req["kind"] == "load":
-            if self.spad.frontends[self.frontend_id].readq.is_full():
+            if not self.spad.frontends[self.frontend_id].can_accept(int(self.now)):
                 return
             req = self.vc.pop_scratchpad_request(self.vls_id)
             if req is None:
@@ -426,6 +427,7 @@ class VLSFrontendBridge(Clocked):
                 addr,
                 0,
                 lambda lanes, _lid=load_id, _addr=addr: self._on_frontend_read(_lid, _addr, lanes),
+                now=int(self.now),
             )
             return
 
@@ -607,9 +609,8 @@ def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
             bank_size=128,
             read_latency=2,
             write_latency=2,
-            xbar_delay=3,
             elem_bytes=2,
-            frontend_queue_size=4,
+            queue_depth=4,
         )
         sa = SystolicArrayTPU(size=tile, dtype="fp16")
 
@@ -719,8 +720,8 @@ def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
             # - each frontend has one active read path and one active write path
             # Use frontend queue depth + the currently serviceable in-flight slot
             # instead of an unbounded tile-wide window.
-            "load_issue_window": spad.frontends[0].readq.max_size + 1,
-            "store_issue_window": spad.frontends[1].writeq.max_size + 1,
+            "load_issue_window": spad.tiles[0].depth,
+            "store_issue_window": spad.tiles[1].depth,
         }
         q_stats = {
             "samples": 0,
@@ -740,15 +741,7 @@ def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
                 state["preload_wait_drain"] = True
 
         def _spad_write_path_idle() -> bool:
-            if any(spad.backend_write_inflight):
-                return False
-            if any(xbar.get_stats()["pending"] > 0 for xbar in spad.tile_write_xbars):
-                return False
-            for tile_obj in spad.tiles:
-                for bank in tile_obj.banks:
-                    if len(bank._pending) > 0:
-                        return False
-            return True
+            return spad.write_path_idle()
 
         def _on_backend_store_done(row_idx: int, tx_id: int) -> None:
             state["backend_store_tx_done"].add(row_idx)

@@ -1,77 +1,32 @@
-from typing import Optional, Callable, List, Any
-from base.clocked_object import Clocked
-from base.queue import SimQueue
+"""A pad's frontend: the VLSU side of its request port.
 
-class Frontend(Clocked):
-    def __init__(self, tile_id: int, spad: "Scratchpad", queue_size: int = 1):
-        super().__init__()
-        self.tile_id = tile_id
+frontend.sv passes vec_req straight to the pad's head and returns tail's
+responses; it holds no queue of its own. So this is a thin adapter over the
+scratchpad's per-pad port, and `can_accept` is the RTL's !fe_vec_stall.
+"""
+
+from typing import Callable, List, Optional
+
+
+class Frontend:
+    def __init__(self, tile_id: int, spad: "Scratchpad"):
+        self.tile_id = int(tile_id)
         self.spad = spad
-        self.writeq = SimQueue(max_size=queue_size)  # (ready_cycle, base_sp_addr, row_bytes, row_idx, callback)
-        self.readq = SimQueue(max_size=queue_size)   # (ready_cycle, base_sp_addr, row_idx, callback)
-        self.pending_reads = {}            # tx_id -> callback
-        self.write_stalled = False
-        self.read_stalled = False
 
-    def write(self, base_sp_addr: int, row_bytes: bytes, row_idx: int, callback: Optional[Callable]=None):
-        now = getattr(self.spad, 'now', 0)
-        latency = 2 + self.spad.tile_write_xbars[self.tile_id].delay
-        ready_cycle = now + latency
-        req = (ready_cycle, base_sp_addr, row_bytes, row_idx, callback)
-        if not self.writeq.enqueue(req):
-            self.write_stalled = True
-            return False
-        self.write_stalled = False
-        self.request_wake(now)
-        return True
+    @property
+    def stalls(self) -> int:
+        return self.spad.tiles[self.tile_id].stalls
 
-    def read(self, base_sp_addr: int, row_idx: int, callback: Callable[[List[bytes]], None]):
-        now = getattr(self.spad, 'now', 0)
-        latency = 2 + self.spad.tile_read_xbars[self.tile_id].delay
-        ready_cycle = now + latency
-        req = (ready_cycle, base_sp_addr, row_idx, callback)
-        if not self.readq.enqueue(req):
-            self.read_stalled = True
-            return False
-        self.read_stalled = False
-        self.request_wake(now)
-        return True
+    def can_accept(self, now: Optional[int] = None) -> bool:
+        return self.spad.can_accept(self.tile_id, now)
 
-    def next_wake(self, now: int) -> Optional[int]:
-        """Idle only when both queues are drained.
+    def write(self, base_sp_addr: int, row_bytes: bytes, row_idx: int = 0,
+              callback: Optional[Callable[[], None]] = None,
+              now: Optional[int] = None) -> bool:
+        return self.spad.submit_write(self.tile_id, base_sp_addr, row_bytes,
+                                      callback=callback, now=now)
 
-        A queued request cannot simply be scheduled for its ready_cycle: it
-        also has to clear _write_path_can_accept / _read_path_can_accept, which
-        depend on downstream capacity and can keep it waiting. Retrying every
-        cycle while anything is queued is the conservative choice, and the
-        common case -- both queues empty -- still sleeps.
-        """
-        if len(self.writeq) or len(self.readq):
-            return now + 1
-        return None
-
-    def tick(self, now):
-        head = self.writeq.peek()
-        if head and self.spad._write_path_can_accept(self.tile_id):
-            ready_cycle, base_sp_addr, row_bytes, row_idx, cb = head
-            if ready_cycle <= now and self.spad._accept_backend_write(
-                base_sp_addr,
-                row_bytes,
-                row_idx,
-                tx_id=0,
-                tile_id=self.tile_id,
-                frontend_cb=cb,
-            ):
-                self.writeq.dequeue()
-
-        head = self.readq.peek()
-        if head and self.spad._read_path_can_accept(self.tile_id):
-            ready_cycle, base_sp_addr, row_idx, cb = head
-            if ready_cycle <= now and self.spad._accept_backend_read(
-                base_sp_addr,
-                row_idx,
-                tx_id=0,
-                tile_id=self.tile_id,
-                frontend_cb=cb,
-            ):
-                self.readq.dequeue()
+    def read(self, base_sp_addr: int, row_idx: int,
+             callback: Callable[[List[bytes]], None],
+             now: Optional[int] = None) -> bool:
+        return self.spad.submit_read(self.tile_id, base_sp_addr, callback, now=now)

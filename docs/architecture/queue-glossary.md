@@ -188,34 +188,22 @@ These queues are part of the modeled system but are not currently reported in `q
   - Definition: queue of lane results after FU completion and metadata pairing, before delivery to the result collector.
   - Direction: lane completion stage -> pending output queue -> result collector.
 
-### Scratchpad Frontend Queues
+### Scratchpad Queues
 
-- `frontend.readq`
-  - Owner: `Frontend.readq`
-  - Definition: accepted scratchpad read requests waiting until their ready cycle and crossbar path are available.
-  - Direction: `VLSFrontendBridge` / load request -> frontend read queue -> scratchpad read xbar.
+- `spad.tiles[tid].rq`
+  - Owner: `Scratchpad` pad (`memory/scratchpad.py`)
+  - Definition: accepted row reads waiting for their pad's read channel; models scpad_cntrl's read FIFO (32 deep by default, `spad_frontend_queue_size`).
+  - Direction: `VLSFrontendBridge` load or backend store read -> pad read queue -> bank read enable -> data to the requester 5 cycles later.
 
-- `frontend.writeq`
-  - Owner: `Frontend.writeq`
-  - Definition: accepted scratchpad write requests waiting until their ready cycle and crossbar path are available.
-  - Direction: `VLSFrontendBridge` / store request -> frontend write queue -> scratchpad write xbar.
+- `spad.tiles[tid].wq`
+  - Owner: `Scratchpad` pad
+  - Definition: accepted row writes waiting for their pad's write channel; models scpad_cntrl's write FIFO. Either queue being full stalls both directions, as w_stall does.
+  - Direction: `VLSFrontendBridge` store or backend load write -> pad write queue -> bank write enable.
 
-### Scratchpad Crossbar And Bank Queues
-
-- `tile_read_xbars[tid]._pending`
-  - Owner: `Xbar._pending`
-  - Definition: pending read-side swizzle / deswizzle operations through the scratchpad read crossbar.
-  - Direction: frontend/backend read launch -> read crossbar pending queue -> per-lane callback data.
-
-- `tile_write_xbars[tid]._pending`
-  - Owner: `Xbar._pending`
-  - Definition: pending write-side swizzle operations through the scratchpad write crossbar.
-  - Direction: frontend/backend write launch -> write crossbar pending queue -> SRAM bank writes.
-
-- `tile.banks[bank]._pending`
-  - Owner: `SRAMBank._pending`
-  - Definition: per-bank memory operation queue holding reads and writes until bank latency expires.
-  - Direction: crossbar / scratchpad controller -> bank pending queue -> bank memory array.
+- `spad.tiles[tid].out`
+  - Owner: `Scratchpad` pad
+  - Definition: reads that have left the banks and are on their way back (rxbar and tail), keyed by delivery cycle.
+  - Direction: bank read -> requester callback.
 
 ### Backend Queues
 
@@ -271,7 +259,7 @@ These queues are part of the modeled system but are not currently reported in `q
   - GSAU request queue -> TPU boundary FIFOs -> TPU compute -> GSAU response queue -> GSAU writebacks -> `wb_buffer`.
 
 - Memory side
-  - VLSU issue queue -> VLSU request queue -> scratchpad frontend queues -> xbar queues -> SRAM bank queues.
+  - VLSU issue queue -> VLSU request queue -> scratchpad pad read/write queues -> SRAM bank channels.
   - For loads: SRAM bank / frontend response -> `vlsu_rsp_q` -> `vlsu_wb_q` -> `wb_buffer`.
   - For stores: vector register file / inline data -> VLSU -> scratchpad write path.
 

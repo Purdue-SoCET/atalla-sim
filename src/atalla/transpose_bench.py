@@ -30,7 +30,6 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from atalla.sysarr_tpu_system import build_tpu_platform
-from memory.sc_sram_banks import _xor_bank
 from vector_core.transpose import BUSY_WRITE, IDLE, WAIT_CLOS_WRITE
 
 #: Registers the rows are loaded into and the columns are popped into.
@@ -84,7 +83,7 @@ def expected_columns(rows: int, cols: int) -> List[List[int]]:
 def _read_slot(spad, pad: int, slot: int, n: int) -> List[int]:
     out = []
     for lane in range(n):
-        blob = spad.tiles[pad].banks[_xor_bank(slot, lane, spad.num_banks)].mem[slot]
+        blob = spad.tiles[pad].banks[lane].mem[slot]
         blob = bytes(blob or b"\x00\x00").ljust(2, b"\x00")
         out.append(int.from_bytes(blob[:2], "little", signed=False))
     return out
@@ -92,7 +91,7 @@ def _read_slot(spad, pad: int, slot: int, n: int) -> List[int]:
 
 def _write_slot(spad, pad: int, slot: int, values) -> None:
     for lane, v in enumerate(values):
-        spad.tiles[pad].banks[_xor_bank(slot, lane, spad.num_banks)].mem[slot] = \
+        spad.tiles[pad].banks[lane].mem[slot] = \
             int(v).to_bytes(2, "little", signed=False)
 
 
@@ -228,9 +227,7 @@ def run_spad_bench(rows: int = 32, *, load_pad: int = 0, store_pad: int = 0,
                    pop, then all stores. The difference is what overlap buys.
 
     load_window    at most this many loads issued but not yet written back.
-                   None issues every load in cycle 0. Packets issue in order,
-                   so a long run of queued loads makes the first push wait
-                   behind them; a window lets it in sooner.
+                   None issues every load in cycle 0.
     """
     b = _Bench(rows, limit, platform_kwargs)
     spad, n = b.platform.spad, b.n

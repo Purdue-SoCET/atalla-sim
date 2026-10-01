@@ -1,74 +1,37 @@
-import pytest
-
-import os, sys
-
-from base.testing import build_sim
-from base.eventq import EventQueue
-from base.clock_domain import ClockDomain
-from base.core import Core
-from base.sim import Sim
-
+"""Scratchpad backpressure, as the RTL's head and scpad_cntrl apply it."""
 from memory.scratchpad import Scratchpad
-from memory.backend import Backend
 
 
-def test_scratchpad_stalls():
-    eq, clk, sim = build_sim()
+def _row(v, n=8):
+    return b"".join(int(v + i).to_bytes(2, "little") for i in range(n))
 
-    # Use small frontend queue size to force stalls
-    spad = Scratchpad(num_banks=8, bank_size=8, read_latency=2, write_latency=2, xbar_delay=2, elem_bytes=2, frontend_queue_size=2)
-    clk.add_clocked(spad)
-    clk.schedule_next(0)
 
-    # --- Frontend vs Frontend: Fill write queue, then overflow ---
-    row_bytes = b''.join([(i+1).to_bytes(2, 'little') for i in range(8)])
-    ok1 = spad.frontend_write(2, row_bytes, row_idx=0, tile_id=0)
-    ok2 = spad.frontend_write(3, row_bytes, row_idx=1, tile_id=0)
-    ok3 = spad.frontend_write(4, row_bytes, row_idx=2, tile_id=0)  # Should stall
-    assert ok1 and ok2, "First two frontend writes should succeed"
-    assert not ok3, "Third frontend write should stall (queue full)"
+def test_a_full_queue_stalls_both_directions():
+    """w_stall is rd_fifo_full || wr_fifo_full: with the read queue full a
+    write is refused too, and goes up once the head read reaches the banks."""
+    spad = Scratchpad(num_banks=8, bank_size=8, elem_bytes=2, queue_depth=2, num_tiles=1)
+    got = []
+    assert spad.submit_read(0, 0, got.append, now=0)
+    spad.tick(0)
+    assert spad.submit_read(0, 1, got.append, now=1)
+    spad.tick(1)
+    assert not spad.can_accept(0, now=2)
+    assert not spad.submit_write(0, 2, _row(1), now=2), "read queue full stalls writes"
+    spad.tick(2)                                  # the first read is enabled
+    assert spad.submit_write(0, 2, _row(1), now=3)
+    assert spad.tiles[0].stalls == 1
 
-    stats = spad.get_stats()
-    print("Frontend vs Frontend stats:", stats)
-    assert stats["frontend_stalls"][0]["write_stalled"], "Frontend write stall flag not set"
 
-    # --- Backend vs Backend: Fill backend queue, then overflow ---
-    backend_writes = []
-    def send_sram_write(sp_addr, row_bytes, row_idx, tx_id):
-        backend_writes.append((sp_addr, row_bytes, row_idx, tx_id))
-        spad._accept_backend_write(sp_addr, row_bytes, row_idx, tx_id)
-        return True
-
-    backend = Backend(
-        dram_latency=2, dram_q_depth=2, dram_burst_bytes=4, elem_bytes=2,
-        send_sram_write=send_sram_write
-    )
-    clk.add_clocked(backend)
-
-    # This will attempt 4 bursts for one row, but only 2 can be pending
-    tx_id = backend.driver_to_backend_start_load(base_sp_addr=5, base_dram_addr=1000, rows=1, cols=8)
-    sim.run(until=10.0)
-    backend_stats = backend.get_stats()
-    print("Backend vs Backend stats:", backend_stats)
-    assert backend_stats["backend_stalls"] >= 2, "Backend stalls not detected"
-
-    # --- Frontend vs Backend: A saturated write pipeline blocks frontend service ---
-    spad.backend_write_inflight[0] = spad.tile_write_xbars[0].max_size
-    ok4 = spad.frontend_write(6, row_bytes, row_idx=3, tile_id=0)
-    assert ok4, "Frontend write should enqueue (queue not full)"
-    ready_cycle, *_ = spad.frontends[0].writeq.peek()
-    # But tick will not process it until xbar capacity is made available
-    spad.frontends[0].tick(ready_cycle)
-    # The request should remain in the queue
-    assert len(spad.frontends[0].writeq.items) == 1, "Frontend write should be blocked by backend inflight"
-
-    # Now clear the synthetic occupancy and tick again
-    spad.backend_write_inflight[0] = 0
-    spad.frontends[0].tick(ready_cycle + 1)
-    # The request should be processed
-    assert len(spad.frontends[0].writeq.items) == 0, "Frontend write should be processed after backend inflight cleared"
-
-    print("Scratchpad stall test passed.")
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__]))
+def test_refused_requests_are_not_lost():
+    """A caller that retries every cycle gets every row in, in order."""
+    spad = Scratchpad(num_banks=8, bank_size=16, elem_bytes=2, queue_depth=1, num_tiles=1)
+    rows = [_row(10 * k) for k in range(6)]
+    k, cycle = 0, 0
+    while k < len(rows) or not spad.write_path_idle():
+        if k < len(rows) and spad.submit_write(0, k, rows[k], now=cycle):
+            k += 1
+        spad.tick(cycle)
+        cycle += 1
+    assert [spad.read_row_now(s, tile_id=0) for s in range(6)] == rows
+    # one write enable every 3 cycles, each 2 after its acceptance
+    assert cycle == 2 + 3 * 5 + 1

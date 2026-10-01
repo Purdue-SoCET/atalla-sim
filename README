@@ -27,8 +27,8 @@ THE MODELED SYSTEM
                                           │
                   ┌───────────────────────▼───────────────────────┐
                   │           Scratchpad  —  2 MB local           │
-                  │   frontends ──► crossbars ──► SRAM banks      │
-                  │   (queues)      (swizzle)     (4 pads x 0.5MB)│
+                  │   frontends ──► rd/wr queues ──► SRAM banks   │
+                  │   (1 req/cyc)   (32 deep)     (4 pads x 0.5MB)│
                   │   pad 0 act │ pad 1 wgt │ pad 2 psum │ 3 out  │
                   │   one pad, one frontend, one backend, one VLSU│
                   └───────┬───────────────────────────▲───────────┘
@@ -114,7 +114,7 @@ HOW A CYCLE RUNS
                                         ├─ phase 20  VLS bridges
                                         ├─ phase 30  GSAU bridge ──► systolic array
                                         ├─ phase 40  Scratchpad
-                                        │              frontends ─► xbars ─► banks
+                                        │              pads: request port ─► banks
                                         ├─ phase 50  Backend / DRAM
                                         └─ phase 90  experiment harness
 
@@ -145,13 +145,13 @@ Scheduling must be invisible. Run the suite both ways and compare:
     ATALLA_SCHED=legacy pytest tests/     # tick everything, every cycle
     pytest tests/                         # default: skip idle components
 
-`tests/base/test_sched.py` asserts this end-to-end using per-bank utilisation
-counters, which shift if any operation completes even one cycle differently.
+`tests/base/test_sched.py` asserts this end-to-end using per-pad read, write
+and stall counters, which shift if any request is accepted a cycle differently.
 
 Caveat when converting a component: anything derived from "when did I last
-run" goes stale once an object can sleep. SRAMBank takes its due-cycles from a
-shared SimClock rather than its own tick counter, and accumulates cycles_busy
-by elapsed cycles instead of +1 per tick. See docs/architecture/base-classes.md.
+run" goes stale once an object can sleep. The scratchpad's requesters pass the
+cycle they are in (`now=`) rather than letting it read its own last tick, which
+is a cycle behind when they run first. See docs/architecture/base-classes.md.
 
 
 BUILDING THE SIMD KERNELS

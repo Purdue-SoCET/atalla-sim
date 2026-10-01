@@ -29,7 +29,7 @@ top to bottom, and the arrows are `SimQueue` FIFOs.
                               (+ gsau.rd_queue: awaited dests)       │
                                                                      │
    phase 20   VLSFrontendBridge x4, one per pad                       │
-                VLSU[p].req_q ──► Frontend[p].readq / .writeq        │
+                VLSU[p].req_q ──► Frontend[p] (pad request port)      │
                                                                      │
    phase 30   GSAUTPUBridge                                          │
                 gsau.to_systolic ──► SystolicArrayTPU                │
@@ -39,8 +39,7 @@ top to bottom, and the arrows are `SimQueue` FIFOs.
                   └─ psum_output_fifo_bottom ──► gsau.from_systolic ─┤
                                                                      │
    phase 40   Scratchpad                                             │
-                Frontend.readq  ──► tile_read_xbars[t]  ──► banks    │
-                Frontend.writeq ──► tile_write_xbars[t] ──► banks    │
+                Frontend ──► pad request port ──► rd/wr queues ──► banks │
                 banks ──► (callback) ──► frontend cb ──► VLSU rsp    │
                                                                      │
    phase 50   RoundRobinBackendTicker ──► Backend[p] x4               │
@@ -117,10 +116,10 @@ flowchart LR
     V1["VLSU.req_q"]
     V2["VLSU.load_dst_fifos[spad]<br/>destination metadata FIFO"]
     V3["VLSFrontendBridge"]
-    V4["Frontend.readq"]
-    V5["Frontend.writeq"]
-    V6["tile_read_xbars[tid]._pending"]
-    V7["tile_write_xbars[tid]._pending"]
+    V4["Frontend (no queue)"]
+    V5["pad request port"]
+    V6["spad.tiles[tid].rq"]
+    V7["spad.tiles[tid].wq"]
     V8["tile.banks[bank]._pending"]
     V9["VLSU.rsp_q"]
     V10["VLSU.wb_q"]
@@ -404,7 +403,7 @@ The main user-facing wrappers are:
 
 - `VectorCore` is the control shell that owns the vector datapath, register file,
   VLS units, and GSAU.
-- `Scratchpad` plus `Frontend`, `Xbar`, `SRAMBanks`, `Backend`, and `DRAM` form
+- `Scratchpad` plus `Frontend`, `Backend`, and `DRAM` form
   the memory system.
 - `GSAUTPUBridge` and `VLSFrontendBridge` connect the vector core to the TPU and
   scratchpad paths.

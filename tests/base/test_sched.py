@@ -189,13 +189,12 @@ def test_platform_tick_advances_every_component():
 
     platform.tick(1.0)
     # Reaching the scratchpad proves the tick propagated through the tree.
-    assert platform.spad.now == 1.0
-    assert platform.spad.clock.cycle == 1
+    assert platform.spad.now == 1
 
 
-@pytest.mark.skipif(not sched.SCHED_ENABLED,
-                    reason="ATALLA_SCHED=legacy disables skipping by design")
-def test_scratchpad_actually_skips_idle_banks():
+def test_an_idle_scratchpad_sleeps():
+    """No queued request and nothing in flight: the scratchpad asks for no
+    tick, and wakes again for the next request."""
     from atalla.sysarr_tpu_system import (
         SysArrTPUSystem, _act_u16, _weights_u16)
 
@@ -207,11 +206,12 @@ def test_scratchpad_actually_skips_idle_banks():
     system.load_inputs(act, wgt_stream)
     system.run(max_cycles=200000)
 
-    bank_group = system.spad._bank_group
-    stats = bank_group.stats()
-    assert stats["ticked"] > 0, "banks never ran"
-    assert stats["skipped_pct"] > 50.0, (
-        f"expected most bank ticks to be skipped, got {stats['skipped_pct']:.1f}%")
+    spad = system.spad
+    assert sum(p.reads + p.writes for p in spad.tiles) > 0, "the pads were used"
+    now = int(spad.now)
+    assert spad.next_wake(now) is None
+    assert spad.submit_read(0, 0, lambda _lanes: None, now=now + 1)
+    assert spad.next_wake(now + 1) == now + 2
 
 
 def _run_platform(mode):
@@ -226,8 +226,7 @@ def _run_platform(mode):
         "s.load_inputs(a, ws);"
         "out, mirror, cycles, m = s.run(max_cycles=200000);"
         "print(repr((out, mirror, cycles, m.cycles, m.bytes_moved, m.flops,"
-        " [b.cycles_busy for t in s.spad.tiles for b in t.banks],"
-        " [b.enqueue_stalls for t in s.spad.tiles for b in t.banks],"
+        " [(p.reads, p.writes, p.stalls) for p in s.spad.tiles],"
         " dict(s.sa.metrics), dict(s.sa.internal_bytes),"
         " dict(s.sa.internal_bytes_valid))))"
     )
@@ -243,8 +242,8 @@ def _run_platform(mode):
 def test_event_and_legacy_scheduling_agree():
     """The whole point: scheduling changes speed, never results.
 
-    Compares outputs, cycle count, per-bank utilisation and every systolic
-    array counter -- per-bank cycles_busy is the sharpest probe available,
-    since it shifts if any operation completes on a different cycle.
+    Compares outputs, cycle count, every pad's read, write and stall counts,
+    and every systolic array counter -- the stall count shifts if any request
+    is accepted on a different cycle.
     """
     assert _run_platform("event") == _run_platform("legacy")
