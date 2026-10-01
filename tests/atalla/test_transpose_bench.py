@@ -1,18 +1,21 @@
 """The two transpose testbenches: runtime of one rows x 32 tile.
 
-The expected counts are built from the unit's own costs, not read back off a
-run: 4 cycles per row pushed (3 through the Clos network, 1 bank write) and
-4 per column popped (1 bank read, 3 back through the network). A pop always
-drains all 32 columns, so it costs 128 cycles whatever the tile height.
+The expected counts are built from the unit's own costs, which match the RTL
+cycle for cycle (test_transpose_rtl_trace.py), not read back off a run:
+9 cycles per row pushed (accept, 3 in the Clos network, 5 until the bank's
+write done) and 8 per column popped (POPPING, 3 until read done, 3 in the
+network, DONE). A pop always drains all 32 columns, so it costs 256 cycles
+whatever the tile height.
 Every bench also checks the transposed data, so these are correctness tests
 too.
 """
 import pytest
 
 from atalla.transpose_bench import run_spad_bench, run_vrf_bench
+from vector_core.transpose import TransposeUnit
 
-PUSH = 4
-DRAIN = 32 * 4
+PUSH = TransposeUnit().push_cycles                  # 9
+DRAIN = 32 * TransposeUnit().column_cycles          # 256
 #: Spad bench, overlapped: from the first load's issue until the unit takes
 #: row 0 (the load's round trip), and from the last column's writeback until
 #: its store has committed to the pad's banks.
@@ -22,8 +25,9 @@ STORE_TAIL = 4
 
 @pytest.mark.parametrize("rows", [1, 8, 32])
 def test_vrf_bench_costs_the_unit_and_nothing_more(rows):
-    """VRF -> transpose -> VRF: pushes go back to back, each column commits
-    to the register file as it leaves, so the core adds no cycles."""
+    """VRF -> transpose -> VRF: pushes go back to back, the pop is taken the
+    cycle the last push finishes, and each column commits to the register
+    file as it leaves, so the core adds no cycles."""
     r = run_vrf_bench(rows)
     assert r.cycles == PUSH * rows + DRAIN
     assert len(r.events["col_wb"]) == 32
@@ -34,8 +38,8 @@ def test_vrf_bench_costs_the_unit_and_nothing_more(rows):
 @pytest.mark.parametrize("rows", [1, 8, 32])
 def test_spad_bench_hides_loads_and_stores_under_the_unit(rows):
     """Loads arrive every 2 cycles and stores leave every 2, both faster than
-    the unit's 4 a vector, so with overlap only the first load and the last
-    store show: 6 cycles before the transpose and 4 after it."""
+    the unit's 9 a row and 8 a column, so with overlap only the first load
+    and the last store show: 6 cycles before the transpose and 4 after it."""
     r = run_spad_bench(rows, load_window=4)
     assert r.cycles == LOAD_LEAD + PUSH * rows + DRAIN + STORE_TAIL
 

@@ -1,8 +1,9 @@
 """The transpose unit: skewed SRAM storage plus a Clos rotation.
 
-Covers what the architecture doc specifies -- that a tile pushed row by row
-pops back column by column, that each vector costs 3 cycles in either
-direction, and that one pop request drains the whole tile.
+Covers that a tile pushed row by row pops back column by column, that one
+pop request drains the whole tile, and the RTL's costs: 9 cycles a row in, 8
+a column out. test_transpose_rtl_trace.py checks the same model against the
+RTL itself, every cycle of its testbench.
 """
 import pytest
 
@@ -10,7 +11,7 @@ from memory.crossbar import Xbar
 from vector_core.transpose import (
     BUSY_WRITE, CLOS_LATENCY, DONE, IDLE, POPPING, SRAM_READ_LATENCY,
     SRAM_WRITE_LATENCY, TRANSPOSE_VEC_LEN, TransposeUnit, WAIT_CLOS_READ,
-    WAIT_CLOS_WRITE,
+    WAIT_CLOS_WRITE, WAIT_SRAM, bank_done_delay,
 )
 
 N = TRANSPOSE_VEC_LEN
@@ -75,26 +76,42 @@ def test_pushed_rows_pop_back_as_columns():
     assert [e["data"] for e in drv.columns] == transposed(rows, N)
 
 
-def test_each_vector_costs_the_network_plus_one_bank_access():
-    """A vector costs the Clos traversal plus one SRAM access, each way, and
-    nothing else -- whatever those two latencies are set to."""
+def test_a_row_costs_9_cycles_and_a_column_8():
+    """The RTL's numbers, with its bank latencies (read 2, write 4):
+    push   = accept + 3 in the network + 5 until the bank's write done
+    column = POPPING + 3 until read done + 3 in the network + DONE.
+    A column is taken in the cycle it reaches DONE, so a full drain hands the
+    last one over 32 * 8 cycles after the pop is taken."""
     unit = TransposeUnit()
+    assert (SRAM_READ_LATENCY, SRAM_WRITE_LATENCY, CLOS_LATENCY) == (2, 4, 3)
+    assert unit.push_cycles == 1 + 3 + 5 == 9
+    assert unit.column_cycles == 1 + 3 + 3 + 1 == 8
     drv = Driver(unit)
 
     for row in tile(N):
-        assert drv.push(row) == CLOS_LATENCY + SRAM_WRITE_LATENCY
+        assert drv.push(row) == 9
 
-    assert drv.drain() == N * (SRAM_READ_LATENCY + CLOS_LATENCY)
+    assert drv.drain() == N * 8
 
 
 def test_latencies_are_parameters():
-    slow = TransposeUnit(vec_len=4, clos_latency=3, sram_read_latency=2,
-                         sram_write_latency=4)
-    drv = Driver(slow)
-    assert drv.push([1.0, 2.0, 3.0, 4.0]) == 3 + 4
+    unit = TransposeUnit(vec_len=4, clos_latency=4, sram_read_latency=1,
+                         sram_write_latency=6)
+    assert unit.push_cycles == 1 + 4 + 7
+    assert unit.column_cycles == 1 + 1 + 4 + 1
+    drv = Driver(unit)
+    assert drv.push([1.0, 2.0, 3.0, 4.0]) == 12
     for row in tile(3, 4):
         drv.push(row)
-    assert drv.drain() == 4 * (2 + 3)
+    assert drv.drain() == 4 * 7
+
+
+@pytest.mark.parametrize("latency,delay", [(0, 1), (1, 1), (2, 3), (4, 5)])
+def test_bank_done_follows_sram_bank(latency, delay):
+    """sram_bank raises done one cycle after the enable for a latency of 0 or
+    1, and latency + 1 cycles after for anything longer -- so 1 -> 2 costs
+    two extra cycles, not one."""
+    assert bank_done_delay(latency) == delay
 
 
 def test_one_pop_request_drains_the_whole_tile():
@@ -161,9 +178,11 @@ def test_a_busy_unit_refuses_a_push():
 def test_the_clos_network_is_the_repo_crossbar():
     """Both rotations are permutations across banks, so the network is an Xbar
     and every vector, either direction, is one request through it."""
-    unit = TransposeUnit(vec_len=4, clos_latency=2)
+    unit = TransposeUnit(vec_len=4)
     assert isinstance(unit.clos, Xbar)
-    assert unit.clos.delay == 2 and unit.clos.num_banks == 4
+    # A 3-stage pipe: input, center and output modules, two latches between.
+    assert unit.clos.delay == CLOS_LATENCY == 3
+    assert unit.clos.num_banks == 4
 
     drv = Driver(unit)
     for row in tile(4, 4):
@@ -176,27 +195,26 @@ def test_the_clos_network_is_the_repo_crossbar():
 
 
 def test_output_backpressure_parks_the_fsm_in_done():
-    """valid_out is held until the consumer takes the column."""
-    unit = TransposeUnit(vec_len=4, out_depth=1)
+    """There is no output queue: DONE holds valid_out, and the column, until
+    the consumer takes it. Every cycle it waits is a cycle on the drain."""
+    unit = TransposeUnit(vec_len=4)
     drv = Driver(unit)
     for row in tile(4, 4):
         drv.push(row)
 
     assert unit.pop()
-    # Tick without draining: the first column lands, the second cannot.
-    for _ in range(20):
+    for _ in range(20):                     # tick without taking anything
         unit.tick(float(drv.cycle))
         drv.cycle += 1
-    assert unit.state == DONE and unit.valid_out
-    assert unit.outputs.is_full()
-    # DONE is the crossbar holding its tail, so it shows up as a retire stall.
-    assert unit.clos.total_retire_stalls > 0
+    assert unit.state == DONE and unit.valid_out and unit.count == 0
 
+    start = drv.cycle
     taken = unit.pop_writeback()
-    assert taken["col"] == 0
+    assert taken["col"] == 0 and not unit.valid_out
     while len(drv.columns) < 3:
         drv.step()
     assert [e["col"] for e in drv.columns] == [1, 2, 3]
+    assert drv.cycle - start == 3 * unit.column_cycles
 
 
 def test_pop_destinations_ride_along():
@@ -222,24 +240,24 @@ def test_the_fsm_walks_the_states_the_doc_names():
     assert unit.state == IDLE
     assert unit.push([1.0] * 4)
 
-    # The row sits in the network for clos_latency cycles. A 1-cycle bank then
-    # takes it on the cycle it emerges, so BUSY_WRITE is skipped entirely.
-    span = CLOS_LATENCY + 1
-    assert _walk(unit, span) == [WAIT_CLOS_WRITE] * CLOS_LATENCY + [IDLE]
+    # 3 cycles in the network, the write enable on the last, then BUSY_WRITE
+    # until the bank says done (5 cycles for a latency of 4).
+    assert _walk(unit, 9) == \
+        [WAIT_CLOS_WRITE] * 3 + [BUSY_WRITE] * 5 + [IDLE]
 
     assert unit.pop()
-    # POPPING reads the bank, then the column crosses the network and is handed
-    # over on the cycle it arrives, which is when the next column starts.
-    assert _walk(unit, span, start=span) == \
-        [WAIT_CLOS_READ] * CLOS_LATENCY + [POPPING]
+    # POPPING enables the read, WAIT_SRAM waits for done (3 cycles for a
+    # latency of 2), the column crosses the network, and DONE holds it.
+    assert _walk(unit, 9, start=9) == \
+        [POPPING] + [WAIT_SRAM] * 3 + [WAIT_CLOS_READ] * 3 + [DONE] * 2
 
 
-def test_busy_write_holds_a_multi_cycle_bank():
-    unit = TransposeUnit(vec_len=4, clos_latency=2, sram_write_latency=3)
+def test_busy_write_lasts_until_the_bank_is_done():
+    unit = TransposeUnit(vec_len=4, clos_latency=2, sram_write_latency=1)
     assert unit.push([1.0] * 4)
-    assert _walk(unit, 5) == [
+    assert _walk(unit, 4) == [
         WAIT_CLOS_WRITE, WAIT_CLOS_WRITE,   # 2 cycles in the network
-        BUSY_WRITE, BUSY_WRITE,             # then the bank, 3 cycles from here
+        BUSY_WRITE,                         # done one cycle after the enable
         IDLE,
     ]
 
