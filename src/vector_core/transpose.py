@@ -15,9 +15,9 @@ delay. It also supplies the output-side backpressure -- a column whose
 consumer has no room is held in the network's tail, which is the FSM's DONE
 state.
 
-Cost is 3 cycles per vector each way: 2 through the network plus 1 SRAM
-access. Pushing an M-row matrix costs 3M cycles. One pop request drains the
-whole tile -- VEC_LEN columns, 3 * VEC_LEN cycles -- without a per-column
+Cost is 4 cycles per vector each way: 3 through the network plus 1 SRAM
+access. Pushing an M-row matrix costs 4M cycles. One pop request drains the
+whole tile -- VEC_LEN columns, 4 * VEC_LEN cycles -- without a per-column
 request.
 
 API
