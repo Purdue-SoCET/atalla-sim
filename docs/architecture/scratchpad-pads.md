@@ -86,9 +86,10 @@ done (latency 2 + 1), and the bank ignores enables while busy. The shared model
 is `memory/sram_bank.py`. There is no crossbar any more: the RTL's `wxbar` and
 `rxbar` are FIFO pass-throughs, so the model has none and no swizzle.
 
-Capacity differs from the RTL. `scpad_params.svh` has 1 MB per pad
-(`SCPAD_SIZE_BYTES`), 4 MB in all; the platform here builds 0.5 MB pads,
-2 MB in all, and nothing in the timing depends on which.
+The intended size is 4 pads x 0.5 MB = 2 MB, which is what the platform builds.
+The RTL's `scpad_params.svh` on `transpose_integration` has `SCPAD_SIZE_BYTES`
+at 1 MB per pad (4 MB in all); that parameter is what disagrees. Nothing in
+the timing depends on the pad size.
 
 ## Roles
 
