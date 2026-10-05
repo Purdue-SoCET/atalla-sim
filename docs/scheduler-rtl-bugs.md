@@ -29,7 +29,7 @@ serve as the reference for them. Each entry says what it models instead.
 | 5 | High | `v_wb_arbiter.sv`, `reggie.sv` | Vector WB ports and VRF banks use different register bits; a resulting write conflict loses or corrupts the write |
 | 6 | Medium | `dependency_checker.sv` | Mask writes from vector slots 2–3 are never tracked; `mv.stm` is never WAW-checked |
 | 7 | Medium | `decode_2.sv` | `sqrt.bf` can issue into a busy EX2 |
-| 8 | Medium | `dcache/cache_bank.sv` | A store miss to words 0–1 of a block shifts the fill by one beat |
+| 8 | Medium | `dcache/cache_bank.sv` | A store miss to words 0–1 of a block shifts the fill by one beat when memory is busy |
 | 9 | Medium | `dcache/` | 1-bit miss tag for 8 MSHRs; merges overwrite the tag; the LSU ignores it |
 | 10 | Medium | `dcache/cache_bank.sv` | Hits have strict priority on the SRAM and can starve a fill |
 | 11 | Medium | `decode_2.sv` | The EXP unit's readiness is ignored |
@@ -182,17 +182,21 @@ wait for EX2.
 **What:** In BLOCK_PULL, a word pair holding a pending store's word advances
 the counter *without waiting for* `ram_mem_complete`, and takes the pair's
 other word from `ram_mem_data` as it stands. That's only right if that pair's
-beat is on the bus in the same cycle. The memory (`sim_ram_rr`) bursts 8
-beats, one per cycle, after a start-up latency. So a store miss to word 0 or
-1 advances the counter before the first beat has arrived: the pair's other
-word gets garbage, and every later pair consumes the previous pair's beat.
+beat is on the bus in the same cycle. `sim_ram_rr` serves a granted
+data-cache burst's first beat in the request cycle and the other seven on the
+next seven, so with the bus free the beats line up and nothing goes wrong.
+When the burst's start is delayed, for example by a scratchpad holding the
+`sim_ram_rr` bus lock or by any memory with latency, a store miss to word 0
+or 1 advances the counter before the first beat arrives. The pair's other
+word gets whatever is on the bus, and every later pair takes the previous
+pair's beat.
 
-**Effect:** For a store miss to the first pair of a block, the block is
-filled shifted by one beat, which corrupts it. The last pair is exempt (its
-condition excludes `BLOCK_SIZE - 2`).
+**Effect:** For a store miss to the first pair of a block, when the memory
+is busy or slow, the block is filled shifted by one beat and is corrupt. The
+last pair is exempt (its condition excludes `BLOCK_SIZE - 2`).
 
-**Check:** Store a word to offset 0 of an uncached block, then load offsets
-2–15 and compare with memory.
+**Check:** Store to offset 0 of an uncached block *while a scratchpad DMA
+holds the memory*, then load offsets 2–15 and compare with memory.
 
 **Sim:** the fill consumes every beat in order, and merges the store's words
 over them.
