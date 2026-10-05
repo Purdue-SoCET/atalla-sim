@@ -7,7 +7,7 @@ on icache.sv / fetch.sv -- not with itself.
 import pytest
 
 from scheduler import golden
-from scheduler.core import SchedulerCore, load_program_text
+from scheduler.core import SchedulerCore as _SchedulerCore, load_program_text
 from scheduler.decode1 import (
     NONE, SCALAR, SCPAD, VECTOR, classify, decode1, slot_word)
 from scheduler.fetch import NOP_INST, NOP_PACKET, btb_index, btb_tag
@@ -15,6 +15,15 @@ from scheduler.icache import split_address
 from scheduler.isa import INST_W, OPCODES
 
 OP = {m: op for op, (m, _) in OPCODES.items()}
+
+
+def SchedulerCore(*args, **kwargs):
+    """The front end alone. With no execute stage, nothing writes back, so a
+    real decode 2 would hold every packet that reads an earlier one's result;
+    these tests force it ready (or stalled, per test) instead."""
+    core = _SchedulerCore(*args, strict=False, **kwargs)
+    core.decode2_override = True
+    return core
 
 
 def r_type(name, rd=1, rs1=2, rs2=3):
@@ -93,9 +102,9 @@ def test_a_stalled_decode2_loses_and_duplicates_nothing():
     core = SchedulerCore(straight_line(20))
     core.warm_icache()
     core.run(3)
-    core.decode2_ready = False
+    core.decode2_override = False
     core.run(6, start=3)
-    core.decode2_ready = True
+    core.decode2_override = True
     core.run(10, start=9)
     pcs = [pc for _, pc in core.issued_to_d1d2]
     assert pcs == list(range(0, 20 * len(pcs), 20)), "a gap or a repeat"
@@ -106,7 +115,7 @@ def test_bubbles_collapse_into_empty_latches():
     fill -- one packet each -- before fetch stops."""
     core = SchedulerCore(straight_line(10))
     core.warm_icache()
-    core.decode2_ready = False
+    core.decode2_override = False
     core.run(10)
     assert core.d1d2.valid and core.ifd1.valid
     assert core.d1d2.pc == 0 and core.ifd1.pc == 20
@@ -187,7 +196,7 @@ def test_flush_clears_every_slot_in_d1d2():
     add_vv = r_type("add.vv")
     core = SchedulerCore({0: packet(r_type("add.s"), add_vv, ld)})
     core.warm_icache()
-    core.decode2_ready = False
+    core.decode2_override = False
     core.run(3)
     assert core.d1d2.valid and core.d1d2.vector[1] == add_vv
     assert core.d1d2.sdma[0] == ld

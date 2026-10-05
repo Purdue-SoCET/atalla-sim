@@ -4,20 +4,27 @@ Owns every pipeline stage as an RTLModule and drives them in three phases per
 cycle -- settle readiness, settle data and next state, commit -- so that no
 stage's view of another depends on the order they were ticked in.
 
-Stage 2 covers the front end:
+Stages 2 and 3 cover the front end and decode 2:
 
-    PC --> [ icache | BTB ] --> IF/D1 latch --> decode1 --> D1/D2 latch
-                                                            |
-                                                   (decode2 in stage 3)
+    PC --> [ icache | BTB ] --> IF/D1 --> decode1 --> D1/D2 --> decode2 --> D2/EX
+                                                                 |
+                                                       (execute in stage 4)
 
 The signals the later stages will produce are attributes for now, set by
 whoever drives the core -- tests, today:
 
-    decode2_ready      decode_2.sv's `ready`: may D1/D2 hand a packet on
     redirect_valid     execute's redirect: flush and jump, and write the BTB
     redirect_target    where to jump
     redirect_pc        the branch's own PC, which is what the BTB is written at
     internal_halt      execute's internal_halt
+    ex_ready           {1..5: bool}, each scalar execute unit's ready
+    vector_ready       {"alu", "mul", "reduction", "gsau", "movement": bool}
+    vlsu_ready         [bool] * 4, one VLSU per scratchpad
+    scpad_busy         [bool] * 4
+    writeback_at()     queue a writeback (scalar value, vector/mask register,
+                       or an SDMA's completion) for a given cycle's EX/WB latch
+    decode2_override   None, or force decode 2's ready -- for front-end tests
+                       that have no execute stage to clear their hazards
 
 Each latch accepts when the stage after it is ready OR when it is empty, so
 bubbles collapse instead of blocking:
@@ -31,6 +38,7 @@ from typing import Dict, Iterable, Optional
 
 from base.clocked_object import Clocked
 from scheduler.decode1 import D1D2Latch
+from scheduler.decode2 import Decode2
 from scheduler.fetch import BTB, Fetch, IFD1Latch
 from scheduler.icache import ICache
 from scheduler.isa import PACKET_BYTE_W
@@ -72,7 +80,8 @@ def load_program_text(text: str):
 class SchedulerCore(Clocked):
 
     def __init__(self, program: Optional[Dict[int, int]] = None, *,
-                 icache_first_beat_wait: int = 0, icache_beat_wait: int = 0):
+                 icache_first_beat_wait: int = 0, icache_beat_wait: int = 0,
+                 strict: bool = True):
         super().__init__()
         self._tick = -1
         self.program: Dict[int, int] = dict(program or {})
@@ -83,10 +92,17 @@ class SchedulerCore(Clocked):
         self.fetch = Fetch("fetch")
         self.ifd1 = IFD1Latch("ifd1")
         self.d1d2 = D1D2Latch()
-        self._modules = (self.icache, self.btb, self.fetch, self.ifd1, self.d1d2)
+        self.decode2 = Decode2(strict=strict)
+        self._modules = (self.icache, self.btb, self.fetch, self.ifd1, self.d1d2,
+                         self.decode2)
 
         # Inputs from stages that do not exist yet.
-        self.decode2_ready = True
+        self.decode2_override: Optional[bool] = None
+        self.ex_ready = {u: True for u in range(1, 6)}
+        self.vector_ready = {}
+        self.vlsu_ready = [True] * 4
+        self.scpad_busy = [False] * 4
+        self._wb_due: Dict[int, Dict[str, list]] = {}
         self.redirect_valid = False
         self.redirect_target = 0
         self.redirect_pc = 0
@@ -100,6 +116,10 @@ class SchedulerCore(Clocked):
         self.flushes = 0
         #: Every packet that entered the D1/D2 latch, as (cycle, pc).
         self.issued_to_d1d2 = []
+        #: The D2/EX latch: the packet decode 2 issued last cycle, or None.
+        self.d2ex = None
+        #: Every packet decode 2 issued, as (cycle, IssuedPacket).
+        self.issued = []
 
     @property
     def pc(self) -> int:
@@ -111,6 +131,18 @@ class SchedulerCore(Clocked):
     def warm_icache(self, addresses: Optional[Iterable[int]] = None) -> None:
         self.icache.warm(self.program if addresses is None else addresses)
 
+    def writeback_at(self, cycle: int, scalar=(), vector=(), mask=(), sdma=()) -> None:
+        """Put writebacks in the EX/WB latch for `cycle`: scalar (reg, value)
+        pairs, vector and mask registers, and SDMA completions (the rs1 an
+        SDMA held). They reach the register file and clear their busy bits
+        on that cycle's edge."""
+        due = self._wb_due.setdefault(int(cycle), {"scalar": [], "vector": [],
+                                                   "mask": [], "sdma": []})
+        due["scalar"] += [(int(r), int(v)) for r, v in scalar]
+        due["vector"] += [int(r) for r in vector]
+        due["mask"] += [int(r) for r in mask]
+        due["sdma"] += [int(r) for r in sdma]
+
     # -- one cycle ---------------------------------------------------------
     def tick(self, time: Optional[Time] = None) -> None:
         cycle = self._consume_tick(time, attr_name="_tick")
@@ -121,8 +153,26 @@ class SchedulerCore(Clocked):
     def _step(self, cycle: int) -> None:
         flush, halt = bool(self.redirect_valid), bool(self.internal_halt)
 
+        # Decode 2 first: its ready closes the backpressure chain.
+        d2, d = self.decode2, self.d1d2
+        wb = self._wb_due.pop(cycle, {})
+        d2.in_scalar, d2.in_vector, d2.in_sdma = d.scalar, d.vector, d.sdma
+        d2.in_valid, d2.in_pc = d.valid, d.pc
+        d2.in_pc_pred_addr, d2.in_predict_taken = d.pc_pred_addr, d.predict_taken
+        d2.in_flush, d2.in_halt = flush, halt
+        d2.in_ex_ready, d2.in_vector_ready = self.ex_ready, self.vector_ready
+        d2.in_vlsu_ready, d2.in_scpad_busy = self.vlsu_ready, self.scpad_busy
+        d2.in_wb_scalar = wb.get("scalar", [])
+        d2.in_wb_vector = wb.get("vector", [])
+        d2.in_wb_mask = wb.get("mask", [])
+        d2.in_wb_sdma = wb.get("sdma", [])
+        d2.eval_ready()
+        if self.decode2_override is not None:
+            d2.out_ready = bool(self.decode2_override)
+        decode2_ready = d2.out_ready
+
         # Readiness, back to front.
-        d1d2_ready = bool(self.decode2_ready or not self.d1d2.valid)
+        d1d2_ready = bool(decode2_ready or not self.d1d2.valid)
         ifd1_ready = bool(d1d2_ready or not self.ifd1.valid)
 
         f = self.fetch
@@ -145,10 +195,10 @@ class SchedulerCore(Clocked):
         b.in_pc_update, b.in_true_target = self.redirect_pc, self.redirect_target
         b.eval_data()
 
-        # D1/D2 reads the IF/D1 latch's *current* contents, so it is settled
-        # from registers alone and the order against the IF/D1 update does
-        # not matter.
-        d = self.d1d2
+        # Decode 2 reads the D1/D2 latch's current contents; D1/D2 reads the
+        # IF/D1 latch's. Both are settled from registers alone, so the order
+        # against the latches' updates does not matter.
+        d2.eval_data()
         i = self.ifd1
         d.in_flush, d.in_halt, d.in_ready = flush, halt, d1d2_ready
         d.in_packet, d.in_pc, d.in_valid = i.inst_packet, i.pc, i.valid
@@ -163,6 +213,9 @@ class SchedulerCore(Clocked):
         i.eval_data()
 
         self._count(cycle, flush, halt, d1d2_ready, ifd1_ready, bhit)
+        self.d2ex = d2.out_issued
+        if self.d2ex is not None:
+            self.issued.append((cycle, self.d2ex))
         for m in self._modules:
             m.commit()
 
