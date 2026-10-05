@@ -19,6 +19,8 @@ does not reproduce the bug:
   * lw.vi sets vector_reg_write with vd = [14:7], but a weight load writes
     no vector register (the GSAU only raises weight_en). The scoreboard
     would mark vd busy and nothing would ever clear it. Here it writes none.
+  * A branch's increment, [13:7], is unsigned 0..127 -- the assembler
+    rejects anything else -- but the RTL sign-extends it. Here it is unsigned.
   * sqrt.bf's unit, sqrt_valid, is routed to EX2 by the execute crossbar
     but missing from decode_2's EX2 structural check, so a sqrt could issue
     into a busy EX2. Here it needs EX2 like the other EX2 operations.
@@ -229,7 +231,7 @@ def decode_scalar(word: int, slot: int = 0) -> ScalarOp:
     elif m in _BRANCHES:
         d.valid, d.fu, d.imm_src = True, CONTROL, True
         d.imm = sign_extend((get_bits(word, 14, 14) << 9) | get_bits(word, 39, 31), 10)
-        d.incr7 = sign_extend(get_bits(word, 13, 7), 7)
+        d.incr7 = get_bits(word, 13, 7)        # unsigned, as build.py encodes it
         d.use_rs1, d.use_rs2, d.reg_write = True, True, True
         d.rd = d.rs1                           # rs1 += incr7
     elif m == "jal":

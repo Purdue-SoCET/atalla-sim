@@ -47,3 +47,38 @@ def require(pytest_module) -> None:
     """Skip the calling test when the golden reference is unavailable."""
     if not HAVE_GOLDEN:
         pytest_module.skip("functional sim unavailable (%s)" % load_error)
+
+
+def run_golden(instr, data=None, workdir=None, packet_length: int = 4):
+    """Run a program image on the functional sim; return (scalar registers,
+    data memory) at halt, as plain dicts.
+
+    `instr` and `data` are the images load_program_text returns. The sim
+    writes its dump files into `workdir` (a temporary directory if None).
+    """
+    if not HAVE_GOLDEN:
+        raise RuntimeError("functional sim unavailable (%s)" % load_error)
+    import tempfile
+    from src.functional_sim import run
+    from src.misc.memory import Memory
+    from src.components.scalar_register_file import ScalarRegisterFile, mask_register_file
+    from src.components.vector_register_file import VectorRegisterFile
+    from src.components.execute import ExecuteUnit
+    from src.components.scpad import Scratchpad
+
+    mem = Memory()
+    mem.instr_mem = dict(instr)
+    mem.data_mem = dict(data or {})
+    sregs = ScalarRegisterFile()
+    tmp = tempfile.TemporaryDirectory() if workdir is None else None
+    out = Path(workdir if workdir is not None else tmp.name)
+    names = ["mem", "sregs", "vregs", "mregs", "scpad0", "scpad1", "perf"]
+    files = [str(out / ("%s.out" % n)) for n in names]
+    try:
+        run(mem, sregs, mask_register_file(), VectorRegisterFile(),
+            Scratchpad(slots_per_bank=32), Scratchpad(slots_per_bank=32), ExecuteUnit(),
+            0, packet_length, *files)
+    finally:
+        if tmp is not None:
+            tmp.cleanup()
+    return dict(sregs.regs), dict(mem.data_mem)

@@ -21,7 +21,7 @@ def SchedulerCore(*args, **kwargs):
     """The front end alone. With no execute stage, nothing writes back, so a
     real decode 2 would hold every packet that reads an earlier one's result;
     these tests force it ready (or stalled, per test) instead."""
-    core = _SchedulerCore(*args, strict=False, **kwargs)
+    core = _SchedulerCore(*args, strict=False, execute=False, **kwargs)
     core.decode2_override = True
     return core
 

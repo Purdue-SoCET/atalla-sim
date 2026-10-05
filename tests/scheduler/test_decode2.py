@@ -57,7 +57,7 @@ def slot0(word):
 
 def run(program, cycles=20, setup=None, strict=True):
     """A warm core running `program`; returns (core, {pc: issue cycle})."""
-    core = SchedulerCore(program, strict=strict)
+    core = SchedulerCore(program, strict=strict, execute=False)
     core.warm_icache()
     if setup:
         setup(core)
@@ -275,7 +275,7 @@ def test_a_flushed_packet_reserves_nothing():
         core.tick(2.0)
         core.redirect_valid = False
         core.warm_icache([200])
-    core = SchedulerCore(prog)
+    core = SchedulerCore(prog, execute=False)
     core.warm_icache()
     redirect_at_2(core)
     core.run(6, start=3)
@@ -328,7 +328,7 @@ def test_conflicts_are_only_served_once_the_operands_are_free():
 def test_a_busy_execute_unit_holds_the_packet():
     def setup(core):
         core.ex_ready[4] = False
-    core = SchedulerCore({0: packet(r("mul.s", 1, 2, 3)), 20: packet(r("add.s", 4, 5, 6))})
+    core = SchedulerCore({0: packet(r("mul.s", 1, 2, 3)), 20: packet(r("add.s", 4, 5, 6))}, execute=False)
     core.warm_icache()
     setup(core)
     core.run(5)
