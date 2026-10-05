@@ -31,16 +31,26 @@ serve as the reference for them. Each entry says what it models instead.
 | 7 | Medium | `decode_2.sv` | `sqrt.bf` can issue into a busy EX2 |
 | 8 | Medium | `dcache/cache_bank.sv` | A store miss to words 0–1 of a block shifts the fill by one beat when memory is busy |
 | 9 | Medium | `dcache/` | 1-bit miss tag for 8 MSHRs; merges overwrite the tag; the LSU ignores it |
-| 10 | Medium | `dcache/cache_bank.sv` | Hits have strict priority on the SRAM and can starve a fill |
+| 10 | Medium | `dcache/cache_bank.sv` | The FSMs and `sram_bank` disagree on when an SRAM access is taken: stray accesses, a fill can latch another set, and lookups can starve a fill |
 | 11 | Medium | `decode_2.sv` | The EXP unit's readiness is ignored |
 | 12 | Contract | `xbar_4x5_exec_comb.sv` | Two ops for one scalar EX unit: the second is dropped; EX1 is both ALU and control |
 | 13 | Contract | `source_reg_allocator.sv` | Reads beyond the ports are zeroed, and escape the dependency check |
 | 14 | Contract | `scheduler_core.sv` | Extra lane, GSAU, VLSU or SDMA ops in a packet are dropped or overwritten |
 | 15 | Low | `dcache/cache_bank.sv` | A fill starts a RAM burst even when it needs no RAM data |
 | 16 | Doc | several | Stale comments and inverted names |
+| 17 | Medium | `dcache/cache_bank.sv`, `ld_st_unit.sv` | A request made while the dcache SRAM is busy is never answered |
+| 18 | Medium | `dcache/cache_mshr_buffer.sv` | A miss with the MSHR buffer full is reported as a miss but never recorded |
+| 19 | Medium | `dcache/` | A miss merged after its entry's fill has started is never applied |
+| 20 | High | `execute_stage.sv` | Load and store addresses ignore the base register: the address is the immediate alone |
+| 21 | High | `control.sv` | `jal` and `jalr` scale their byte offset by 4 |
+| 22 | Medium | `scalar_control_unit.sv` | A branch's increment is sign-extended; the assembler encodes 0..127 |
 
-Bugs 9 and 10 can't show up today, because the load/store unit (EX5) is
-blocking: it never has more than one miss outstanding. They become real as
+Bugs 9, 10 and 17–19 can't show up today, because the load/store unit (EX5) is
+blocking. It never has more than one miss outstanding, and it never sends a
+request while a fill is using the SRAM. In today's configuration the
+blocking LSU is correct, just not lockup-free. These bugs are in the cache's
+lockup-free machinery, and they block making the LSU non-blocking. Of the
+dcache bugs, only 8 can show up today. They become real as
 soon as the LSU is made non-blocking, which is what the cache was built for.
 
 ## Details
@@ -198,8 +208,8 @@ last pair is exempt (its condition excludes `BLOCK_SIZE - 2`).
 **Check:** Store to offset 0 of an uncached block *while a scratchpad DMA
 holds the memory*, then load offsets 2–15 and compare with memory.
 
-**Sim:** the fill consumes every beat in order, and merges the store's words
-over them.
+**Sim:** the fill takes each beat when memory delivers it (the memory's
+first-beat latency is a parameter), then applies the MSHR's stores on top.
 
 ### 9. The miss tag can't tell misses apart — Medium, Reading
 
@@ -220,21 +230,59 @@ With a non-blocking LSU, requesters wake on the wrong fill or never wake.
 returns the existing entry's tag, and that each requester completes on its
 own tag.
 
-**Sim:** the dcache is modelled as a real lockup-free cache. Each miss has
-its own tag, a merge shares the existing entry's tag, and each requester
-completes on its own fill.
+**Sim:** `src/scheduler/dcache.py` is a lockup-free cache with MSHRs. Every
+request carries the requester's own id and is answered with it: loads on a
+hit or when their fill completes, stores on a hit or as soon as the MSHR
+holds them.
 
-### 10. Hits can starve a fill — Medium, Reading
+### 10. The FSMs and the SRAM disagree on when an access is taken — Medium, Reading
 
-**Where:** `modules/scheduler/dcache/cache_bank.sv:83` (`assign hc_grant = hc_sram_req; // strict priority`).
+**Where:** `modules/scheduler/dcache/cache_bank.sv`:
+- `:83-87`: the SRAM enables are driven from the grant alone, without `!sram_busy`;
+- `:170, :200, :466, :481, :500`: each FSM only advances on `grant && !sram_busy`;
+- `:96`: `main_sram_rdone = sram_rdone && !hc_sram_rdone`;
+- `:295-296`: the miss FSM loads `sram_rdata` into its set copy on any `main_sram_rdone`, in every state.
 
-**What:** The hit-check FSM always wins the SRAM over the miss FSM.
+`modules/scheduler/dcache/sram_bank.sv`:
+- `:32`: `busy = r_busy || w_busy`;
+- `:42, :68`: each channel starts an access whenever *that channel* is idle;
+- `:91-95`: `rdata` is loaded and the array written on *every* enable, busy or not.
 
-**Effect:** None while the LSU is blocking. With hits arriving under a miss,
-a steady stream of hits stops the fill from ever getting the SRAM.
+**What:** An FSM waiting for the SRAM keeps its enable high while `busy` is
+high. If the busy channel is the *other* one, the SRAM performs the access,
+but the FSM hasn't advanced, so it doesn't know. Then:
+- **Stray accesses:** the access is repeated every time its channel frees up.
+- **Done stolen:** a read the hit-check FSM issued from HC_IDLE completes
+  while that FSM is not in HC_WAIT_READ. `:96` then gives the done to the
+  miss FSM, which overwrites its copy of the victim set with the *other*
+  set's contents. FINISH_WRITE (`:380-382`, `:447`) writes that copy back to
+  the victim set: lines of one set appear in another under their own tags,
+  and the set's real lines, dirty ones included, are lost.
+- **Lookup reads the wrong set:** while the hit-check FSM waits in
+  HC_WAIT_READ, it isn't requesting, so the miss FSM is granted. If the
+  miss FSM is in ADDRESS_READ (or FLUSH_READ), its `ren` reaches the SRAM
+  every cycle, and `:91-92` reloads `rdata` with the miss FSM's set. The
+  hit-check FSM latches that in its done cycle (`:178`) and evaluates the
+  request against the wrong set. A load can get a false miss, or a false
+  hit that returns another line's data. The typical case is the first
+  lookup after a miss: the miss FSM enters ADDRESS_READ the cycle after the
+  miss, the same cycle the next lookup is taken.
+- **Starvation:** with strict hit priority (`:83`), a lookup and a fill keep
+  each other's channel busy in turn, so `!sram_busy` is never true when the
+  fill asks. A steady stream of lookups stops a fill in FINISH_WRITE (or any
+  other SRAM state) indefinitely.
 
-**Check:** One miss, then back-to-back hits to another block. The fill must
-complete within a bound.
+**Effect:** None while the LSU is blocking, because a lookup and a fill never
+overlap. With hits under a miss, data is corrupted and fills stall.
+
+**Check:** Assert `sram_ren`/`sram_wen` imply the issuing FSM advances in
+the same cycle. Assert every `sram_rdone` arrives while the FSM that issued
+the read is in its wait state. Test: a miss, then back-to-back loads that
+hit in another set until the fill completes, with a bound on the fill time.
+
+**Sim:** each FSM raises an enable only when it is taken, and a done goes to
+the FSM that issued the read. Lookups have priority, and the fill gets the
+SRAM in the cycle a lookup's read completes, so it can't be starved.
 
 ### 11. The EXP unit's readiness is ignored — Medium, Reading
 
@@ -297,6 +345,8 @@ VLSU op and one SDMA per scratchpad, per packet.
 **Effect:** Wasted memory bandwidth, and a stray burst that could overlap
 the next fill's.
 
+**Sim:** a fill whose block is already present skips the burst.
+
 ### 16. Stale comments and inverted names — Doc
 
 | Where | Says | Is |
@@ -306,6 +356,138 @@ the next fill's.
 | `decode2/scalar_control_unit.sv:242` | "Branch ops — no reg_write" | they set `reg_write` and write rs1 (`rs1 += incr7`) |
 | `decode2/dependency_checker.sv:26` | `*_halt_ready = \|table` | high while something is still *busy* |
 | `scheduler_core.sv:260` | TODO: connect STM to the vector WB | the scalar-to-mask path looks connected; confirm |
+
+### 17. A request made while the SRAM is busy is never answered — Medium, Reading
+
+**Where:** `modules/scheduler/dcache/cache_bank.sv:165-173` (HC_IDLE only
+leaves on `hc_grant && !sram_busy`); `modules/scheduler/execution_units/ld_st_unit.sv:79`
+(`mem_in_valid` is high for one cycle, in `start`), `:89-130` (`latch` waits
+for `hit` or `miss`). Nothing in `ld_st_unit` reads `ld_st_if.stall`.
+
+**What:** The cache only takes a request in a cycle where the SRAM is free;
+otherwise it raises `stall` and expects the request to be held. The LSU
+presents it for one cycle and ignores `stall`, so the request vanishes and
+the LSU waits in `latch` for an answer that never comes.
+
+**Effect:** None today: with a blocking LSU the SRAM is always free when it
+asks. With a non-blocking LSU, any load or store issued while a fill uses the
+SRAM hangs EX5.
+
+**Check:** Assert that `mem_in` with `stall` high is held until `hit` or
+`miss`. Or drive one-cycle requests while a fill is in ADDRESS_WAIT.
+
+**Sim:** the request port is a valid/ready handshake; the requester holds a
+request until it is taken.
+
+### 18. A miss with the MSHR buffer full is not recorded — Medium, Reading
+
+**Where:** `modules/scheduler/dcache/cache_mshr_buffer.sv:28, 69, 87` (the
+entry is only written on `miss && !stall`); `cache_bank.sv:211-214` (the miss
+is reported regardless).
+
+**What:** With 8 entries outstanding and the bank busy, the buffer's `stall`
+is high, so a new primary miss is dropped. But the hit-check FSM still raises
+`miss`, which tells the requester its fill is coming.
+
+**Effect:** None while the LSU is blocking. With more than 8 misses
+outstanding, the ninth requester waits forever.
+
+**Check:** Nine misses to distinct blocks without waiting for fills. Assert
+nine fills, or that `miss` is never raised while the buffer drops it.
+
+**Sim:** a miss that can't get an MSHR entry is answered *retry*, and the
+requester presents it again.
+
+### 19. A merge after the fill has started is never applied — Medium, Reading
+
+**Where:** `modules/scheduler/dcache/cache_bank.sv:302-306, 386-392` (the
+bank copies the entry into `latched_mshr_entry` in START or FINISH and never
+reads it again); `cache_mshr_buffer.sv:78-86` (a merge only updates the
+buffer's copy, which stays until FINISH_WAIT).
+
+**What:** A secondary miss (same block) merges into the buffer's entry,
+which is correct. But once the bank has started the fill, it works only from
+its own copy, `latched_mshr_entry`. A merge after that point updates the
+buffer's copy, which nothing reads; it is popped and discarded at
+FINISH_WAIT. The first miss is filled correctly. Only the merged request's
+contribution is dropped.
+
+**Effect:**
+- A merged load still finds its word in the line, but FINISH reports the
+  first request's `uuid`, so a requester waiting for its own tag never
+  wakes (on top of bug 9).
+- A merged store's word is not written into the line. That is only harmless
+  if the requester replays the store after the fill, as today's LSU does.
+
+**Check:** Miss on a block, wait until the bank leaves START, store-miss to
+another word of the block, and don't replay it. Assert the word holds the
+stored value after the fill.
+
+**Sim:** an entry accepts new targets until its line is written, and every
+target is applied in order. A miss after that gets a new entry.
+
+### 20. Load and store addresses ignore the base register — High, Reading
+
+**Where:** `modules/scheduler/execution_units/execute_stage.sv:150`
+(`assign unit5_if.addr = post_xbar_ex5.imm;`). `ld_st_unit.sv` uses that
+as the address unchanged.
+
+**What:** `lw.s`, `sw.s`, `lhw.s` and `shw.s` address `rs1 + imm` (the ISA
+document, the assembler and the functional sim all agree). Decode 2 reads
+`rs1` and the D2/EX latch carries it, but nothing adds it: the address is the
+12-bit immediate alone.
+
+**Effect:** Every scalar load and store with a nonzero base register goes to
+the wrong address. Only accesses within ±2 KB of address 0 through `x0` work.
+
+**Check:** `addi.s x1, x0, 0x400` then `lw.s x2, 4(x1)`. It must read
+`0x404`.
+
+**Sim:** the address is `rs1 + imm`.
+
+### 21. `jal` and `jalr` scale their offset by 4 — High, Reading
+
+**Where:** `modules/scheduler/execution_units/control.sv:80` (`jal`:
+`pc + (imm << 2)`) and `:94` (`jalr`: `rs1 + (imm << 2)`).
+
+**What:** The assembler encodes `jal`'s immediate as a byte offset
+(`build.py`: `imm = labels[target] - pc`), and the functional sim jumps to
+`pc + imm` and `rs1 + imm`. The RTL shifts both left by 2. (Branches are
+different: their encoding is a word offset, and both sides shift it.)
+
+**Effect:** Every `jal` and `jalr` jumps four times too far.
+
+**Check:** `jal x1, +40` from pc 0 must land on pc 40 with `x1 = 20`.
+
+**Sim:** byte offsets, as the assembler encodes them.
+
+### 22. A branch's increment is sign-extended — Medium, Reading
+
+**Where:** `modules/scheduler/decode2/scalar_control_unit.sv:252`
+(`incr7 = {{25{I[13]}}, I[13:7]}`).
+
+**What:** The assembler accepts increments 0..127 (`build.py`
+`parse_incr_imm7`), and the functional sim adds them unsigned. The RTL
+sign-extends bit 13, so an increment of 64..127 becomes −64..−1.
+
+**Effect:** Loops that step a counter by 64 or more count down instead.
+
+**Check:** `beq.s x1, x2, off, 100` must add 100 to `x1`.
+
+**Sim:** unsigned.
+
+## Where the RTL and the functional sim disagree
+
+These are not clearly RTL bugs: the ISA document doesn't say which is
+meant. The compiler targets the functional sim, so the model follows it, and
+a decision is needed either way.
+
+| | RTL | functional sim (and the model) |
+|---|---|---|
+| Scalar BF16 values | in the **low** half of the register: EX3 takes `rs1_value[15:0]` and writes `{16'b0, bf_out}` (`execute_stage.sv:117-118, 124`) | fp32 bit patterns, BF16 in the **upper** half; a register holding only 16 bits is read as a raw BF16 constant (`scalar_reg_as_fp32_for_bf16_r_op`) |
+| `lhw.s` | loads the halfword at the address, zero-extended (`ld_st_unit.sv:29-30`) | loads the word and shifts it up 16 |
+| `shw.s` | read-modify-write of the halfword (`ld_st_unit.sv:170-177`) | stores `rs >> 16` as a whole word |
+| `mod.s` with a negative operand | remainder takes the dividend's sign (`socetlib_shift_test_restore_divider.sv:81, 139-140`) | takes the divisor's sign (numpy `%`) |
 
 ## Not bugs
 
@@ -328,4 +510,6 @@ the next fill's.
 | `modules/vector/transpose_unit.sv` | Instantiates `sram_bank` without setting latencies, so it gets read 2 / write 4 (9 cycles a row, 8 a column). Are these intended? Comments still say "1 SRAM + 2 Clos" and "wait 2 cycles" | Questa |
 | `tb/unit/vector/perf_monitor.sv` (same PR) | The transpose active-cycle counter reads registered state and misses the first cycle: reports 799 for an 800-cycle transpose | Reading |
 | `include/memory/scratchpad/scpad_params.svh` | `SCPAD_SIZE_BYTES` is 1 MB per pad; the intended size is 0.5 MB (4 × 0.5 MB = 2 MB) | Reading |
+| `atalla-functional-sim` `src/functional_sim.py:326` onward | `blt.s`, `bge.s`, `bgt.s`, `ble.s` compare the registers unsigned (they are stored as `& 0xFFFFFFFF`); the ISA document says signed, as the RTL does | Reading |
+| `atalla-functional-sim` `src/components/scalar.py:190` | `sll.s`/`srl.s`/`sra.s` raise `OverflowError` under numpy 2 when the shift-amount register is 2³¹ or more | Seen in the model's golden tests |
 | `modules/systolic_array/sysarr_MEISSA_top.sv`, `pipelined_adder_tree.sv` | The psum path is half-removed: the skew buffer and the adder tree's final psum add are commented out, but the GSAU still drives `sa_partial_en` and `sa_array_in_partials` | Reading |
