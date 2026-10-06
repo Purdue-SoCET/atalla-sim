@@ -43,6 +43,10 @@ class BackendTransaction:
     completed_subreqs: int = 0
     #: Store: rows whose SRAM read has been requested from the scratchpad.
     next_read_row: int = 0
+    #: Bytes between consecutive rows in DRAM. 0 means the rows are packed
+    #: (cols * elem_bytes); a tile cut out of a wider matrix uses the
+    #: matrix's row width.
+    dram_stride: int = 0
 
 
 @dataclass
@@ -179,7 +183,8 @@ class Backend(Clocked):
 
     # Public API for scheduler/driver
     def driver_to_backend_start_load(
-        self, base_sp_addr: int, base_dram_addr: int, rows: int, cols: int, callback: Optional[Callable[[int], None]] = None
+        self, base_sp_addr: int, base_dram_addr: int, rows: int, cols: int, callback: Optional[Callable[[int], None]] = None,
+        dram_stride: int = 0,
     ) -> int:
         """
         Start a LOAD transaction: DRAM -> Scratchpad.
@@ -202,6 +207,7 @@ class Backend(Clocked):
             is_store=False,
             issued_subreqs=[set() for _ in range(rows)],
             total_subreqs=rows * subreqs,
+            dram_stride=int(dram_stride) or cols * self.elem_bytes,
         )
         if not self._tx_queue.enqueue(tx):
             self.total_backend_stalls += 1
@@ -209,7 +215,8 @@ class Backend(Clocked):
         return tx_id
 
     def driver_to_backend_start_store(
-        self, base_sp_addr: int, base_dram_addr: int, rows: int, cols: int, callback: Optional[Callable[[int], None]] = None
+        self, base_sp_addr: int, base_dram_addr: int, rows: int, cols: int, callback: Optional[Callable[[int], None]] = None,
+        dram_stride: int = 0,
     ) -> int:
         """
         Start a STORE transaction: Scratchpad -> DRAM (writeback).
@@ -233,6 +240,7 @@ class Backend(Clocked):
             is_store=True,
             issued_subreqs=[set() for _ in range(rows)],
             total_subreqs=rows * subreqs,
+            dram_stride=int(dram_stride) or cols * self.elem_bytes,
         )
         if not self._tx_queue.enqueue(tx):
             self.total_backend_stalls += 1
@@ -278,7 +286,7 @@ class Backend(Clocked):
         for subidx in range(tx.subreqs_per_row):
             off = subidx * self.dram_burst_bytes
             chunk = row_bytes[off : off + self.dram_burst_bytes]
-            dram_addr = tx.base_dram + (row_idx * tx.cols * self.elem_bytes) + off
+            dram_addr = tx.base_dram + (row_idx * tx.dram_stride) + off
             subreqs.append(DRAMOperation(
                             tx_id=tx.tx_id, 
                             row=row_idx, 
@@ -325,7 +333,7 @@ class Backend(Clocked):
                 tx_id=tx.tx_id,
                 row=r,
                 subidx=s,
-                dram_addr=tx.base_dram + (r * tx.cols * self.elem_bytes) + s * self.dram_burst_bytes,
+                dram_addr=tx.base_dram + (r * tx.dram_stride) + s * self.dram_burst_bytes,
                 length=min(self.dram_burst_bytes, tx.cols * self.elem_bytes - s * self.dram_burst_bytes),
                 is_write=False,
                 data=None,
@@ -349,7 +357,7 @@ class Backend(Clocked):
                         tx_id=tx.tx_id,
                         row=row_idx,
                         subidx=subidx,
-                        dram_addr=tx.base_dram + (row_idx * tx.cols * self.elem_bytes) + subidx * self.dram_burst_bytes,
+                        dram_addr=tx.base_dram + (row_idx * tx.dram_stride) + subidx * self.dram_burst_bytes,
                         length=len(chunk),
                         is_write=True,
                         data=chunk,

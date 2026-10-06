@@ -49,13 +49,10 @@ def require(pytest_module) -> None:
         pytest_module.skip("functional sim unavailable (%s)" % load_error)
 
 
-def run_golden(instr, data=None, workdir=None, packet_length: int = 4):
-    """Run a program image on the functional sim; return (scalar registers,
-    data memory) at halt, as plain dicts.
-
-    `instr` and `data` are the images load_program_text returns. The sim
-    writes its dump files into `workdir` (a temporary directory if None).
-    """
+def run_golden_state(instr, data=None, workdir=None, packet_length: int = 4):
+    """Run a program image on the functional sim; return its state at halt
+    as plain values: {"sregs": {r: int}, "mregs": {r: int},
+    "vregs": {r: [float]}, "mem": {addr: int}}."""
     if not HAVE_GOLDEN:
         raise RuntimeError("functional sim unavailable (%s)" % load_error)
     import tempfile
@@ -69,16 +66,25 @@ def run_golden(instr, data=None, workdir=None, packet_length: int = 4):
     mem = Memory()
     mem.instr_mem = dict(instr)
     mem.data_mem = dict(data or {})
-    sregs = ScalarRegisterFile()
+    sregs, mregs, vregs = ScalarRegisterFile(), mask_register_file(), VectorRegisterFile()
     tmp = tempfile.TemporaryDirectory() if workdir is None else None
     out = Path(workdir if workdir is not None else tmp.name)
     names = ["mem", "sregs", "vregs", "mregs", "scpad0", "scpad1", "perf"]
     files = [str(out / ("%s.out" % n)) for n in names]
     try:
-        run(mem, sregs, mask_register_file(), VectorRegisterFile(),
+        run(mem, sregs, mregs, vregs,
             Scratchpad(slots_per_bank=32), Scratchpad(slots_per_bank=32), ExecuteUnit(),
             0, packet_length, *files)
     finally:
         if tmp is not None:
             tmp.cleanup()
-    return dict(sregs.regs), dict(mem.data_mem)
+    return {"sregs": {r: int(v) for r, v in sregs.regs.items()},
+            "mregs": {r: int(v) for r, v in mregs.regs.items()},
+            "vregs": {r: [float(x) for x in vregs.read(r)] for r in range(vregs.num_regs)},
+            "mem": dict(mem.data_mem)}
+
+
+def run_golden(instr, data=None, workdir=None, packet_length: int = 4):
+    """Scalar registers and data memory at halt; see run_golden_state."""
+    st = run_golden_state(instr, data, workdir, packet_length)
+    return st["sregs"], st["mem"]

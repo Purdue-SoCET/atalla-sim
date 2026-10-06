@@ -54,6 +54,11 @@ def _op_lut() -> Dict[str, Callable[[float, float], float]]:
         "div": _safe_div,
         "shl": lambda a, b: float(int(a) << int(b)),
         "shr": lambda a, b: float(int(a) >> int(b)),
+        # Compares: 1.0 where true. The scheduler packs them into a mask.
+        "gt": lambda a, b: 1.0 if a > b else 0.0,
+        "lt": lambda a, b: 1.0 if a < b else 0.0,
+        "eq": lambda a, b: 1.0 if a == b else 0.0,
+        "ne": lambda a, b: 1.0 if a != b else 0.0,
     }
 
 

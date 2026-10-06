@@ -13,9 +13,10 @@ Stages 2-4 cover the front end, decode 2, and scalar execute and writeback:
                                                                    dcache
 
 With `execute=True` (the default) the execute stage drives the redirect, the
-halt, the units' readiness and the scalar writebacks itself. The vector and
-DMA side is stage 5, so its signals stay attributes, set by whoever drives
-the core:
+halt, the units' readiness and the scalar writebacks itself. Given a vector
+core and the scratchpad backends (stage 5, scheduler/vector.py), it also
+dispatches the vector and SDMA slots and owns vector writeback; without
+them those signals stay attributes, set by whoever drives the core:
 
     vector_ready, vlsu_ready, scpad_busy, and writeback_at() for vector,
     mask and SDMA writebacks
@@ -47,11 +48,13 @@ bubbles collapse instead of blocking:
 from typing import Dict, Iterable, Optional
 
 from base.clocked_object import Clocked
+from base.dtype import DType
 from scheduler.dcache import DCache, DCacheConfig, WordMemory
 from scheduler.decode1 import D1D2Latch
 from scheduler.decode2 import Decode2
 from scheduler.execute import (
     DEFAULT_LATENCY, Ex1, ExOp, LoadStoreUnit, MultiCycleUnit, arbitrate)
+from scheduler.vector import VectorSide
 from scheduler.fetch import BTB, Fetch, IFD1Latch
 from scheduler.icache import ICache
 from scheduler.isa import PACKET_BYTE_W
@@ -90,6 +93,24 @@ def load_program_text(text: str):
     return instr, data
 
 
+class VeggieStorage:
+    """Decode 2's vector register file kept in the vector core's Veggie
+    banks, so the registers exist once."""
+
+    def __init__(self, vc):
+        self.vc = vc
+
+    def read(self, r: int):
+        return self.vc.read_vreg(r)
+
+    def write(self, r: int, value) -> None:
+        # Straight into the banks: values are already BF16, and the vector
+        # core's cast would round them to FP16 (numpy has no bfloat16).
+        bank, addr = self.vc._reg_to_bank_addr(r)
+        self.vc.veggie.data_banks[bank][addr] = [float(x) for x in value]
+        self.vc.veggie.dtype_banks[bank][addr] = DType.BF16
+
+
 class SchedulerCore(Clocked):
 
     def __init__(self, program: Optional[Dict[int, int]] = None, *,
@@ -98,7 +119,8 @@ class SchedulerCore(Clocked):
                  data: Optional[Dict[int, int]] = None,
                  dcache_config: Optional[DCacheConfig] = None,
                  lsu_depth: int = 4,
-                 ex_latency: Optional[Dict[str, int]] = None):
+                 ex_latency: Optional[Dict[str, int]] = None,
+                 vector_core=None, backends=(), memory=None):
         super().__init__()
         self._tick = -1
         self.program: Dict[int, int] = dict(program or {})
@@ -109,7 +131,11 @@ class SchedulerCore(Clocked):
         self.fetch = Fetch("fetch")
         self.ifd1 = IFD1Latch("ifd1")
         self.d1d2 = D1D2Latch()
-        self.decode2 = Decode2(strict=strict)
+        self.vector_core = vector_core
+        self.decode2 = Decode2(
+            strict=strict,
+            vector_storage=VeggieStorage(vector_core) if vector_core is not None else None,
+            vector_len=vector_core.vector_len if vector_core is not None else 32)
         self._modules = (self.icache, self.btb, self.fetch, self.ifd1, self.d1d2,
                          self.decode2)
 
@@ -140,7 +166,8 @@ class SchedulerCore(Clocked):
 
         # Stage 4: execute and writeback.
         self.execute = bool(execute)
-        self.memory = WordMemory(lambda a, d=dict(data or {}): d.get(a, 0))
+        self.memory = memory if memory is not None else \
+            WordMemory(lambda a, d=dict(data or {}): d.get(a, 0))
         self.dcache = DCache(config=dcache_config or DCacheConfig(), memory=self.memory)
         latency = dict(DEFAULT_LATENCY, **(ex_latency or {}))
         self.ex1 = Ex1()
@@ -148,7 +175,12 @@ class SchedulerCore(Clocked):
         self.ex3 = MultiCycleUnit("ex3", latency)
         self.ex4 = MultiCycleUnit("ex4", latency)
         self.lsu = LoadStoreUnit(self.dcache, depth=lsu_depth)
-        self.mask_regs: Dict[int, int] = {}
+        #: Stage 5: the vector side, when there is a vector core to drive.
+        self.vector: Optional[VectorSide] = None
+        if vector_core is not None:
+            d2 = self.decode2
+            self.vector = VectorSide(vector_core, backends,
+                                     read_vreg=d2.vrf.read, read_mask=d2.mrf.read)
         self.halt_latch = False
         #: The cycle execute raised halt_out, and the cycle the dcache had
         #: written back its dirty lines after it.
@@ -169,14 +201,15 @@ class SchedulerCore(Clocked):
 
     def writeback_at(self, cycle: int, scalar=(), vector=(), mask=(), sdma=()) -> None:
         """Put writebacks in the EX/WB latch for `cycle`: scalar (reg, value)
-        pairs, vector and mask registers, and SDMA completions (the rs1 an
-        SDMA held). They reach the register file and clear their busy bits
-        on that cycle's edge."""
+        pairs; vector and mask registers, each a register (busy bit only) or
+        (register, value); and SDMA completions (the rs1 an SDMA held). They
+        reach the register file and clear their busy bits on that cycle's
+        edge."""
         due = self._wb_due.setdefault(int(cycle), {"scalar": [], "vector": [],
                                                    "mask": [], "sdma": []})
         due["scalar"] += [(int(r), int(v)) for r, v in scalar]
-        due["vector"] += [int(r) for r in vector]
-        due["mask"] += [int(r) for r in mask]
+        due["vector"] += [(int(e[0]), e[1]) if isinstance(e, tuple) else int(e) for e in vector]
+        due["mask"] += [(int(e[0]), e[1]) if isinstance(e, tuple) else int(e) for e in mask]
         due["sdma"] += [int(r) for r in sdma]
 
     # -- one cycle ---------------------------------------------------------
@@ -215,15 +248,19 @@ class SchedulerCore(Clocked):
         dc.eval_data()
         offers = {"ex1": ex1_res, "ex2": self.ex2.offer(), "ex3": self.ex3.offer(),
                   "ex4": self.ex4.offer(), "ex5": self.lsu.offer()}
+        vs = self.vector
+        if vs is not None:
+            mts_op, mts_ops = vs.mts_op(self.d2ex)
+            offers["mts"] = vs.mts.offer(mts_op, mts_ops)
         granted, writes, masks = arbitrate(offers)
         self._granted, self._redirect = granted, redirect
         if writes or masks:
             self.writeback_at(cycle + 1, scalar=[(w.rd, w.value) for w in writes],
-                              mask=[m.rd for m in masks])
+                              mask=[(m.rd, m.value) for m in masks])
             for w in writes:
                 self.scalar_writes.append((cycle + 1, w.rd, w.value))
-            for m in masks:
-                self.mask_regs[m.rd] = m.value
+        if vs is not None:
+            self._vector_eval(cycle, granted.get("mts", False))
         self.ex_ready = {1: self.ex1.ready_in(granted.get("ex1", False)),
                          2: self.ex2.ready_in(routed.get(2)),
                          3: self.ex3.ready_in(routed.get(3)),
@@ -237,8 +274,29 @@ class SchedulerCore(Clocked):
         self._halt_in = halt_in
         self.internal_halt = halt_in or self.halt_latch
 
+    def _vector_eval(self, cycle: int, mts_granted: bool) -> None:
+        """Stage 5's part of the cycle: readiness, vector writeback, SDMA
+        completions, then the D2/EX latch's vector and SDMA ops to their units."""
+        vs = self.vector
+        vec, vlsu, busy = vs.unit_ready()
+        vec["movement"] = vs.mts.ready(mts_granted)
+        self.vector_ready, self.vlsu_ready, self.scpad_busy = vec, vlsu, busy
+        granted, vw, mw = vs.arbitrate(vs.offers())
+        done = vs.take_sdma_done()
+        if vw or mw or done:
+            self.writeback_at(cycle + 1, vector=[(w.reg, w.value) for w in vw],
+                              mask=[(w.reg, w.value) for w in mw], sdma=done)
+            vs.stats["vector_writes"] += len(vw)
+            vs.stats["mask_writes"] += len(mw)
+        vs.retire(granted)
+        self._mts_granted = mts_granted
+        vs.dispatch(self.d2ex)
+
     def _execute_commit(self, cycle: int) -> None:
         g, r = self._granted, self._routed
+        if self.vector is not None:
+            self.vector.mts.advance(self._mts_granted)
+            self.vector.tick(cycle)
         self.ex1.advance(g.get("ex1", False), self._redirect is not None)
         self.ex2.advance(r.get(2), g.get("ex2", False))
         self.ex3.advance(r.get(3), g.get("ex3", False))
@@ -246,7 +304,8 @@ class SchedulerCore(Clocked):
         self.lsu.advance(g.get("ex5", False))
         self.dcache.commit()
         if (self.halt_latch and self.halted_at is None and self.decode2.scoreboard.idle
-                and self.lsu.idle and not any(self.scpad_busy)):
+                and self.lsu.idle and not any(self.scpad_busy)
+                and (self.vector is None or self.vector.idle)):
             self.halted_at = cycle          # halt_out
         if self.halted_at is not None and self.done_at is None and self.dcache.out_flushed:
             self.done_at = cycle

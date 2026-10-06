@@ -14,16 +14,18 @@ A packet issues only as a whole, and only in a cycle where all three hold:
                          VLSU of each scratchpad it names, the GSAU, the
                          move-to-scalar unit, and the scratchpad an SDMA's rs3
                          names (rs3[31:30], a register value, not a field)
-    register file ready  the scalar register file has served every read: a
-                         packet whose busiest bank has k >= 2 reads waits k
-                         cycles while reggie serializes them, one per bank per
-                         cycle (READY -> CONFLICT ... -> DONE)
+    register files ready the scalar, vector and mask register files have
+                         each served every read: a file whose busiest bank
+                         has k >= 2 reads takes k cycles while reggie
+                         serializes them, one per bank per cycle
+                         (READY -> CONFLICT ... -> DONE)
 
-The vector and mask registers are the vector core's Veggie
-(vector_core/veggie_file.py), which already models their storage and bank
-arbitration, and the vector core reads its own vector operands. So decode 2
-owns the scalar register file, and tracks vector and mask registers only in
-the scoreboard, never twice.
+Decode 2 owns all three register files and reads every operand at issue --
+scalar values, vector registers and masks alike -- so the units downstream
+get data, not register numbers. That makes write-after-read safe for every
+register kind: nothing reads a register after its packet issues. The vector
+file's storage can be the vector core's Veggie banks (`vector_storage`), so
+the registers are never kept twice.
 
 The scoreboard is a busy bit per register: set when the instruction that
 writes it issues, cleared when its writeback reaches the register file. A
@@ -67,6 +69,8 @@ SCALAR_READ_PORTS = 4
 VECTOR_READ_PORTS = 4
 MASK_READ_PORTS = 2
 SCALAR_BANKS = 4
+VECTOR_BANKS = 4
+MASK_BANKS = 2
 LANE_ISSUE_W = 2
 MASK32 = 0xFFFFFFFF
 
@@ -196,21 +200,53 @@ class Scoreboard(RTLModule):
         return not (self.scalar or self.vector or self.mask)
 
 
-# -- reg_file / reggie, scalar -----------------------------------------------------
-class ScalarRegFile(RTLModule):
-    """256 x 32-bit, 4 banks by reg[1:0], combinational reads, x0 = 0.
+# -- reg_file / reggie -----------------------------------------------------------------
+class ListStorage:
+    """Plain register storage: one value per register."""
+
+    def __init__(self, num_regs: int, reset=0):
+        self.values = [reset] * int(num_regs)
+
+    def read(self, r: int):
+        return self.values[r]
+
+    def write(self, r: int, value) -> None:
+        self.values[r] = value
+
+
+class RegFile(RTLModule):
+    """reg_file.sv: banks by reg[log2(banks)-1:0], combinational reads,
+    register 0 hardwired, and reggie's conflict FSM.
+
+    decode_2 instantiates it three times: scalar (256 x 32 bits, 4 banks,
+    4 read ports), vector (256 x 32 BF16, 4 banks, 4 read ports) and mask
+    (16 x 32 bits, 2 banks, 2 read ports). Register 0 reads as all zeros, or
+    all ones for the mask file (ZERO_REG_VAL = 1: m0 is "every lane"), and
+    writes to it are dropped.
 
     reggie's conflict FSM: a cycle with more than one read (or write) on one
-    bank is not ready; it serves one request per bank per cycle until at
-    most one is left, then DONE is ready with every operand buffered.
+    bank is not ready; once the packet's dependencies are free it serves one
+    read per bank per cycle until at most one is left, then DONE is ready
+    with every operand buffered.
+
+    Storage is pluggable so the vector file can live in the vector core's
+    Veggie banks rather than in a second copy.
     """
 
-    REGS = dict(regs=[0] * NUM_SCALAR_REGS, state=READY, pending=[[], [], [], []])
+    REGS = dict(state=READY, pending=None)
+
+    def __init__(self, name: str, num_regs: int, banks: int, zero_value=0,
+                 storage=None, reset=0):
+        super().__init__(name)
+        self.num_regs, self.banks, self.zero_value = int(num_regs), int(banks), zero_value
+        self.storage = storage if storage is not None else ListStorage(num_regs, reset)
+        self.pending = self.pending_n = [[] for _ in range(self.banks)]
+        self._writes: List[Tuple[int, object]] = []
 
     def _banked(self, regs: Sequence[int]) -> List[List[int]]:
-        out = [[] for _ in range(SCALAR_BANKS)]
+        out = [[] for _ in range(self.banks)]
         for port, r in enumerate(regs):
-            out[r % SCALAR_BANKS].append(port)
+            out[r % self.banks].append(port)
         return out
 
     def eval_ready_for(self, reads: Sequence[int], writes: Sequence[int],
@@ -218,8 +254,8 @@ class ScalarRegFile(RTLModule):
         self._reads, self._deps_ready = list(reads), deps_ready
         rreqs, wreqs = self._banked(reads), self._banked(writes)
         if any(len(w) > 1 for w in wreqs):
-            raise AssertionError("two scalar writebacks on one bank; the WB "
-                                 "arbiter allows one per bank")
+            raise AssertionError("two %s writebacks on one bank; the writeback "
+                                 "arbiter allows one per bank" % self.name)
         self._conflict = any(len(r) > 1 for r in rreqs)
         if self.state == READY:
             return not self._conflict
@@ -227,7 +263,7 @@ class ScalarRegFile(RTLModule):
             return False
         return True                                  # DONE
 
-    def next_state(self, dec2_ready: bool, writes: Sequence[Tuple[int, int]]) -> None:
+    def next_state(self, dec2_ready: bool, writes: Sequence[Tuple[int, object]]) -> None:
         rreqs = self._banked(self._reads)
         if self.state == READY:
             grant_from = rreqs
@@ -241,14 +277,39 @@ class ScalarRegFile(RTLModule):
             state = READY if dec2_ready else DONE
         self.pending_n = [p[1:] for p in grant_from]        # lowest port wins
         self.state_n = state
-        regs = list(self.regs)
-        for r, value in writes:
-            if r != 0:
-                regs[r] = int(value) & MASK32
-        self.regs_n = regs
+        self._writes = [(int(r), v) for r, v in writes if int(r) != 0]
 
-    def read(self, r: int) -> int:
-        return 0 if r == 0 else self.regs[r]
+    def commit(self) -> None:
+        for r, v in self._writes:
+            self.storage.write(r, v)
+        self._writes = []
+        super().commit()
+
+    def read(self, r: int):
+        return self.zero_value if r == 0 else self.storage.read(r)
+
+
+class ScalarRegFile(RegFile):
+    """The scalar file: 32-bit values."""
+
+    def __init__(self, name: str = "srf"):
+        super().__init__(name, NUM_SCALAR_REGS, SCALAR_BANKS, zero_value=0)
+
+    def next_state(self, dec2_ready: bool, writes: Sequence[Tuple[int, int]]) -> None:
+        super().next_state(dec2_ready, [(r, int(v) & MASK32) for r, v in writes])
+
+
+def _with_data(entries) -> Tuple[List[int], List[Tuple[int, object]]]:
+    """Writeback entries are a register, or (register, value): busy-bit
+    clears for all of them, register-file writes for those with a value."""
+    regs, writes = [], []
+    for e in entries:
+        if isinstance(e, tuple):
+            regs.append(int(e[0]))
+            writes.append((int(e[0]), e[1]))
+        else:
+            regs.append(int(e))
+    return regs, writes
 
 
 # -- decode_2 ------------------------------------------------------------------------
@@ -284,11 +345,16 @@ class Decode2(RTLModule):
     #: The EX/WB latch's writebacks hold for one cycle only.
     CLEAR_ON_COMMIT = ("in_wb_scalar", "in_wb_vector", "in_wb_mask", "in_wb_sdma")
 
-    def __init__(self, name: str = "decode2", *, strict: bool = True):
+    def __init__(self, name: str = "decode2", *, strict: bool = True,
+                 vector_storage=None, vector_len: int = 32):
         super().__init__(name)
         self.strict = bool(strict)
         self.scoreboard = Scoreboard("scoreboard")
         self.srf = ScalarRegFile("srf")
+        zero_vec = [0.0] * int(vector_len)
+        self.vrf = RegFile("vrf", NUM_VECTOR_REGS, VECTOR_BANKS, zero_value=zero_vec,
+                           storage=vector_storage, reset=zero_vec)
+        self.mrf = RegFile("mrf", NUM_MASK_REGS, MASK_BANKS, zero_value=MASK32, reset=0)
         self.violations: List[Tuple[int, List[str]]] = []
         self.stall_reasons: Dict[str, int] = {}
 
@@ -322,8 +388,13 @@ class Decode2(RTLModule):
         self._sids = sids
         deps = not self.scoreboard.hazard(pkt)
         fus = self._fu_ready(pkt, sids)
-        rf = self.srf.eval_ready_for(pkt.scalar_reads(),
-                                     [r for r, _ in self.in_wb_scalar], deps)
+        self._wb_v_regs, self._wb_v = _with_data(self.in_wb_vector)
+        self._wb_m_regs, self._wb_m = _with_data(self.in_wb_mask)
+        rf = [self.srf.eval_ready_for(pkt.scalar_reads(),
+                                      [r for r, _ in self.in_wb_scalar], deps),
+              self.vrf.eval_ready_for(pkt.vector_reads(), [r for r, _ in self._wb_v], deps),
+              self.mrf.eval_ready_for(pkt.mask_reads(), [r for r, _ in self._wb_m], deps)]
+        rf = all(rf)
         self.out_ready = deps and fus and rf
         if not self.out_ready and self.in_valid and not pkt.empty:
             why = "hazard" if not deps else "unit" if not fus else "regfile"
@@ -343,8 +414,10 @@ class Decode2(RTLModule):
             issued = self._read_operands(pkt)
         self.out_issued = issued
         self.scoreboard.next_state(pkt if issue else None, [r for r, _ in self.in_wb_scalar],
-                                   self.in_wb_vector, self.in_wb_mask, self.in_wb_sdma)
+                                   self._wb_v_regs, self._wb_m_regs, self.in_wb_sdma)
         self.srf.next_state(ready, self.in_wb_scalar)
+        self.vrf.next_state(ready, self._wb_v)
+        self.mrf.next_state(ready, self._wb_m)
 
     def _read_operands(self, pkt: DecodedPacket) -> IssuedPacket:
         read = self.srf.read
@@ -356,8 +429,12 @@ class Decode2(RTLModule):
                                                      "rs2": read(o.rs2) if o.use_rs2 else 0}
         for o in pkt.vector:
             if o.valid:
-                out.operands[("vector", o.slot)] = {"rs1": read(o.rs1) if o.use_rs1 else 0,
-                                                     "rs2": read(o.rs2) if o.use_rs2 else 0}
+                out.operands[("vector", o.slot)] = {
+                    "rs1": read(o.rs1) if o.use_rs1 else 0,
+                    "rs2": read(o.rs2) if o.use_rs2 else 0,
+                    "vs1": self.vrf.read(o.vs1) if o.use_vs1 else None,
+                    "vs2": self.vrf.read(o.vs2) if o.use_vs2 else None,
+                    "vms": self.mrf.read(o.vms) if o.use_vms else MASK32}
         for o in pkt.sdma:
             if o.valid:
                 out.operands[("sdma", o.slot)] = {"rs1": read(o.rs1_rd), "rs2": read(o.rs2),
@@ -367,6 +444,8 @@ class Decode2(RTLModule):
     def commit(self) -> None:
         self.scoreboard.commit()
         self.srf.commit()
+        self.vrf.commit()
+        self.mrf.commit()
         super().commit()
 
     # -- what execute asks before halting -----------------------------------------

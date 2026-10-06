@@ -488,6 +488,8 @@ a decision is needed either way.
 | `lhw.s` | loads the halfword at the address, zero-extended (`ld_st_unit.sv:29-30`) | loads the word and shifts it up 16 |
 | `shw.s` | read-modify-write of the halfword (`ld_st_unit.sv:170-177`) | stores `rs >> 16` as a whole word |
 | `mod.s` with a negative operand | remainder takes the dividend's sign (`socetlib_shift_test_restore_divider.sv:81, 139-140`) | takes the divisor's sign (numpy `%`) |
+| `m0` | hardwired to all ones; writes dropped (`reggie.sv:187, 260`, `ZERO_REG_VAL = 1`) | writable, starts at all ones (the model follows the RTL) |
+| A reduction's result | rounded to BF16 by the 16-bit vector register file | kept as an fp32 value in the vector register (the model follows the RTL) |
 
 ## Not bugs
 
@@ -511,5 +513,7 @@ a decision is needed either way.
 | `tb/unit/vector/perf_monitor.sv` (same PR) | The transpose active-cycle counter reads registered state and misses the first cycle: reports 799 for an 800-cycle transpose | Reading |
 | `include/memory/scratchpad/scpad_params.svh` | `SCPAD_SIZE_BYTES` is 1 MB per pad; the intended size is 0.5 MB (4 × 0.5 MB = 2 MB) | Reading |
 | `atalla-functional-sim` `src/functional_sim.py:326` onward | `blt.s`, `bge.s`, `bgt.s`, `ble.s` compare the registers unsigned (they are stored as `& 0xFFFFFFFF`); the ISA document says signed, as the RTL does | Reading |
+| `atalla-functional-sim` `src/functional_sim.py`, `.mvv`/`.mvs` | A masked compare reads the old mask MSB-first (`format(old, '032b')`) but writes it back LSB-first (`value \|= bit << i`), so the masked-off bits come out reversed | Reading |
+| atalla-sim `src/base/dtype.py` | BF16 falls back to FP16 when numpy has no bfloat16 (numpy 2.x never has it): FP16 precision, and values above 65504 become infinity. Hits the vector core's lanes and register writes and the MEISSA array's "BF16" | Seen in the model's golden tests |
 | `atalla-functional-sim` `src/components/scalar.py:190` | `sll.s`/`srl.s`/`sra.s` raise `OverflowError` under numpy 2 when the shift-amount register is 2³¹ or more | Seen in the model's golden tests |
 | `modules/systolic_array/sysarr_MEISSA_top.sv`, `pipelined_adder_tree.sv` | The psum path is half-removed: the skew buffer and the adder tree's final psum add are commented out, but the GSAU still drives `sa_partial_en` and `sa_array_in_partials` | Reading |

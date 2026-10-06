@@ -875,6 +875,25 @@ class VectorCore(Clocked):
         # 4) Commit one writeback per cycle to Veggie.
         self._commit_one_writeback()
 
+    # -- driven by the scheduler model ---------------------------------------------
+    def tick_units(self, time: Optional[Time] = None) -> None:
+        """Advance the execution units only.
+
+        The scheduler model (src/scheduler/vector.py) drives the units the
+        way the RTL's scheduler does: decode 2 reads every operand, each unit
+        is handed data, and writeback is arbitrated on the scheduler side.
+        So it bypasses the packet queue, operand fetch and writeback buffer
+        that tick() runs for the harnesses.
+        """
+        cycle = self._consume_tick(time, attr_name="_tick")
+        if cycle is None:
+            return
+        self.datapath.tick(cycle)
+        for vls in self.vls_units:
+            vls.tick(cycle)
+        self.gsau.tick(cycle)
+        self.transpose.tick(cycle)
+
     def pop_scratchpad_request(self, vls_id: int) -> Optional[Dict]:
         if vls_id < 0 or vls_id >= len(self.vls_units):
             raise ValueError("invalid vls id: %s" % vls_id)

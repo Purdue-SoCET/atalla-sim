@@ -19,19 +19,22 @@ one commit, so no stage sees another's value early.
 | 2 | `fetch.py`, `icache.py`, `decode1.py` | front end |
 | 3 | `control.py`, `decode2.py` | decode 2: operands, hazards, issue |
 | 4 | `semantics.py`, `execute.py`, `dcache.py` | scalar execute, writeback, a non-blocking load/store unit, the data cache |
-| 5 | — | vector and DMA dispatch into `VectorCore` |
-| 6 | — | platform wiring |
+| 5 | `vector.py`, `platform.py` | vector and DMA dispatch into the vector core's units, vector writeback |
+| 6 | — | platform wiring in `build_tpu_platform`, end-to-end kernels |
 
-Signals from the vector side, which isn't built yet, are inputs on the core
-that tests set: vector-unit readiness, VLSU readiness, scratchpad busy, and
-`writeback_at(cycle, ...)` for vector, mask and SDMA writebacks.
+`SchedulerCore(vector_core=..., backends=...)` drives a vector core and the
+scratchpads' DMA backends (stage 5); `scheduler/platform.py` builds the whole
+machine around it. Without a vector core, the vector side's signals (unit
+readiness, VLSU readiness, scratchpad busy, and `writeback_at(cycle, ...)` for
+vector, mask and SDMA writebacks) are inputs that tests set.
 `SchedulerCore(execute=False)` turns the execute stage off too, and makes its
 signals (redirect, halt, unit readiness, scalar writebacks) inputs: the
 stage 2 and 3 tests drive them by hand.
 
 A program runs with `run_until_done()`: until execute has halted and the data
 cache has written back its dirty lines. `scalar_reg(r)` and `memory` hold the
-final state.
+final state; on the platform, `SchedulerPlatform.run_until_done()` ticks every
+component.
 
 ## Decode 2
 
@@ -51,9 +54,22 @@ set when the instruction that writes it issues and cleared when its
 writeback reaches the register file. Cleared and set on one edge, it stays
 set. A dependent packet issues the cycle after its producer's writeback.
 
-The scalar register file is four banks by `reg[1:0]`, read combinationally.
-Two reads of one bank in a packet put `reggie` into its conflict FSM, which
-serves one read per bank per cycle:
+Decode 2 owns three register files and reads every operand at issue, so the
+units downstream get data, not register numbers, and write-after-read is
+safe for every kind of register:
+
+| file | registers | banks | read ports | register 0 |
+|---|---|---|---|---|
+| scalar | 256 × 32 bits | 4, by `reg[1:0]` | 4 | reads 0 |
+| vector | 256 × 32 BF16 | 4, by `reg[1:0]` | 4 | reads all zeros |
+| mask | 16 × 32 bits | 2, by `reg[0]` | 2 | reads all ones: `m0` is "every lane" |
+
+Writes to register 0 are dropped in all three. The vector file's storage is
+the vector core's Veggie banks, so the registers exist once.
+
+Each file is the same `reggie`: two reads of one bank in a packet put it into
+its conflict FSM, which serves one read per bank per cycle, and the packet
+issues only when all three files are ready:
 
 | reads on the busiest bank | issue delay |
 |---|---|
@@ -61,12 +77,8 @@ serves one read per bank per cycle:
 | *k* ≥ 2 | *k* cycles |
 
 The FSM only starts once the packet's dependencies are free, so a packet
-waiting on a writeback pays for its conflict afterwards. `x0` reads 0, still
-occupies bank 0, and ignores writes.
-
-Vector and mask registers live in the vector core's Veggie, which models
-their storage and bank arbitration; decode 2 tracks them only in the
-scoreboard.
+waiting on a writeback pays for its conflict afterwards. Register 0 still
+occupies bank 0.
 
 ### Read and write sets
 
@@ -183,6 +195,52 @@ document and the assembler, and otherwise the functional sim:
 | scalar BF16 values | fp32 layout, BF16 in the upper half | lower half |
 | `lhw.s`, `shw.s`, `mod.s` | as the functional sim | see the bug note |
 
+## Vector and DMA dispatch
+
+`vector.py` takes the vector and SDMA slots of the packet in the D2/EX latch
+to the vector core's units (`vector_core/`) and the scratchpad backends
+(`memory/backend.py`), following `scheduler_core.sv`'s dispatch:
+
+| ops | unit |
+|---|---|
+| `add`/`sub`/`mul` `.vv` and `.vs`, compares, `expi.vi`, reductions | the lane datapath, at most 2 a packet |
+| `gemm.vv`, `lw.vi` | the GSAU and the systolic array |
+| `vreg.ld`, `vreg.st` | the VLSU of scratchpad `sid`: row `rs1 / 64 + rs2` |
+| `vmov.vts`, `mv.mts` | move-to-scalar: combinational, through scalar writeback |
+| `scpad.ld`, `scpad.st` | the backend of scratchpad `rs3[31:30]`: rows, columns and DRAM row stride from `rs3` |
+
+- **Readiness** to decode 2 is per unit: the lanes' ALU, MUL and EXP, the
+  reduction, the GSAU, move-to-scalar, each VLSU, and each scratchpad's busy
+  flag while an SDMA runs on it.
+- **Writeback.** One vector register write per bank (`vd[1:0]`) per cycle,
+  by fixed priority VLSU 0–3, GSAU, reduction, lanes; the loser holds its
+  result. Compares write the mask file. A write offered in cycle v reaches
+  the register file in v + 1. An SDMA's completion clears its `rs1`, which
+  is how a later `vreg.ld` waits for the data it brings in.
+- **Halt** also waits for the vector side to drain: lanes, GSAU, VLSUs and
+  DMA.
+
+Where the RTL is wrong this does what was meant: all four VLSUs write back
+(bug 4), write ports follow the register file's bank `vd[1:0]` (bug 5), and
+`lw.vi` writes no register (bug 3).
+
+**Values** follow the functional sim's lane rules: operands rounded to BF16,
+the op in fp32, the result rounded to BF16; compares on the raw values;
+`.vs` operands are the scalar register's fp32 bits; masked-off lanes keep the
+old destination; reductions sum or compare the active lanes in order and
+place the result by `imm[6:5]`. Two differences, both because the vector
+registers are 16-bit:
+
+- a reduction's result is rounded to BF16; the functional sim writes its
+  fp32 sum into the register unrounded;
+- the lane datapath model only times the ops: its BF16 cast is FP16 while
+  numpy has no bfloat16, so the values are computed in `vector.py`.
+
+**Open:** `gemm.vv` is timed through the GSAU and the systolic array model,
+but its values don't follow the ISA yet. The array takes each `lw.vi` as a
+weight row where the ISA loads a column (`out[j] = vs1 · w_j`), and its BF16
+is FP16 too.
+
 ## Data cache
 
 `dcache.py` is the scalar core's data cache: a lockup-free cache with miss
@@ -233,3 +291,14 @@ random words.
   also checks that accesses reached the cache in program order.
 
 `tests/scheduler/test_dcache.py` tests the data cache alone.
+
+`tests/scheduler/test_vector.py` checks stage 5 on the scheduler-driven
+platform:
+- vector and mask register-file bank conflicts, `v0` and `m0`;
+- SDMA holding its `rs1`, dependent vector ops waiting for writeback, two
+  lane ops and a VLSU op in one packet, halt draining the vector side, the
+  GSAU path completing;
+- directed and random vector programs (lane arithmetic, `.vs`, compares and
+  masked ops, `expi`, reductions, moves to scalar, SDMA and VLSU traffic)
+  run on the model and the functional sim, comparing every scalar, vector
+  and mask register and the DRAM it wrote.
