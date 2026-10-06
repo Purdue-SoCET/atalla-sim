@@ -225,21 +225,31 @@ Where the RTL is wrong this does what was meant: all four VLSUs write back
 (bug 4), write ports follow the register file's bank `vd[1:0]` (bug 5), and
 `lw.vi` writes no register (bug 3).
 
-**Values** follow the functional sim's lane rules: operands rounded to BF16,
-the op in fp32, the result rounded to BF16; compares on the raw values;
-`.vs` operands are the scalar register's fp32 bits; masked-off lanes keep the
-old destination; reductions sum or compare the active lanes in order and
-place the result by `imm[6:5]`. Two differences, both because the vector
-registers are 16-bit:
+**Values** come from the units; the scheduler only routes operands to them
+and formats what comes back for writeback.
 
-- a reduction's result is rounded to BF16; the functional sim writes its
-  fp32 sum into the register unrounded;
-- the lane datapath model only times the ops; the values are computed in
-  `vector.py` the functional sim's way (each op in fp32 on BF16 operands,
-  where the lane model works in double precision).
+- **The lane datapath** (`vector_core/vector_lanes.py`) does the element ops:
+  BF16 operands, the op, the result rounded to BF16 (through fp32, as the
+  functional sim rounds).
+- **Reductions** run in the RTL's order (`alu_FU.sv`, `reduction_tree.sv`).
+  Each lane folds its slice, and a masked-off element contributes the op's
+  identity: 0, +inf or −inf. A pairwise tree across the lanes then combines
+  the partials, and every step rounds to BF16. With the RTL's 16 lanes
+  (the platform's default), that is a pair per lane and a 4-level tree. The
+  result is placed by `imm[6:5]`: broadcast, alone at `imm[4:0]`, or at
+  `imm[4:0]` over `vs1`.
+- **The systolic array** computes `gemm.vv` (see Kernels, Weights).
+- **Writeback formatting** is the scheduler's part. It packs a compare's
+  1/0 lanes into a mask. Masked-off elements and mask bits keep the
+  destination's old value, as the functional sim does; the RTL's result
+  collector writes them as 0. `.vs` operands are the scalar register's fp32
+  bits, and `vmov.vts` moves an element's fp32 bits.
 
-`gemm.vv` is timed through the GSAU and the systolic array model; its value
-is computed by the scheduler (see Kernels, Weights).
+The functional sim sums a reduction sequentially in fp32 and keeps the
+result unrounded in the register. The 16-bit register file can't do that,
+and the RTL doesn't add in that order. So the golden comparisons run the
+functional sim with its reductions swapped for the RTL's order
+(`golden.run_golden_state(..., reductions="hardware")`).
 
 ## Kernels
 
@@ -253,26 +263,29 @@ tools/run_kernel.py prog.in           # an already assembled program
 tools/run_kernel.py softmax --golden  # also run the functional sim and compare
 ```
 
+`--golden` compares against the functional sim with the RTL's reduction
+order; add `--functional-reductions` to compare against its own fp32 sums.
+
 A kernel name is assembled by the functional sim's own build script
 (`third_party/atalla-functional-sim/kernels/build_<name>.py`), in its `.in`
 format; `build_kernel_platform(text)` does the same from Python.
 
-Every kernel in the functional sim's metrics list runs to halt, and matches
-the functional sim at the end (registers, and DRAM as the DMA reads it):
+Every kernel in the functional sim's metrics list runs to halt and matches
+the functional sim exactly at the end: every register, and DRAM as the DMA
+reads it. The functional sim runs with the RTL's reduction order.
 
-| kernel | cycles | against the functional sim |
-|---|---:|---|
-| `add`, `relu`, `sigmoid` | 1,775 / 2,082 / 442 | identical |
-| `layernorm_param`, `maxpool` | 4,646 / 1,364 | identical |
-| `gemm`, `gemm_tiled` | 2,557 / 1,303 | identical |
-| `gemms`, `gemms_function`, `gemms_pipelined`, `…_loop_unroll` | 9,614 / 8,311 / 8,312 / 8,095 | identical |
-| `conv`, `conv_tiled`, `conv_pipelined`, `conv_unrolled_pipelined` | 3,421 / 1,445 / 3,425 / 3,425 | identical |
-| `softmax`, `attention`, `flash_attention` | 2,175 / 61,309 / 19,340 | differ only by the BF16 reductions: identical with fp32 ones |
+| kernel | cycles |
+|---|---:|
+| `add`, `relu`, `sigmoid` | 1,583 / 1,506 / 394 |
+| `layernorm_param`, `maxpool` | 3,294 / 1,092 |
+| `gemm`, `gemm_tiled` | 2,437 / 1,255 |
+| `gemms`, `gemms_function`, `gemms_pipelined`, `…_loop_unroll` | 9,038 / 8,098 / 8,099 / 8,077 |
+| `conv`, `conv_tiled`, `conv_pipelined`, `conv_unrolled_pipelined` | 3,229 / 1,421 / 3,233 / 3,233 |
+| `softmax`, `attention`, `flash_attention` | 1,793 / 59,389 / 16,874 |
 
-Cycle counts are with the default platform: 4 lanes, DRAM latency 6, a warm
-instruction cache. The one difference is deliberate: the model rounds
-`rsum`/`rmin`/`rmax` to BF16, all the 16-bit vector register file can
-hold; the functional sim keeps the fp32 value in the register.
+Cycle counts are with the default platform: 16 lanes, DRAM latency 6, and a
+warm instruction cache. Against the functional sim's own sequential fp32
+sums, `softmax`'s outputs differ by at most 2 BF16 steps.
 
 **Weights.** `lw.vi` shifts its vector into the systolic array's weights as
 column 0, moving every column one to the right, as the array is built
@@ -281,11 +294,10 @@ column j ends up holding `w_j`, and `gemm.vv` computes `out[j] = vs1 · w_j`
 with the functional sim's rounding (BF16 operands, fp32 dot products, a BF16
 result). The functional sim's `lw.vi` and its kernels were changed to that
 contract (`ASSEMBLY_SYNTAX.md`); before, it filled columns 0, 1, … in load
-order, which the hardware doesn't do. The scheduler keeps the weight matrix
-and computes each `gemm.vv` at dispatch, in program order; the GSAU and the
-systolic array model provide the timing. (The array models load each
-vector as a row, so their values aren't used; switching them to the
-shift-in-at-column-0 load would let them supply the values too.)
+order, which the hardware doesn't do. The systolic array model computes the
+values: its weight path shifts each vector in at column 0, and
+`ArrayValueBridge` (`platform.py`) hands its BF16 rows back to the GSAU,
+which pairs them with `vd`.
 
 **`li.s`** is a pseudo-instruction the hardware doesn't decode. The
 assembler (`build.py`, and `build_compiler.py` for C kernels) now expands
@@ -346,8 +358,9 @@ random words.
 
 `tests/scheduler/test_kernels.py` builds kernels with the functional sim's
 build scripts and runs them on both: `add`, `relu`, `sigmoid`, `layernorm`,
-`maxpool`, `gemm`, `gemm_tiled`, `gemms`, `conv` and `conv_tiled` must match
-exactly, and `softmax` within one BF16 step.
+`maxpool`, `softmax`, `gemm`, `gemm_tiled`, `gemms`, `conv` and `conv_tiled`
+must match exactly against the functional sim with the RTL's reduction
+order, and `softmax` within 2 BF16 steps of its own fp32 sums.
 
 `tests/scheduler/test_vector.py` checks stage 5 on the scheduler-driven
 platform:

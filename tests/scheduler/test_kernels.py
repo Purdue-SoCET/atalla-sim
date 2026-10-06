@@ -9,6 +9,12 @@ sim, and compared at the end: every scalar and vector register, and DRAM as
 the DMA reads it (each BF16 halfword through the functional sim's
 read_bf16_le; its data memory is keyed by address, with overlapping 32-bit
 entries).
+
+The units compute every value: the lane datapath the element ops and
+reductions, the systolic array gemm.vv. The functional sim runs with its
+reductions in the RTL's order (golden.hardware_reduce), which is what the
+lane datapath does; its own sequential fp32 sum differs slightly, which
+the last test bounds.
 """
 import os
 import subprocess
@@ -38,9 +44,9 @@ def build(kernel: str, tmp_path: Path) -> str:
     return out.read_text()
 
 
-def run_both(text: str):
+def run_both(text: str, reductions: str = "hardware"):
     instr, data = load_program_text(text)
-    g = golden.run_golden_state(instr, data)
+    g = golden.run_golden_state(instr, data, reductions=reductions)
     plat = build_scheduler_platform(instr, data)
     plat.run_until_done(limit=2_000_000)
     from src.misc.memory import Memory              # the functional sim's
@@ -63,7 +69,8 @@ def assert_registers_match(plat, g, skip=()):
 
 
 @pytest.mark.parametrize("kernel", ["add", "relu", "sigmoid", "layernorm_param", "maxpool",
-                                    "gemm", "gemm_tiled", "gemms", "conv", "conv_tiled"])
+                                    "softmax", "gemm", "gemm_tiled", "gemms", "conv",
+                                    "conv_tiled"])
 def test_kernel_matches_the_functional_sim(kernel, tmp_path):
     plat, g, dram = run_both(build(kernel, tmp_path))
     assert_registers_match(plat, g)
@@ -72,11 +79,11 @@ def test_kernel_matches_the_functional_sim(kernel, tmp_path):
     assert not plat.core.decode2.violations
 
 
-def test_softmax_differs_only_by_its_rounded_reduction(tmp_path):
-    """softmax sums with rsum.vi. The model's 16-bit vector register file
-    holds that sum as BF16; the functional sim keeps it in fp32. The sum's
-    reciprocal scales every output, so outputs may differ by one BF16 step,
-    and nothing more."""
-    plat, g, dram = run_both(build("softmax", tmp_path))
+def test_softmax_against_the_functional_sims_own_sum(tmp_path):
+    """softmax sums with rsum.vi. The functional sim adds in fp32, in
+    element order, and keeps the sum unrounded; the RTL adds pairwise in
+    BF16. The sum's reciprocal scales every output, so outputs may differ
+    by a BF16 step or two, and nothing more."""
+    plat, g, dram = run_both(build("softmax", tmp_path), reductions="functional")
     off = [abs(m - r) for m, r in dram.values() if m != r]
-    assert off and max(off) == 1
+    assert off and max(off) <= 2

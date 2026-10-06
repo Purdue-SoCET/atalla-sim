@@ -9,10 +9,10 @@ Test programs stay inside what the functional sim supports: scratchpads 0
 and 1, rows 0-31, full 32-element rows, and they never write m0 (the
 functional sim lets a program write it; the RTL holds it at all ones).
 
-Vector registers are compared with the functional sim's values rounded to
-BF16: it keeps a reduction's fp32 sum unrounded in the register, which the
-16-bit register file cannot. For the same reason the programs never store a
-reduction's result out to DRAM.
+The functional sim runs with its reductions in the RTL's order
+(golden.hardware_reduce: per lane, then a BF16 tree), which is what the
+lane datapath computes; its own sequential fp32 sum can differ in the last
+BF16 bit.
 """
 import random
 import struct
@@ -125,7 +125,7 @@ def run_platform(prog, data):
 
 def compare_to_golden(prog, data):
     golden.require(pytest)
-    g = golden.run_golden_state(prog, data)
+    g = golden.run_golden_state(prog, data, reductions="hardware")
     plat = run_platform(prog, data)
     c = plat.core
     for rr in range(1, 256):

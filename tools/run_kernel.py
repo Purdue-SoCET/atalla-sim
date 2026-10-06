@@ -49,11 +49,13 @@ def build_kernel(name: str, extra, out_dir: Path) -> Path:
     return out
 
 
-def compare(plat, instr, data) -> int:
+def compare(plat, instr, data, reductions: str = "hardware") -> int:
     """Differences from the functional sim: scalar and vector registers, and
-    DRAM as the DMA reads it. Returns how many."""
+    DRAM as the DMA reads it. Returns how many. With reductions="hardware"
+    the functional sim reduces in the RTL's order, as the lane datapath
+    does; "functional" keeps its own sequential fp32 sum."""
     from src.misc.memory import Memory
-    g = golden.run_golden_state(instr, data)
+    g = golden.run_golden_state(instr, data, reductions=reductions)
     c, bad = plat.core, 0
     for r in range(1, 256):
         if c.scalar_reg(r) != u32(g["sregs"].get(r, 0)):
@@ -86,8 +88,11 @@ def main() -> None:
                     help="also run the functional sim and compare the final state")
     ap.add_argument("--limit", type=int, default=5_000_000, help="cycle limit")
     ap.add_argument("--dram-latency", type=int, default=6)
-    ap.add_argument("--lanes", type=int, default=4)
+    ap.add_argument("--lanes", type=int, default=16)
     ap.add_argument("--cold-icache", action="store_true")
+    ap.add_argument("--functional-reductions", action="store_true",
+                    help="with --golden: compare against the functional sim's own "
+                         "fp32 sums instead of the RTL's reduction order")
     args = ap.parse_args(argv)
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -118,8 +123,9 @@ def main() -> None:
     if args.golden:
         if not golden.HAVE_GOLDEN:
             sys.exit("functional sim unavailable: %s" % golden.load_error)
-        print("against the functional sim:")
-        compare(plat, instr, data)
+        red = "functional" if args.functional_reductions else "hardware"
+        print("against the functional sim (%s reduction order):" % red)
+        compare(plat, instr, data, red)
 
 
 if __name__ == "__main__":

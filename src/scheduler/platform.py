@@ -19,7 +19,7 @@ from typing import Dict, Optional
 
 from atalla.sysarr_tpu_system import (
     PHASE_BACKEND, PHASE_CORE, PHASE_SPAD, PHASE_SYSARR, PHASE_VLS,
-    RoundRobinBackendTicker, build_tpu_platform)
+    GSAUTPUBridge, RoundRobinBackendTicker, build_tpu_platform)
 from base.sched import CompositeClocked
 from memory.dram import DRAM
 from scheduler.core import SchedulerCore
@@ -39,6 +39,19 @@ class DramWords:
 
     def write(self, addr: int, value: int) -> None:
         self.dram.write(int(addr) & ~3, (int(value) & MASK32).to_bytes(4, "little"))
+
+
+class ArrayValueBridge(GSAUTPUBridge):
+    """The GSAU-to-systolic-array bridge, returning the array's results as
+    values. The harnesses' bridge packs them as FP16 bit patterns, because
+    their vector registers hold raw 16-bit lanes; the scheduler's hold BF16
+    values, and the array already rounds its outputs to BF16."""
+
+    def _pack_rsp(self, out_row, meta):
+        vec = [0.0] * self.vc.vector_len
+        for i, val in enumerate(out_row[: self.size]):
+            vec[i] = float(val)
+        return {"vdata": vec, "meta": dict(meta), "dtype": meta.get("dtype")}
 
 
 @dataclass
@@ -74,7 +87,7 @@ class SchedulerPlatform:
 
 
 def build_scheduler_platform(program: Dict[int, int], data: Optional[Dict[int, int]] = None, *,
-                             dram_latency: int = 6, lane_count: int = 4,
+                             dram_latency: int = 6, lane_count: int = 16,
                              warm_icache: bool = True, **core_kw) -> SchedulerPlatform:
     """`program` and `data` as load_program_text returns them; `data` words
     go into DRAM, which both the data cache and the scratchpad DMA see."""
@@ -90,7 +103,7 @@ def build_scheduler_platform(program: Dict[int, int], data: Optional[Dict[int, i
     root.add_child(core, phase=PHASE_CORE)
     for bridge in tpu.vls_bridges:
         root.add_child(bridge, phase=PHASE_VLS)
-    root.add_child(tpu.sysarr_bridge, phase=PHASE_SYSARR)
+    root.add_child(ArrayValueBridge(tpu.vc, tpu.sa), phase=PHASE_SYSARR)
     root.add_child(tpu.spad, phase=PHASE_SPAD)
     if tpu.backends:
         root.add_child(RoundRobinBackendTicker(tpu.backends), phase=PHASE_BACKEND)
