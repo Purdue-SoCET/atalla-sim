@@ -25,7 +25,7 @@ import pytest
 
 from scheduler import golden
 from scheduler.core import load_program_text
-from scheduler.platform import build_scheduler_platform
+from atalla.atalla_platform import build_atalla_platform
 from scheduler.semantics import u32
 from scheduler.vector import bf16_bits, bf16_round
 
@@ -47,7 +47,7 @@ def build(kernel: str, tmp_path: Path) -> str:
 def run_both(text: str, reductions: str = "hardware"):
     instr, data = load_program_text(text)
     g = golden.run_golden_state(instr, data, reductions=reductions)
-    plat = build_scheduler_platform(instr, data)
+    plat = build_atalla_platform(instr, data)
     plat.run_until_done(limit=2_000_000)
     from src.misc.memory import Memory              # the functional sim's
     gm = Memory()

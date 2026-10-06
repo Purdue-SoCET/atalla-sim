@@ -19,12 +19,12 @@ one commit, so no stage sees another's value early.
 | 2 | `fetch.py`, `icache.py`, `decode1.py` | front end |
 | 3 | `control.py`, `decode2.py` | decode 2: operands, hazards, issue |
 | 4 | `semantics.py`, `execute.py`, `dcache.py` | scalar execute, writeback, a non-blocking load/store unit, the data cache |
-| 5 | `vector.py`, `platform.py` | vector and DMA dispatch into the vector core's units, vector writeback |
-| 6 | `platform.py` | real kernels end to end on the scheduler-driven platform |
+| 5 | `vector.py` | vector and DMA dispatch into the vector core's units, vector writeback |
+| 6 | `atalla/atalla_platform.py` | real kernels end to end on the scheduler-driven platform |
 
 `SchedulerCore(vector_core=..., backends=...)` drives a vector core and the
-scratchpads' DMA backends (stage 5); `scheduler/platform.py` builds the whole
-machine around it. Without a vector core, the vector side's signals (unit
+scratchpads' DMA backends (stage 5); `atalla/atalla_platform.py` builds the
+whole machine around it (see Platform). Without a vector core, the vector side's signals (unit
 readiness, VLSU readiness, scratchpad busy, and `writeback_at(cycle, ...)` for
 vector, mask and SDMA writebacks) are inputs that tests set.
 `SchedulerCore(execute=False)` turns the execute stage off too, and makes its
@@ -33,7 +33,7 @@ stage 2 and 3 tests drive them by hand.
 
 A program runs with `run_until_done()`: until execute has halted and the data
 cache has written back its dirty lines. `scalar_reg(r)` and `memory` hold the
-final state; on the platform, `SchedulerPlatform.run_until_done()` ticks every
+final state; on the platform, `AtallaPlatform.run_until_done()` ticks every
 component.
 
 ## Decode 2
@@ -251,6 +251,38 @@ and the RTL doesn't add in that order. So the golden comparisons run the
 functional sim with its reductions swapped for the RTL's order
 (`golden.run_golden_state(..., reductions="hardware")`).
 
+## Platform
+
+`build_atalla_platform(program, data, systolic_array="meissa")` builds
+`AtallaPlatform` (`src/atalla/atalla_platform.py`) from the same parts as
+the harnesses' `TPUPlatform`, arranged as `rtl/modules/system.sv` arranges
+them: the vector core's units, four scratchpad pads with their DMA backends,
+DRAM, the VLSU-to-scratchpad bridges, the GSAU-to-array bridge, and the
+systolic array (MEISSA, as in the RTL, or `"tpu"`). The scheduler core takes
+the vector core's place in the tick order. It drives the units through
+their own calls and keeps none of their timing itself:
+
+| op | call |
+|---|---|
+| lane ops | `vc.datapath.enqueue(...)` |
+| `gemm.vv`, `lw.vi` | `vc.gsau.issue(...)` |
+| `vreg.ld`, `vreg.st` | the VLSU of scratchpad `sid` |
+| `scpad.ld`, `scpad.st` | `backends[sid].driver_to_backend_start_load/store(...)` |
+
+and reads their readiness for decode 2 and their results for writeback.
+
+**Memory.** In the RTL the icache, the dcache and the four scratchpad
+backends share one memory (`sim_ram_rr`, in the testbench), round robin.
+Here they are six masters on one DRAM channel: one burst launch a cycle
+across all of them, `burst_bytes` (32) each, back `dram_latency` (6) cycles
+later, taking turns in a round-robin ticker. The caches reach it through
+bus ports (`memory/bus.py`): a line fill goes out as bursts and each 64-bit
+beat is taken when its burst is back; written beats gather into bursts in a
+small buffer. A cache line fill therefore waits behind the scratchpads'
+DMA, and they behind it. The icache starts cold (`warm_icache=True` for
+tests that time something else). The ports' `stats` count bursts, bytes,
+cycles busy and cycles lost to contention.
+
 ## Kernels
 
 `tools/run_kernel.py` runs a kernel through the whole machine: the
@@ -265,6 +297,7 @@ tools/run_kernel.py softmax --golden  # also run the functional sim and compare
 
 `--golden` compares against the functional sim with the RTL's reduction
 order; add `--functional-reductions` to compare against its own fp32 sums.
+`--warm-icache` starts with the program in the icache.
 
 A kernel name is assembled by the functional sim's own build script
 (`third_party/atalla-functional-sim/kernels/build_<name>.py`), in its `.in`
@@ -276,15 +309,16 @@ reads it. The functional sim runs with the RTL's reduction order.
 
 | kernel | cycles |
 |---|---:|
-| `add`, `relu`, `sigmoid` | 1,583 / 1,506 / 394 |
-| `layernorm_param`, `maxpool` | 3,294 / 1,092 |
-| `gemm`, `gemm_tiled` | 2,437 / 1,255 |
-| `gemms`, `gemms_function`, `gemms_pipelined`, `…_loop_unroll` | 9,038 / 8,098 / 8,099 / 8,077 |
-| `conv`, `conv_tiled`, `conv_pipelined`, `conv_unrolled_pipelined` | 3,229 / 1,421 / 3,233 / 3,233 |
-| `softmax`, `attention`, `flash_attention` | 1,793 / 59,389 / 16,874 |
+| `add`, `relu`, `sigmoid` | 1,597 / 1,729 / 430 |
+| `layernorm_param`, `maxpool` | 3,604 / 1,123 |
+| `gemm`, `gemm_tiled` | 2,332 / 1,370 |
+| `gemms`, `gemms_function`, `gemms_pipelined`, `…_loop_unroll` | 8,413 / 7,504 / 7,496 / 7,662 |
+| `conv`, `conv_tiled`, `conv_pipelined`, `conv_unrolled_pipelined` | 3,118 / 1,573 / 3,139 / 3,153 |
+| `softmax`, `attention`, `flash_attention` | 2,331 / 59,093 / 18,643 |
 
-Cycle counts are with the default platform: 16 lanes, DRAM latency 6, and a
-warm instruction cache. Against the functional sim's own sequential fp32
+Cycle counts are with the default platform: the MEISSA array, 16 lanes,
+DRAM latency 6, and a cold instruction cache fetching over the shared DRAM
+channel. Against the functional sim's own sequential fp32
 sums, `softmax`'s outputs differ by at most 2 BF16 steps.
 
 **Weights.** `lw.vi` shifts its vector into the systolic array's weights as
@@ -296,8 +330,8 @@ result). The functional sim's `lw.vi` and its kernels were changed to that
 contract (`ASSEMBLY_SYNTAX.md`); before, it filled columns 0, 1, … in load
 order, which the hardware doesn't do. The systolic array model computes the
 values: its weight path shifts each vector in at column 0, and
-`ArrayValueBridge` (`platform.py`) hands its BF16 rows back to the GSAU,
-which pairs them with `vd`.
+`ArrayValueBridge` (`atalla_platform.py`) hands its BF16 rows back to the
+GSAU, which pairs them with `vd`.
 
 **`li.s`** is a pseudo-instruction the hardware doesn't decode. The
 assembler (`build.py`, and `build_compiler.py` for C kernels) now expands
@@ -317,7 +351,7 @@ geometry is configurable (`DCacheConfig`):
 | size, ways, line | 4 KB, 4, 64 B (16 sets) |
 | MSHRs, targets per MSHR | 8, 8 |
 | SRAM read / write latency | 2 / 4 (`sram_bank`) |
-| memory | 64-bit beats; first-beat and write latency are parameters, 0 by default |
+| memory | 64-bit beats; on the platform, bursts on the shared DRAM channel (see Platform); alone, first-beat and write latency are parameters, 0 by default |
 
 - **Policy:** write-back, write-allocate; an invalid way, else tree
   pseudo-LRU.
