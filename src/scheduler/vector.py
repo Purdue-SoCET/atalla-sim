@@ -31,29 +31,25 @@ Where the RTL is wrong this does what was meant (docs/scheduler-rtl-bugs.md):
 all four VLSUs write back (bug 4), the write ports are chosen by the
 register file's bank vd[1:0] (bug 5), and lw.vi writes no register (bug 3).
 
-Values follow the functional sim's lane rules (lane_values below): operands
-are rounded to BF16, the op is done in fp32 and the result rounded to BF16
-(nearest even); compares use the values as they are; `.vs` operands are the
-scalar register's fp32 bit pattern; masked-off lanes keep the destination's
-old value; reductions sum or compare the active lanes in lane order and place
-the result by imm[6:5] (broadcast, one element, or one element over vs1); and
-vmov.vts moves an element's fp32 bit pattern. One difference: the functional
-sim writes a reduction's fp32 sum into the vector register unrounded, but the
-register file holds BF16, so here it is rounded.
-
-The lane datapath model times the lane ops; their values are computed here,
-the functional sim's way: the lane model works in double precision and
-rounds once, the functional sim does each op in fp32 on BF16 operands.
-Vector registers hold BF16 values as floats; the scratchpad holds their
-16-bit patterns.
+The units compute the values; this only routes operands to them and
+formats what comes back for writeback. The lane datapath
+(vector_core/vector_lanes.py) does the element ops on BF16 operands and
+rounds each result to BF16, and does reductions as the RTL does: each lane
+folds its slice, then a pairwise tree across lanes, every step rounded to
+BF16, placed by imm[6:5] (broadcast, one element, or one element over vs1).
+The systolic array computes gemm.vv. What is left here is writeback
+formatting: a compare's 1/0 lanes are packed into a mask; masked-off
+elements (or mask bits) keep the destination's old value, as the functional
+sim does (the RTL's result collector writes them as 0); `.vs` operands are
+the scalar register's fp32 bit pattern; and vmov.vts moves an element's fp32
+bit pattern. Vector registers hold BF16 values as floats; the scratchpad
+holds their 16-bit patterns.
 """
 
 import math
-import struct
 from collections import deque
 
-import numpy as np
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Deque, Dict, List, Optional, Sequence, Tuple
 
 from scheduler.control import (
@@ -107,62 +103,24 @@ UNIT_OF = {V_ALU_ADD: "alu", V_ALU_SUB: "alu", V_MUL: "mul", V_EXP: "exp",
 LANE_FU = {"alu": "alu", "mul": "alu", "exp": "exp", "reduction": "alu"}
 
 
-def _q(a) -> np.ndarray:
-    """functional sim bf16_round, on float32."""
-    u = np.asarray(a, dtype=np.float32).view(np.uint32)
-    u = (u + np.uint32(0x7FFF) + ((u >> 16) & np.uint32(1))) & np.uint32(0xFFFF0000)
-    return u.view(np.float32)
-
-
-_ARITH = {V_ALU_ADD: np.add, V_ALU_SUB: np.subtract, V_MUL: np.multiply}
-_CMP = {V_ALU_MGT: np.greater, V_ALU_MLT: np.less, V_ALU_MEQ: np.equal,
-        V_ALU_MNEQ: np.not_equal}
-
-
-def lane_values(o: VectorOp, vs1: Sequence[float], vs2, scalar: Optional[float],
-                mask: int):
-    """What a lane op computes before masking: a vector, a compare's bit
-    vector as an int, or a reduction's value (functional sim vector_lanes)."""
-    a = np.asarray(vs1, dtype=np.float32)
-    with np.errstate(over="ignore", invalid="ignore"):
-        if o.fu in _CMP:
-            b = np.float32(scalar) if scalar is not None else np.asarray(vs2, dtype=np.float32)
-            bits = _CMP[o.fu](a, b)
-            return sum(1 << i for i, t in enumerate(bits) if t)
-        if o.fu in _ARITH:
-            b = _q(np.full_like(a, scalar) if scalar is not None else np.asarray(vs2, np.float32))
-            return [float(x) for x in _q(_ARITH[o.fu](_q(a), b))]
-        if o.fu == V_EXP:
-            return [float(x) for x in _q(np.exp(_q(a)))]
-        if o.fu == V_REDU:
-            q = _q(a)
-            act = [q[i] for i in range(len(q)) if (mask >> i) & 1]
-            if o.mnemonic == "rsum.vi":
-                acc = np.float32(0.0)
-                for x in act:
-                    acc = np.float32(acc + x)
-                return float(acc)
-            if o.mnemonic == "rmin.vi":
-                return float(min(act)) if act else math.inf
-            return float(max(act)) if act else -math.inf
-    raise ValueError("not a lane op: %s" % o.mnemonic)
-
-
-def reduce_output(imm: int, vs: Sequence[float], r: float) -> List[float]:
-    """functional_sim.apply_imm_vector_op."""
-    idx = imm & 0x1F
+def reduce_placement(imm: int) -> Tuple[str, int]:
+    """imm[6] broadcast, else imm[5] the result alone at imm[4:0], else the
+    result at imm[4:0] over vs1 (vreduction.sv, functional sim
+    apply_imm_vector_op) -> the reduction unit's out mode and index."""
     if (imm >> 6) & 1:
-        return [r] * len(vs)
+        return "broadcast", 0
     if (imm >> 5) & 1:
-        return [r if i == idx else 0.0 for i in range(len(vs))]
-    return [r if i == idx else v for i, v in enumerate(vs)]
+        return "partial_zero", imm & 0x1F
+    return "partial_passthru", imm & 0x1F
 
 
 @dataclass
 class _LaneOp:
-    """An op in the lane datapath and the write it will make."""
+    """An op in the lane datapath, and what its write merges with: the
+    destination's old value and the op's mask."""
     op: VectorOp
-    write: "VectorWrite"
+    old: Any
+    mask: int
 
 
 @dataclass
@@ -235,10 +193,6 @@ class VectorSide:
         self._vlsu_holds: Dict[int, Deque] = {s: deque() for s in range(len(vc.vls_units))}
         self.sdma_busy = [False] * max(4, len(self.backends))
         self._sdma_done: List[int] = []           # rs1s whose SDMA finished
-        #: The systolic array's stationary weights; lw.vi shifts a column
-        #: in at column 0 (functional_sim.py's gemm_weights).
-        self.weights = np.zeros((self.n, self.n), dtype=np.float32)
-        self._gemm_out: Deque[List[float]] = deque()
         self.stats = dict(lane_ops=0, gsau_ops=0, vlsu_loads=0, vlsu_stores=0,
                           sdma_loads=0, sdma_stores=0, vector_writes=0, mask_writes=0,
                           wb_conflict_cycles=0)
@@ -265,9 +219,9 @@ class VectorSide:
                 out.append(VectorWrite("vlsu%d" % s, int(wb["vd"]), data))
         wb = self.vc.gsau.writebacks.peek()
         if wb is not None:
-            # The array model times the gemm; its value was computed at
-            # dispatch, and results come back in order.
-            out.append(VectorWrite("gsau", int(wb["dst"]), self._gemm_out[0]))
+            # The systolic array's result, as the GSAU paired it with vd.
+            out.append(VectorWrite("gsau", int(wb["dst"]),
+                                   [float(x) for x in wb["data"]][: self.n]))
         if self._lane_results:
             out.append(self._lane_results[0])
         return out
@@ -298,7 +252,6 @@ class VectorSide:
                 vls.pop_writeback()
         if "gsau" in granted:
             self.vc.gsau.pop_writeback()
-            self._gemm_out.popleft()
         if self._lane_results and self._lane_results[0].source in granted:
             self._lane_results.popleft()
 
@@ -332,62 +285,54 @@ class VectorSide:
         return None, {}
 
     def _dispatch_lanes(self, o: VectorOp, ops: Dict) -> None:
-        """The lane datapath times the op; its value is computed here. The
-        destination's old value can be read now: nothing else may write it
-        while this op is in flight (the scoreboard's WAW check)."""
-        vs1 = list(ops["vs1"])
+        """Hand the lane datapath the op and its operands; it computes the
+        value. The destination's old value can be read now: nothing else
+        may write it while this op is in flight (the scoreboard's WAW check)."""
         mask = int(ops.get("vms", MASK32))
-        scalar = vs2 = None
         if o.op2_src == 0:
-            vs2 = list(ops["vs2"])
+            src1 = list(ops["vs2"])
         elif o.op2_src == 2:                       # .vs: the scalar's fp32 bits
-            scalar = bits_fp32(ops["rs1"])
-        value = lane_values(o, vs1, vs2, scalar, mask)
-        if o.fu == V_REDU:
-            write = VectorWrite("reduction", o.vd,
-                                reduce_output(o.imm, vs1, bf16_round(value)))
+            src1 = [bits_fp32(ops["rs1"])] * self.n
+        else:
+            src1 = None
+        reduce = o.fu == V_REDU
+        out_mode, index = reduce_placement(o.imm) if reduce else ("partial_zero", 0)
+        inst = self.vc.datapath.enqueue(
+            src0=list(ops["vs1"]), src1=src1, mask=lane_mask(mask, self.n),
+            op="add" if reduce else LANE_OP[o.fu], dst=o.vd,
+            reduce=reduce, reduce_op=REDUCE_OP.get(o.mnemonic, "sum"),
+            reduce_out_mode=out_mode, reduce_index=index, dtype=self.dtype)
+        if reduce:
+            old = None
         elif o.fu in COMPARES:
             old = self.read_mask(o.vmd)
-            write = VectorWrite("lanes", o.vmd, (value & mask) | (old & ~mask & MASK32),
-                                is_mask=True)
         else:
-            write = VectorWrite("lanes", o.vd, merge(self.read_vreg(o.vd), value, mask))
-        # The datapath only times the op: give it zeros, so its own value
-        # model (math.exp) can't overflow on real operands.
-        inst = self.vc.datapath.enqueue(
-            src0=[0.0] * self.n, src1=None, mask=None,
-            op="exp" if o.fu == V_EXP else "add", dst=o.vd,
-            reduce=o.fu == V_REDU, reduce_op="sum", reduce_out_mode="broadcast",
-            dtype=self.dtype)
-        self._lane_ops[inst] = _LaneOp(o, write)
+            old = self.read_vreg(o.vd)
+        self._lane_ops[inst] = _LaneOp(o, old, mask)
         self.stats["lane_ops"] += 1
 
     def _collect_lanes(self) -> None:
+        """Format a finished lane op for writeback: a reduction's vector as
+        it is; a compare's 1/0 lanes packed into a mask; masked-off elements
+        or mask bits keep the destination's old value."""
         dp = self.vc.datapath
-        if dp.result_valid:
-            self._lane_results.append(self._lane_ops.pop(dp.last_result["inst_id"]).write)
-
-    def _load_weight(self, v: Sequence[float]) -> None:
-        """lw.vi, as the systolic array does it (MEISSA mul_grid.sv): the
-        vector shifts in at column 0 and every column moves one to the
-        right. Kernels load w_(n-1) first and w_0 last, so column j holds
-        w_j (ASSEMBLY_SYNTAX.md's lw.vi contract)."""
-        self.weights[:, 1:] = self.weights[:, :-1]
-        self.weights[:, 0] = np.asarray(v, dtype=np.float32)
-
-    def _gemm(self, a: Sequence[float]) -> List[float]:
-        """gemm.vv: out[j] = vs1 . column j, operands rounded to BF16, the
-        dot products in fp32, the result rounded to BF16 (gemm.py
-        compute_tile)."""
-        out = _q(_q(np.asarray(a, dtype=np.float32)[None, :]) @ _q(self.weights))
-        return [float(x) for x in out.reshape(-1)]
+        if not dp.result_valid:
+            return
+        r = dp.last_result
+        lo = self._lane_ops.pop(r["inst_id"])
+        o, vec = lo.op, [float(x) for x in r["vector"]][: self.n]
+        if o.fu == V_REDU:
+            w = VectorWrite("reduction", o.vd, vec)
+        elif o.fu in COMPARES:
+            bits = sum(1 << i for i, x in enumerate(vec) if x)
+            w = VectorWrite("lanes", o.vmd, (bits & lo.mask) | (lo.old & ~lo.mask & MASK32),
+                            is_mask=True)
+        else:
+            w = VectorWrite("lanes", o.vd, merge(lo.old, vec, lo.mask))
+        self._lane_results.append(w)
 
     def _dispatch_gsau(self, o: VectorOp, ops: Dict) -> None:
         weight = o.mnemonic == "lw.vi"
-        if weight:
-            self._load_weight(ops["vs1"])
-        else:
-            self._gemm_out.append(self._gemm(ops["vs1"]))
         cmd = {"vdata": list(ops["vs1"]), "is_weight": weight,
                "expect_output": not weight, "dtype": self.dtype,
                "meta": {"dtype": self.dtype, "kind": o.mnemonic}}
@@ -445,7 +390,7 @@ class VectorSide:
     @property
     def idle(self) -> bool:
         vc = self.vc
-        return (not self._lane_ops and not self._lane_results and not self._gemm_out
+        return (not self._lane_ops and not self._lane_results
                 and vc.datapath.pending_issue.is_empty()
                 and not vc.gsau.has_pending() and vc.gsau.rd_queue.is_empty()
                 and vc.gsau.writebacks.is_empty()

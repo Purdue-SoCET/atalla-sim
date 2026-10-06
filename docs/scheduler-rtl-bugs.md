@@ -489,7 +489,8 @@ a decision is needed either way.
 | `shw.s` | read-modify-write of the halfword (`ld_st_unit.sv:170-177`) | stores `rs >> 16` as a whole word |
 | `mod.s` with a negative operand | remainder takes the dividend's sign (`socetlib_shift_test_restore_divider.sv:81, 139-140`) | takes the divisor's sign (numpy `%`) |
 | `m0` | hardwired to all ones; writes dropped (`reggie.sv:187, 260`, `ZERO_REG_VAL = 1`) | writable, starts at all ones (the model follows the RTL) |
-| A reduction's result | rounded to BF16 by the 16-bit vector register file | kept as an fp32 value in the vector register (the model follows the RTL) |
+| A reduction's result | each lane folds its pair, masked elements as the identity (`alu_FU.sv:45-61`), then a pairwise tree of BF16 adders (`reduction_tree.sv`); BF16 in the register | a sequential fp32 sum in element order, kept as an fp32 value in the vector register (the model follows the RTL) |
+| Masked-off elements of a lane op | written as 0: the result collector stores `mask ? result : 0` (`result_collector.sv:67`) and the register file has no element write enable | keep the destination's old value (the model follows the functional sim) |
 
 ## Not bugs
 
@@ -517,4 +518,5 @@ a decision is needed either way.
 | atalla-sim `src/base/dtype.py` | BF16 falls back to FP16 when numpy has no bfloat16 (numpy 2.x never has it): FP16 precision, and values above 65504 become infinity. Hit the vector core's lanes and register writes and both arrays' "BF16". Fixed in atalla-sim `4b20324` | Seen in the model's golden tests |
 | `atalla-functional-sim` `src/components/scalar.py:190` | `sll.s`/`srl.s`/`sra.s` raise `OverflowError` under numpy 2 when the shift-amount register is 2³¹ or more | Seen in the model's golden tests |
 | `modules/systolic_array/mul_grid.sv:76-90` | Each `lw.vi` vector enters as a weight column at column 0 and shifts right, so after 32 loads column j holds load 31 − j; the functional sim used to put load k in column k. Resolved on the software side: the ISA now defines `lw.vi` as shift-in at column 0 and kernels load weight rows last to first | Reading |
+| `modules/vector/vreduction.sv`, `modules/vector/reduction/vreduction.sv` | Two modules named `vreduction` with opposite priority when `imm[6]` and `imm[5]` are both set: the first clears (result at `imm[4:0]`, zeros elsewhere), the second broadcasts, as the functional sim does. Which one builds depends on the file list | Reading |
 | `modules/systolic_array/sysarr_MEISSA_top.sv`, `pipelined_adder_tree.sv` | The psum path is half-removed: the skew buffer and the adder tree's final psum add are commented out, but the GSAU still drives `sa_partial_en` and `sa_array_in_partials` | Reading |
