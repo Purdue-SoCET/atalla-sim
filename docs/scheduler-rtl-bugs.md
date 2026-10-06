@@ -497,10 +497,10 @@ a decision is needed either way.
   It looks wrong but wastes nothing: 64 consecutive packets use all 64
   entries.
 - **`li.s` (opcode 47) isn't decoded.** It's a pseudo-instruction (`lui.s`
-  then `addi.s`). But the functional sim's assembler emits it as a real
-  opcode 47 and runs it, and kernels use it (softmax). Code built that way
-  loses those instructions on the hardware. That needs fixing in the
-  assembler, not the RTL.
+  then `addi.s`). The functional sim's assemblers used to emit most `li.s`
+  as a raw opcode 47 and run it, so kernels built that way lost those
+  instructions on the hardware. Both assemblers (`build.py`,
+  `build_compiler.py`) now expand every `li.s`.
 - **`gemm.vv` reads no `vs2`.** It's matmul-only by design; partial sums are
   accumulated with `add.vv`.
 
@@ -514,6 +514,7 @@ a decision is needed either way.
 | `include/memory/scratchpad/scpad_params.svh` | `SCPAD_SIZE_BYTES` is 1 MB per pad; the intended size is 0.5 MB (4 × 0.5 MB = 2 MB) | Reading |
 | `atalla-functional-sim` `src/functional_sim.py:326` onward | `blt.s`, `bge.s`, `bgt.s`, `ble.s` compare the registers unsigned (they are stored as `& 0xFFFFFFFF`); the ISA document says signed, as the RTL does | Reading |
 | `atalla-functional-sim` `src/functional_sim.py`, `.mvv`/`.mvs` | A masked compare reads the old mask MSB-first (`format(old, '032b')`) but writes it back LSB-first (`value \|= bit << i`), so the masked-off bits come out reversed | Reading |
-| atalla-sim `src/base/dtype.py` | BF16 falls back to FP16 when numpy has no bfloat16 (numpy 2.x never has it): FP16 precision, and values above 65504 become infinity. Hits the vector core's lanes and register writes and the MEISSA array's "BF16" | Seen in the model's golden tests |
+| atalla-sim `src/base/dtype.py` | BF16 falls back to FP16 when numpy has no bfloat16 (numpy 2.x never has it): FP16 precision, and values above 65504 become infinity. Hit the vector core's lanes and register writes and both arrays' "BF16". Fixed in atalla-sim `4b20324` | Seen in the model's golden tests |
 | `atalla-functional-sim` `src/components/scalar.py:190` | `sll.s`/`srl.s`/`sra.s` raise `OverflowError` under numpy 2 when the shift-amount register is 2³¹ or more | Seen in the model's golden tests |
+| `modules/systolic_array/mul_grid.sv:76-90` | Each `lw.vi` vector enters as a weight column at column 0 and shifts right, so after 32 loads column j holds load 31 − j; the functional sim used to put load k in column k. Resolved on the software side: the ISA now defines `lw.vi` as shift-in at column 0 and kernels load weight rows last to first | Reading |
 | `modules/systolic_array/sysarr_MEISSA_top.sv`, `pipelined_adder_tree.sv` | The psum path is half-removed: the skew buffer and the adder tree's final psum add are commented out, but the GSAU still drives `sa_partial_en` and `sa_array_in_partials` | Reading |

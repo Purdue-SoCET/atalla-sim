@@ -104,8 +104,7 @@ class VeggieStorage:
         return self.vc.read_vreg(r)
 
     def write(self, r: int, value) -> None:
-        # Straight into the banks: values are already BF16, and the vector
-        # core's cast would round them to FP16 (numpy has no bfloat16).
+        # Straight into the banks: the values are already BF16.
         bank, addr = self.vc._reg_to_bank_addr(r)
         self.vc.veggie.data_banks[bank][addr] = [float(x) for x in value]
         self.vc.veggie.dtype_banks[bank][addr] = DType.BF16

@@ -20,7 +20,7 @@ one commit, so no stage sees another's value early.
 | 3 | `control.py`, `decode2.py` | decode 2: operands, hazards, issue |
 | 4 | `semantics.py`, `execute.py`, `dcache.py` | scalar execute, writeback, a non-blocking load/store unit, the data cache |
 | 5 | `vector.py`, `platform.py` | vector and DMA dispatch into the vector core's units, vector writeback |
-| 6 | — | platform wiring in `build_tpu_platform`, end-to-end kernels |
+| 6 | `platform.py` | real kernels end to end on the scheduler-driven platform |
 
 `SchedulerCore(vector_core=..., backends=...)` drives a vector core and the
 scratchpads' DMA backends (stage 5); `scheduler/platform.py` builds the whole
@@ -194,6 +194,7 @@ document and the assembler, and otherwise the functional sim:
 | `blt`/`bge`/`bgt`/`ble` | signed (the functional sim compares unsigned) | signed |
 | scalar BF16 values | fp32 layout, BF16 in the upper half | lower half |
 | `lhw.s`, `shw.s`, `mod.s` | as the functional sim | see the bug note |
+| divide by zero | `rcp.bf` gives ±∞; `div`/`mod` follow RISC-V (−1, the dividend) | not checked (the functional sim raises) |
 
 ## Vector and DMA dispatch
 
@@ -233,13 +234,64 @@ registers are 16-bit:
 
 - a reduction's result is rounded to BF16; the functional sim writes its
   fp32 sum into the register unrounded;
-- the lane datapath model only times the ops: its BF16 cast is FP16 while
-  numpy has no bfloat16, so the values are computed in `vector.py`.
+- the lane datapath model only times the ops; the values are computed in
+  `vector.py` the functional sim's way (each op in fp32 on BF16 operands,
+  where the lane model works in double precision).
 
-**Open:** `gemm.vv` is timed through the GSAU and the systolic array model,
-but its values don't follow the ISA yet. The array takes each `lw.vi` as a
-weight row where the ISA loads a column (`out[j] = vs1 · w_j`), and its BF16
-is FP16 too.
+`gemm.vv` is timed through the GSAU and the systolic array model; its value
+is computed by the scheduler (see Kernels, Weights).
+
+## Kernels
+
+`tools/run_kernel.py` runs a kernel through the whole machine: the
+instruction stream goes to the scheduler, which drives the vector core's
+units, the systolic array, the scratchpads with their DMA, and DRAM.
+
+```
+tools/run_kernel.py gemm              # build kernels/build_gemm.py and run it
+tools/run_kernel.py prog.in           # an already assembled program
+tools/run_kernel.py softmax --golden  # also run the functional sim and compare
+```
+
+A kernel name is assembled by the functional sim's own build script
+(`third_party/atalla-functional-sim/kernels/build_<name>.py`), in its `.in`
+format; `build_kernel_platform(text)` does the same from Python.
+
+Every kernel in the functional sim's metrics list runs to halt, and matches
+the functional sim at the end (registers, and DRAM as the DMA reads it):
+
+| kernel | cycles | against the functional sim |
+|---|---:|---|
+| `add`, `relu`, `sigmoid` | 1,775 / 2,082 / 442 | identical |
+| `layernorm_param`, `maxpool` | 4,646 / 1,364 | identical |
+| `gemm`, `gemm_tiled` | 2,557 / 1,303 | identical |
+| `gemms`, `gemms_function`, `gemms_pipelined`, `…_loop_unroll` | 9,614 / 8,311 / 8,312 / 8,095 | identical |
+| `conv`, `conv_tiled`, `conv_pipelined`, `conv_unrolled_pipelined` | 3,421 / 1,445 / 3,425 / 3,425 | identical |
+| `softmax`, `attention`, `flash_attention` | 2,175 / 61,309 / 19,340 | differ only by the BF16 reductions: identical with fp32 ones |
+
+Cycle counts are with the default platform: 4 lanes, DRAM latency 6, a warm
+instruction cache. The one difference is deliberate: the model rounds
+`rsum`/`rmin`/`rmax` to BF16, all the 16-bit vector register file can
+hold; the functional sim keeps the fp32 value in the register.
+
+**Weights.** `lw.vi` shifts its vector into the systolic array's weights as
+column 0, moving every column one to the right, as the array is built
+(MEISSA `mul_grid.sv`). Kernels load their weight rows last to first, so
+column j ends up holding `w_j`, and `gemm.vv` computes `out[j] = vs1 · w_j`
+with the functional sim's rounding (BF16 operands, fp32 dot products, a BF16
+result). The functional sim's `lw.vi` and its kernels were changed to that
+contract (`ASSEMBLY_SYNTAX.md`); before, it filled columns 0, 1, … in load
+order, which the hardware doesn't do. The scheduler keeps the weight matrix
+and computes each `gemm.vv` at dispatch, in program order; the GSAU and the
+systolic array model provide the timing. (The array models load each
+vector as a row, so their values aren't used; switching them to the
+shift-in-at-column-0 load would let them supply the values too.)
+
+**`li.s`** is a pseudo-instruction the hardware doesn't decode. The
+assembler (`build.py`, and `build_compiler.py` for C kernels) now expands
+every one: `addi.s rd, $0, imm` when it fits 12 bits, otherwise `lui.s` then
+`addi.s`. It used to emit most of them as a raw opcode 47, which the
+functional sim ran and the hardware would drop.
 
 ## Data cache
 
@@ -291,6 +343,11 @@ random words.
   also checks that accesses reached the cache in program order.
 
 `tests/scheduler/test_dcache.py` tests the data cache alone.
+
+`tests/scheduler/test_kernels.py` builds kernels with the functional sim's
+build scripts and runs them on both: `add`, `relu`, `sigmoid`, `layernorm`,
+`maxpool`, `gemm`, `gemm_tiled`, `gemms`, `conv` and `conv_tiled` must match
+exactly, and `softmax` within one BF16 step.
 
 `tests/scheduler/test_vector.py` checks stage 5 on the scheduler-driven
 platform:

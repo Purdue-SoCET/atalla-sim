@@ -25,8 +25,10 @@ sim. Each disagreement is listed in docs/scheduler-rtl-bugs.md:
   * mod.s takes the sign of the divisor, as the functional sim's numpy `%`
     does. (The RTL's divider gives the sign of the dividend.)
 
-Integer division or reciprocal by zero raises: the functional sim raises
-too, and a program that does it has no defined result to match.
+Division by zero doesn't stop the machine, so the model doesn't raise (the
+functional sim does): rcp.bf of +-0 is +-infinity, as IEEE gives, and
+div.s / mod.s by zero follow RISC-V (quotient -1, remainder the dividend).
+The RTL's divider result for a zero divisor hasn't been checked.
 """
 
 import math
@@ -96,11 +98,11 @@ def scalar_value(op: ScalarOp, rs1: int, rs2: int) -> int:
         return u32(s32(rs1) * s32(b))
     if base == "div":
         if s32(b) == 0:
-            raise ZeroDivisionError("%s by zero" % m)
+            return MASK32
         return u32(int(math.trunc(s32(rs1) / s32(b))))
     if base == "mod":
         if s32(b) == 0:
-            raise ZeroDivisionError("%s by zero" % m)
+            return u32(rs1)
         return u32(s32(rs1) % s32(b))
     if base == "or":
         return u32(rs1 | u32(b))
@@ -131,7 +133,7 @@ def scalar_value(op: ScalarOp, rs1: int, rs2: int) -> int:
     if m == "rcp.bf":
         a = bits_fp32(rs1)
         if a == 0.0:
-            raise ZeroDivisionError("rcp.bf of zero")
+            return fp32_bits(math.copysign(math.inf, a))
         return fp32_bits(1.0 / a)
     if m == "sqrt.bf":
         return fp32_bits(float(np.sqrt(bits_fp32(rs1))))

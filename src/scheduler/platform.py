@@ -95,3 +95,11 @@ def build_scheduler_platform(program: Dict[int, int], data: Optional[Dict[int, i
     if tpu.backends:
         root.add_child(RoundRobinBackendTicker(tpu.backends), phase=PHASE_BACKEND)
     return SchedulerPlatform(core, tpu, root)
+
+
+def build_kernel_platform(text: str, **kw) -> SchedulerPlatform:
+    """A platform loaded with an assembled program in the functional sim's
+    `.in` format (what its kernels/build_*.py scripts write)."""
+    from scheduler.core import load_program_text
+    instr, data = load_program_text(text)
+    return build_scheduler_platform(instr, data, **kw)

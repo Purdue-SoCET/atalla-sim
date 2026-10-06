@@ -42,7 +42,8 @@ sim writes a reduction's fp32 sum into the vector register unrounded, but the
 register file holds BF16, so here it is rounded.
 
 The lane datapath model times the lane ops; their values are computed here,
-because the vector core's BF16 cast is FP16 while numpy has no bfloat16.
+the functional sim's way: the lane model works in double precision and
+rounds once, the functional sim does each op in fp32 on BF16 operands.
 Vector registers hold BF16 values as floats; the scratchpad holds their
 16-bit patterns.
 """
@@ -234,6 +235,10 @@ class VectorSide:
         self._vlsu_holds: Dict[int, Deque] = {s: deque() for s in range(len(vc.vls_units))}
         self.sdma_busy = [False] * max(4, len(self.backends))
         self._sdma_done: List[int] = []           # rs1s whose SDMA finished
+        #: The systolic array's stationary weights; lw.vi shifts a column
+        #: in at column 0 (functional_sim.py's gemm_weights).
+        self.weights = np.zeros((self.n, self.n), dtype=np.float32)
+        self._gemm_out: Deque[List[float]] = deque()
         self.stats = dict(lane_ops=0, gsau_ops=0, vlsu_loads=0, vlsu_stores=0,
                           sdma_loads=0, sdma_stores=0, vector_writes=0, mask_writes=0,
                           wb_conflict_cycles=0)
@@ -260,8 +265,9 @@ class VectorSide:
                 out.append(VectorWrite("vlsu%d" % s, int(wb["vd"]), data))
         wb = self.vc.gsau.writebacks.peek()
         if wb is not None:
-            out.append(VectorWrite("gsau", int(wb["dst"]),
-                                   [bf16_round(x) for x in wb["data"]]))
+            # The array model times the gemm; its value was computed at
+            # dispatch, and results come back in order.
+            out.append(VectorWrite("gsau", int(wb["dst"]), self._gemm_out[0]))
         if self._lane_results:
             out.append(self._lane_results[0])
         return out
@@ -292,6 +298,7 @@ class VectorSide:
                 vls.pop_writeback()
         if "gsau" in granted:
             self.vc.gsau.pop_writeback()
+            self._gemm_out.popleft()
         if self._lane_results and self._lane_results[0].source in granted:
             self._lane_results.popleft()
 
@@ -345,8 +352,10 @@ class VectorSide:
                                 is_mask=True)
         else:
             write = VectorWrite("lanes", o.vd, merge(self.read_vreg(o.vd), value, mask))
+        # The datapath only times the op: give it zeros, so its own value
+        # model (math.exp) can't overflow on real operands.
         inst = self.vc.datapath.enqueue(
-            src0=vs1, src1=None, mask=None,
+            src0=[0.0] * self.n, src1=None, mask=None,
             op="exp" if o.fu == V_EXP else "add", dst=o.vd,
             reduce=o.fu == V_REDU, reduce_op="sum", reduce_out_mode="broadcast",
             dtype=self.dtype)
@@ -358,8 +367,27 @@ class VectorSide:
         if dp.result_valid:
             self._lane_results.append(self._lane_ops.pop(dp.last_result["inst_id"]).write)
 
+    def _load_weight(self, v: Sequence[float]) -> None:
+        """lw.vi, as the systolic array does it (MEISSA mul_grid.sv): the
+        vector shifts in at column 0 and every column moves one to the
+        right. Kernels load w_(n-1) first and w_0 last, so column j holds
+        w_j (ASSEMBLY_SYNTAX.md's lw.vi contract)."""
+        self.weights[:, 1:] = self.weights[:, :-1]
+        self.weights[:, 0] = np.asarray(v, dtype=np.float32)
+
+    def _gemm(self, a: Sequence[float]) -> List[float]:
+        """gemm.vv: out[j] = vs1 . column j, operands rounded to BF16, the
+        dot products in fp32, the result rounded to BF16 (gemm.py
+        compute_tile)."""
+        out = _q(_q(np.asarray(a, dtype=np.float32)[None, :]) @ _q(self.weights))
+        return [float(x) for x in out.reshape(-1)]
+
     def _dispatch_gsau(self, o: VectorOp, ops: Dict) -> None:
         weight = o.mnemonic == "lw.vi"
+        if weight:
+            self._load_weight(ops["vs1"])
+        else:
+            self._gemm_out.append(self._gemm(ops["vs1"]))
         cmd = {"vdata": list(ops["vs1"]), "is_weight": weight,
                "expect_output": not weight, "dtype": self.dtype,
                "meta": {"dtype": self.dtype, "kind": o.mnemonic}}
@@ -417,7 +445,7 @@ class VectorSide:
     @property
     def idle(self) -> bool:
         vc = self.vc
-        return (not self._lane_ops and not self._lane_results
+        return (not self._lane_ops and not self._lane_results and not self._gemm_out
                 and vc.datapath.pending_issue.is_empty()
                 and not vc.gsau.has_pending() and vc.gsau.rd_queue.is_empty()
                 and vc.gsau.writebacks.is_empty()

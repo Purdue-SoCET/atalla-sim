@@ -294,10 +294,9 @@ def test_golden_random_vector_programs(seed):
 
 
 def test_gemm_writes_back_and_lw_vi_reserves_nothing():
-    """Timing only: 32 weight loads and two gemm.vv through the GSAU and the
-    systolic array. The array model's values don't follow the ISA yet (it
-    takes each lw.vi as a weight row, the ISA as a column, and its BF16 is
-    FP16), so they aren't compared."""
+    """32 weight loads and two gemm.vv through the GSAU and the systolic
+    array complete and write back; lw.vi reserves no register. gemm values
+    are checked against the functional sim by the kernel tests."""
     pk = prologue() + [(vi("lw.vi", 0, 8 + k % 8, 0),) for k in range(32)]
     plat = build_scheduler_platform(program(*pk, vv("gemm.vv", 20, 9, 0),
                                             vv("gemm.vv", 21, 10, 0), HALT),
