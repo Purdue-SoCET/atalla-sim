@@ -160,7 +160,7 @@ BUILDING THE SIMD KERNELS
     make native
 
 Compiles `src/native/atalla_kernels.cpp` into a shared object that accelerates
-the systolic-array datapath and the fp16 cast. Optional: without it the
+the systolic-array datapath and the fp16 and bf16 casts. Optional: without it the
 simulator runs a pure-numpy fallback producing bit-identical results, just more
 slowly. One .so carries AVX-512F, AVX2 and portable scalar paths and selects
 one at load time via CPUID, so it can be built once and copied between hosts.
@@ -184,6 +184,8 @@ no FMA (products are rounded before they are summed), double precision
 throughout, and lane reductions kept in their original left-to-right order.
 `tests/native/` checks the fp16 cast against numpy across every half-precision
 midpoint and verifies the native and fallback datapaths tick identically.
+`tests/base/test_dtype_bf16.py` checks every bf16 cast path against the
+functional sim's `bf16_round` (numpy has no bfloat16).
 
 
 NOTE

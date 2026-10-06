@@ -12,8 +12,9 @@ import os
 import numpy as np
 
 # Cast modes understood by atalla_cast_array / atalla_cast_scalar.
-CAST_HALF = 0   # FP16, and BF16 while numpy has no native bfloat16
+CAST_HALF = 0   # FP16
 CAST_INT8 = 1
+CAST_BF16 = 2
 
 _LIB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                          "libatalla_kernels.so")
