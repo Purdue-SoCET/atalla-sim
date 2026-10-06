@@ -119,13 +119,14 @@ class SchedulerCore(Clocked):
                  dcache_config: Optional[DCacheConfig] = None,
                  lsu_depth: int = 4,
                  ex_latency: Optional[Dict[str, int]] = None,
-                 vector_core=None, backends=(), memory=None):
+                 vector_core=None, backends=(), memory=None,
+                 icache_port=None, dcache_port=None):
         super().__init__()
         self._tick = -1
         self.program: Dict[int, int] = dict(program or {})
 
         self.icache = ICache(first_beat_wait=icache_first_beat_wait,
-                             beat_wait=icache_beat_wait)
+                             beat_wait=icache_beat_wait, port=icache_port)
         self.btb = BTB("btb")
         self.fetch = Fetch("fetch")
         self.ifd1 = IFD1Latch("ifd1")
@@ -167,7 +168,8 @@ class SchedulerCore(Clocked):
         self.execute = bool(execute)
         self.memory = memory if memory is not None else \
             WordMemory(lambda a, d=dict(data or {}): d.get(a, 0))
-        self.dcache = DCache(config=dcache_config or DCacheConfig(), memory=self.memory)
+        self.dcache = DCache(config=dcache_config or DCacheConfig(), memory=self.memory,
+                             port=dcache_port)
         latency = dict(DEFAULT_LATENCY, **(ex_latency or {}))
         self.ex1 = Ex1()
         self.ex2 = MultiCycleUnit("ex2", latency)
@@ -306,7 +308,8 @@ class SchedulerCore(Clocked):
                 and self.lsu.idle and not any(self.scpad_busy)
                 and (self.vector is None or self.vector.idle)):
             self.halted_at = cycle          # halt_out
-        if self.halted_at is not None and self.done_at is None and self.dcache.out_flushed:
+        if (self.halted_at is not None and self.done_at is None and self.dcache.out_flushed
+                and (self.dcache.port is None or self.dcache.port.idle)):
             self.done_at = cycle
         self.halt_latch = self.halt_latch or self._halt_in
 

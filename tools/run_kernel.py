@@ -4,7 +4,7 @@
 The instruction stream goes to the VLIW scheduler model (fetch, decode,
 issue, scalar execute), which drives the vector core's units, the systolic
 array, the four scratchpad pads with their DMA backends, and DRAM
-(src/scheduler/platform.py).
+(src/atalla/atalla_platform.py).
 
     tools/run_kernel.py gemm                 # build kernels/build_gemm.py, run it
     tools/run_kernel.py path/to/prog.in      # an already assembled program
@@ -28,7 +28,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from scheduler import golden                                     # noqa: E402
 from scheduler.core import load_program_text                      # noqa: E402
-from scheduler.platform import build_scheduler_platform           # noqa: E402
+from atalla.atalla_platform import build_atalla_platform           # noqa: E402
 from scheduler.semantics import u32                               # noqa: E402
 from scheduler.vector import bf16_round                           # noqa: E402
 
@@ -89,7 +89,8 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=5_000_000, help="cycle limit")
     ap.add_argument("--dram-latency", type=int, default=6)
     ap.add_argument("--lanes", type=int, default=16)
-    ap.add_argument("--cold-icache", action="store_true")
+    ap.add_argument("--warm-icache", action="store_true",
+                    help="start with every packet's line in the icache")
     ap.add_argument("--functional-reductions", action="store_true",
                     help="with --golden: compare against the functional sim's own "
                          "fp32 sums instead of the RTL's reduction order")
@@ -101,9 +102,9 @@ def main() -> None:
             path = build_kernel(args.kernel, extra, Path(tmp))
         instr, data = load_program_text(path.read_text())
 
-    plat = build_scheduler_platform(instr, data, dram_latency=args.dram_latency,
+    plat = build_atalla_platform(instr, data, dram_latency=args.dram_latency,
                                     lane_count=args.lanes,
-                                    warm_icache=not args.cold_icache, strict=False)
+                                    warm_icache=args.warm_icache, strict=False)
     t = time.time()
     cycles = plat.run_until_done(limit=args.limit)
     c = plat.core

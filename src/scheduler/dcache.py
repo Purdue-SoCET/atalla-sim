@@ -55,11 +55,14 @@ so a store hit to another way of the set is never overwritten.
 
 Memory
 ------
-The memory behind the cache is outside the scheduler, so its timing is a
-parameter, as for the icache. A read burst delivers its first beat
-`first_beat_wait` cycles after the request (0: in the request cycle, as
-`sim_ram_rr` does when free), then one beat per cycle. Each written beat
-takes `1 + write_wait` cycles.
+The memory behind the cache is outside the scheduler. With a `port`
+(memory/bus.py) the line fill and the writebacks go out as bursts on the
+DRAM channel the scratchpad backends share, and a beat is taken when its
+burst has returned; written beats wait while the port's buffer is full.
+Without one, the timing is a parameter, as for the icache: a read burst
+delivers its first beat `first_beat_wait` cycles after the request (0: in
+the request cycle, as `sim_ram_rr` does when free), then one beat per cycle,
+and each written beat takes `1 + write_wait` cycles.
 
 Halt
 ----
@@ -255,9 +258,11 @@ class DCache(RTLModule):
     CLEAR_ON_COMMIT = ("in_req_valid", "in_req")
 
     def __init__(self, name: str = "dcache", config: DCacheConfig = DCacheConfig(),
-                 memory: Optional[WordMemory] = None):
+                 memory: Optional[WordMemory] = None, port=None):
         super().__init__(name)
         self.cfg = config
+        #: memory/bus.py BusMaster, or None for the parameterised timing.
+        self.port = port
         self.memory = memory if memory is not None else WordMemory()
         c = config
         self.array: List[List[Frame]] = [[Frame() for _ in range(c.ways)]
@@ -295,7 +300,7 @@ class DCache(RTLModule):
         self.stats = dict(requests=0, hits=0, misses=0, secondary=0,
                           retries=0, fills=0, present_fills=0, evictions=0,
                           writebacks=0, flush_writebacks=0, max_mshrs=0,
-                          fill_wait_cycles=0)
+                          fill_wait_cycles=0, mem_wait_cycles=0)
 
     # -- helpers ----------------------------------------------------------
     @property
@@ -560,15 +565,27 @@ class DCache(RTLModule):
                 self._later(lambda: self._set(f_state=F_PULL, f_beat=0,
                                               f_wait=c.first_beat_wait,
                                               f_words=[0] * c.line_words))
+                if self.port is not None:
+                    base = self.f_entry.block * c.line_bytes
+                    self._later(lambda: self.port.read(base, c.line_bytes))
             return
 
         if st == F_PULL:
             base = self.f_entry.block * c.line_bytes
             beat = self.f_beat
-            self.out_mem = ("read", base, beat if self.f_wait == 0 else None)
-            if self.f_wait > 0:
-                self._later(lambda: self._set(f_wait=self.f_wait - 1))
-                return
+            if self.port is not None:
+                if not self.port.beat_ready(beat):
+                    self.stats["mem_wait_cycles"] += 1
+                    self.out_mem = ("read", base, None)
+                    return
+                self.out_mem = ("read", base, beat)
+                if beat + 1 == c.beats:
+                    self._later(self.port.finish_read)
+            else:
+                self.out_mem = ("read", base, beat if self.f_wait == 0 else None)
+                if self.f_wait > 0:
+                    self._later(lambda: self._set(f_wait=self.f_wait - 1))
+                    return
             words = list(self.f_words)
             for k in range(c.beat_words):
                 i = beat * c.beat_words + k
@@ -689,7 +706,13 @@ class DCache(RTLModule):
         base = (frame.tag * c.sets + set_idx) * c.line_bytes
         beat = self.f_beat
         self.out_mem = ("write", base + beat * c.beat_bytes)
-        if self.f_wait > 0:
+        if self.port is not None:
+            if not self.port.can_write():
+                self.stats["mem_wait_cycles"] += 1
+                return
+            addr0 = base + beat * c.beat_bytes
+            self._later(lambda: self.port.write(addr0, c.beat_bytes))
+        elif self.f_wait > 0:
             self._later(lambda: self._set(f_wait=self.f_wait - 1))
             return
         for k in range(c.beat_words):

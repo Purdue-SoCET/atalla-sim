@@ -1,6 +1,6 @@
 """Stage 5: vector and DMA dispatch, on a platform driven by the scheduler.
 
-Programs run through scheduler/platform.py: the scheduler issues into the
+Programs run through atalla/atalla_platform.py: the scheduler issues into the
 vector core's units, the scratchpad pads and their DMA backends, and DRAM.
 The golden tests run the same program on the functional sim and compare
 every scalar, vector and mask register and the DRAM words at the end.
@@ -21,7 +21,7 @@ import pytest
 
 from scheduler import golden
 from scheduler.core import SchedulerCore
-from scheduler.platform import build_scheduler_platform
+from atalla.atalla_platform import build_atalla_platform
 from scheduler.semantics import u32
 from scheduler.vector import bf16_round
 
@@ -117,8 +117,9 @@ def values(rr, col):
     return float((rr * 32 + col) % 13 - 6) * 0.5
 
 
-def run_platform(prog, data):
-    plat = build_scheduler_platform(prog, data)
+def run_platform(prog, data, warm_icache=True):
+    """Warm icache by default: these tests time the vector side, not fetch."""
+    plat = build_atalla_platform(prog, data, warm_icache=warm_icache)
     plat.run_until_done(limit=200_000)
     return plat
 
@@ -178,7 +179,7 @@ def test_sdma_holds_its_rs1_until_the_scratchpad_is_done():
     c = plat.core
     t = {p.pc: cy for cy, p in c.issued}
     sdma_pc, ld_pc = 20 * 6, 20 * 8
-    assert t[ld_pc] - t[sdma_pc] > plat.tpu.backends[0].dram_latency
+    assert t[ld_pc] - t[sdma_pc] > plat.backends[0].dram_latency
     assert c.vector.stats["sdma_loads"] == 1
 
 
@@ -298,7 +299,7 @@ def test_gemm_writes_back_and_lw_vi_reserves_nothing():
     array complete and write back; lw.vi reserves no register. gemm values
     are checked against the functional sim by the kernel tests."""
     pk = prologue() + [(vi("lw.vi", 0, 8 + k % 8, 0),) for k in range(32)]
-    plat = build_scheduler_platform(program(*pk, vv("gemm.vv", 20, 9, 0),
+    plat = build_atalla_platform(program(*pk, vv("gemm.vv", 20, 9, 0),
                                             vv("gemm.vv", 21, 10, 0), HALT),
                                     tile_data(DRAM_IN, LOAD_ROWS, values))
     plat.run_until_done(limit=50_000)

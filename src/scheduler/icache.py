@@ -23,10 +23,13 @@ is read-only, so a line's contents are always the program image's bytes, and
 the fetched packet is taken straight from the image once the cache says hit.
 What the model has to get right is *when* that happens.
 
-The memory behind the cache is outside the scheduler core, so its timing is a
-parameter: `first_beat_wait` cycles of iwait before a fill's first beat and
-`beat_wait` before each beat after. Both default to 0 -- a beat every cycle,
-an 8-cycle fill -- which is an assumption, not a measurement.
+The memory behind the cache is outside the scheduler core. With a `port`
+(memory/bus.py) a fill goes out as bursts on the DRAM channel the data
+cache and the scratchpad backends share, and iwait holds while the next
+beat's burst hasn't returned. Without one, the timing is a parameter:
+`first_beat_wait` cycles of iwait before a fill's first beat and
+`beat_wait` before each beat after. Both default to 0 -- a beat every
+cycle, an 8-cycle fill.
 """
 
 from base.rtl_module import RTLModule
@@ -52,8 +55,12 @@ class ICache(RTLModule):
     OUTS = dict(ihit=False)
 
     def __init__(self, name: str = "icache", *, first_beat_wait: int = 0,
-                 beat_wait: int = 0):
+                 beat_wait: int = 0, port=None):
         super().__init__(name)
+        #: memory/bus.py BusMaster, or None for the parameterised timing.
+        self.port = port
+        self._port_act = None
+        self.iwait_cycles = 0
         self.first_beat_wait = max(0, int(first_beat_wait))
         self.beat_wait = max(0, int(beat_wait))
         self.fills = 0
@@ -85,6 +92,7 @@ class ICache(RTLModule):
     def eval_data(self) -> None:
         for reg in self.REGS:
             setattr(self, reg + "_n", getattr(self, reg))
+        self._port_act = None
 
         look = self.lookup(self.in_imemaddr)
         self.out_ihit = bool(self.in_imemREN and look["full_hit"])
@@ -102,12 +110,19 @@ class ICache(RTLModule):
         if self.in_halt:
             self.state_n, self.fill_count_n = IDLE, 0
             return
-        iwait = self.wait_left > 0
-        if iwait:
-            self.wait_left_n = self.wait_left - 1
-            return
-        self.wait_left_n = self.beat_wait
+        if self.port is not None:
+            if not self.port.beat_ready(self.fill_count):
+                self.iwait_cycles += 1
+                return
+        else:
+            if self.wait_left > 0:
+                self.wait_left_n = self.wait_left - 1
+                self.iwait_cycles += 1
+                return
+            self.wait_left_n = self.beat_wait
         if self.fill_count == BEATS - 1:
+            if self.port is not None:
+                self._port_act = self.port.finish_read
             valid = list(self.valid)
             tags = list(self.tags)
             valid[self.active_idx] = True
@@ -125,6 +140,15 @@ class ICache(RTLModule):
         self.active_idx_n, self.active_tag_n = idx, tag
         self.wait_left_n = self.first_beat_wait
         self.fills += 1
+        if self.port is not None:
+            base = ((tag << 7) | idx) << 6
+            self._port_act = lambda: self.port.read(base, LINE_BYTES)
+
+    def commit(self) -> None:
+        if self._port_act is not None:
+            self._port_act()
+            self._port_act = None
+        super().commit()
 
     def warm(self, addresses) -> None:
         """Mark the lines holding these packets valid, as if already fetched.
