@@ -178,10 +178,39 @@ static inline double cast_half_f16c(double v) {
 }
 
 // ---------------------------------------------------------------------------
+// bfloat16 conversion
+// ---------------------------------------------------------------------------
+//
+// Reference semantics: base.dtype.bf16_round, which is the functional sim's
+// bf16_round -- round to FP32 first (an ordinary nearest-even conversion, so
+// this one DOES double-round, on purpose: it is what the hardware does), then
+// nearest-even on the top 16 bits: add 0x7FFF plus bit 16 and clear the low
+// half. A carry out of the mantissa bumps the exponent, so the largest finite
+// floats round up to infinity. NaNs are quieted instead of rounded, since the
+// add would carry a NaN with all-ones low bits into the sign bit.
+
+static inline float bf16_round_f32(float f) {
+    uint32_t b;
+    std::memcpy(&b, &f, 4);
+    if ((b & 0x7F800000u) == 0x7F800000u && (b & 0x007FFFFFu)) {
+        b |= 0x00400000u;
+    } else {
+        b += 0x7FFFu + ((b >> 16) & 1u);
+    }
+    b &= 0xFFFF0000u;
+    std::memcpy(&f, &b, 4);
+    return f;
+}
+
+static inline double cast_bf16_scalar(double v) {
+    return (double)bf16_round_f32((float)v);
+}
+
+// ---------------------------------------------------------------------------
 // Batched casts
 // ---------------------------------------------------------------------------
-// mode: 0 = half (FP16 and BF16 -- see base/dtype.py, BF16 falls back to
-//                 float16 whenever numpy lacks a native bfloat16 dtype)
+// mode: 0 = half (FP16)
+//       2 = bf16
 //       1 = int8 (truncate toward zero; out-of-range is reported, not clamped,
 //                 matching numpy's OverflowError on Python scalars)
 //
@@ -302,6 +331,24 @@ static void cast_half_array_scalar(const double* in, double* out, int64_t n,
     st->ovf += ovf;
 }
 
+// Plain loop; the compiler vectorises it, and the cast is cheap next to the
+// ctypes call that reaches it.
+static void cast_bf16_array(const double* in, double* out, int64_t n,
+                            int track, CastStats* st) {
+    int64_t sat = 0, ovf = 0;
+    for (int64_t i = 0; i < n; ++i) {
+        double v = in[i];
+        double r = cast_bf16_scalar(v);
+        out[i] = r;
+        if (track) {
+            if (std::fabs(v) > 3.3895313892515355e38) sat++;  // bf16 max
+            if (!std::isfinite(r)) ovf++;
+        }
+    }
+    st->sat += sat;
+    st->ovf += ovf;
+}
+
 static void cast_int8_array(const double* in, double* out, int64_t n, CastStats* st) {
     for (int64_t i = 0; i < n; ++i) {
         double v = in[i];
@@ -316,6 +363,7 @@ static void cast_int8_array(const double* in, double* out, int64_t n, CastStats*
 static void cast_array(const double* in, double* out, int64_t n, int mode,
                        int track, CastStats* st) {
     if (mode == 1) { cast_int8_array(in, out, n, st); return; }
+    if (mode == 2) { cast_bf16_array(in, out, n, track, st); return; }
     switch (isa()) {
         case ISA_AVX512: cast_half_array_avx512(in, out, n, track, st); break;
         case ISA_AVX2:   cast_half_array_avx2(in, out, n, track, st);   break;
@@ -341,6 +389,7 @@ ATALLA_EXPORT double atalla_cast_scalar(double v, int mode, int32_t* int8_range)
         if (t < -128.0 || t > 127.0) { if (int8_range) *int8_range = 1; }
         return t;
     }
+    if (mode == 2) return cast_bf16_scalar(v);
     return (isa() == ISA_SCALAR) ? cast_half_scalar(v) : cast_half_f16c(v);
 }
 
@@ -556,7 +605,7 @@ ATALLA_EXPORT void atalla_sa_free_scratch(void) {
 //
 //   start / weight_en / mac_shift : control signals, as in Python
 //   has_dtype                     : whether _current_dtype is set
-//   cast_mode                     : 0 = half, 1 = int8
+//   cast_mode                     : 0 = half, 1 = int8, 2 = bf16
 //   track_sat                     : count saturation/overflow (FP16 only)
 //   psum_top[S], psum_top_valid[S]: values dequeued for the g == 0 boundary
 //   shift_in[G*GS]                : boundary vector entering column 0
@@ -843,8 +892,8 @@ static inline void add4_f32(float* d, const float* a, const float* b,
     }
 }
 
-// The reducer: round float32 to IEEE binary16 and back, nearest-even. This is
-// what base.dtype resolves BF16 to on a numpy without bfloat16, so it must
+// The reducer: round float32 to the storage type and back. do_reduce is
+// 1 for IEEE binary16 (nearest-even) and 2 for bfloat16; either way it must
 // match cast_vector bit for bit.
 static void half_round_scalar(float* d, const float* s, int n) {
     for (int k = 0; k < n; ++k) {
@@ -870,6 +919,9 @@ static void half_round_f16c(float* d, const float* s, int n) {
 static inline void half_round(float* d, const float* s, int n) {
     if (isa() >= ISA_AVX2) half_round_f16c(d, s, n);
     else                   half_round_scalar(d, s, n);
+}
+static void bf16_round_arr(float* d, const float* s, int n) {
+    for (int k = 0; k < n; ++k) d[k] = bf16_round_f32(s[k]);
 }
 
 // -- scratch ----------------------------------------------------------------
@@ -990,10 +1042,11 @@ static void meissa_cycle(MeissaState* st, const float* inject, int has_inject,
     for (int j = 0; j < N; ++j) if (dseq[j] >= 0) { any_done = 1; break; }
     if (any_done) {
         float* dval = st->tree_vals + (size_t)slot * N;
-        if (st->do_reduce) half_round(red, dval, N);
+        if (st->do_reduce == 2)  bf16_round_arr(red, dval, N);
+        else if (st->do_reduce)  half_round(red, dval, N);
         else               memcpy(red, dval, (size_t)N * sizeof(float));
         if (st->collect_stats && st->do_reduce) {
-            // The reducer narrows FP32 to FP16, so a finite sum can leave it
+            // The reducer narrows FP32 to 16 bits, so a finite sum can leave it
             // as an infinity. That is a modelled outcome worth counting.
             for (int j = 0; j < N; ++j)
                 if (dseq[j] >= 0 && std::isfinite(dval[j]) && !std::isfinite(red[j]))

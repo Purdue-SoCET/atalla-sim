@@ -3,7 +3,7 @@ import math
 
 import numpy as np
 
-from base.dtype import DType, cast_scalar, cast_vector, normalize_dtype
+from base.dtype import DType, bf16_round, cast_scalar, cast_vector, normalize_dtype
 from base.clocked_object import Clocked
 from base.queue import SimQueue
 
@@ -383,7 +383,11 @@ class SystolicArrayTPU(Clocked):
     # -- cast mode plumbing --------------------------------------------------
 
     def _cast_mode(self) -> int:
-        return _native.CAST_INT8 if self._current_dtype == DType.INT8 else _native.CAST_HALF
+        if self._current_dtype == DType.INT8:
+            return _native.CAST_INT8
+        if self._current_dtype == DType.BF16:
+            return _native.CAST_BF16
+        return _native.CAST_HALF
 
     def _fallback_cast(self, arr: np.ndarray):
         """numpy equivalent of the kernel's cast; returns (out, sat, ovf)."""
@@ -393,6 +397,8 @@ class SystolicArrayTPU(Clocked):
             if np.any(~np.isfinite(out)) or np.any((out < -128.0) | (out > 127.0)):
                 raise OverflowError("int8 cast out of bounds")
             return out, 0, 0
+        if dtype == DType.BF16:
+            return bf16_round(arr).astype(np.float64), 0, 0
         with np.errstate(over="ignore", invalid="ignore"):
             out = arr.astype(np.float16).astype(np.float64)
         if dtype == DType.FP16:

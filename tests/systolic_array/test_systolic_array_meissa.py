@@ -144,6 +144,23 @@ def test_outputs_are_reduced_to_bf16_before_the_buffer():
     assert out[0][0] != 4 * 0.3 * 0.1
 
 
+@pytest.mark.parametrize("native", [True, False])
+def test_the_bf16_reducer_is_not_fp16(native):
+    """BF16 keeps 7 mantissa bits and FP32's exponent range. A sum FP16 holds
+    exactly is rounded, and one past FP16's range stays finite."""
+    n = 4
+    sa = SystolicArrayMEISSA(size=n, dtype="bf16", use_native=native)
+    sa.load_weights([[1.0] * n for _ in range(n)])
+    # 1 + 2^-8 ties to even in bf16; 4 * 256 * 256 = 262144 overflows FP16.
+    out, _ = _drive(sa, [[1.0, 2.0 ** -8, 0.0, 0.0], [256.0] * n])
+    assert out == [[1.0] * n, [4.0 * 256.0] * n]
+
+    sa = SystolicArrayMEISSA(size=n, dtype="bf16", use_native=native)
+    sa.load_weights([[256.0] * n for _ in range(n)])
+    out, _ = _drive(sa, [[256.0] * n])
+    assert out == [[262144.0] * n]
+
+
 def test_the_adder_tree_has_no_psum_input():
     """pipelined_adder_tree.sv drives sum_out from the tree alone; the psum
     port is disconnected, so a non-zero psum would be silently dropped."""
@@ -246,7 +263,7 @@ def _schedule(sa, w, a):
 
 @pytest.mark.parametrize("size", [8, 16, 32])
 @pytest.mark.parametrize("mixed", [False, True])
-@pytest.mark.parametrize("dtype", ["fp16", None])
+@pytest.mark.parametrize("dtype", ["bf16", "fp16", None])
 def test_the_kernel_is_bit_identical_to_the_numpy_path(size, mixed, dtype):
     """The kernel is an optimisation, not a second model: every bit it
     produces must match the reference, for both tree shapes and with or
@@ -315,13 +332,14 @@ def test_activity_stats_are_off_until_asked_for():
     assert quiet.get_buffer() == loud.get_buffer()
 
 
-def test_the_reducer_matches_cast_vector():
+@pytest.mark.parametrize("dtype", ["bf16", "fp16"])
+def test_the_reducer_matches_cast_vector(dtype):
     """The reducer stopped crossing the ctypes boundary per row; it still has
     to round exactly as base.dtype does."""
     from base.dtype import cast_vector, normalize_dtype
 
-    dt = normalize_dtype("fp16")
-    sa = SystolicArrayMEISSA(size=32, dtype="fp16")
+    dt = normalize_dtype(dtype)
+    sa = SystolicArrayMEISSA(size=32, dtype=dtype)
     rng = np.random.default_rng(11)
     vals = (rng.random(32, dtype=np.float32) * 1000 - 500)
 

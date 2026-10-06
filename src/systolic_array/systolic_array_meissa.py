@@ -60,7 +60,7 @@ from typing import Dict, List, Optional, Sequence
 import numpy as np
 
 from base.clocked_object import Clocked
-from base.dtype import DType, cast_vector, normalize_dtype, numpy_dtype
+from base.dtype import DType, bf16_round, cast_vector, normalize_dtype, numpy_dtype
 from native import kernels as _native
 
 Time = float
@@ -212,7 +212,9 @@ class SystolicArrayMEISSA(Clocked):
         st.head = 0
         st.levels4 = self.levels["add4"]
         st.levels2 = self.levels["add2"]
-        st.do_reduce = 1 if self.dtype is not None else 0
+        # 0 = no reducer, 1 = FP16, 2 = BF16 (atalla_meissa_run).
+        st.do_reduce = (0 if self.dtype is None
+                        else 2 if self.dtype == DType.BF16 else 1)
         st.collect_stats = 1 if self.collect_stats else 0
         st.act = _native.fptr(self._act)
         st.wgt = _native.fptr(self._wgt)
@@ -384,6 +386,8 @@ class SystolicArrayMEISSA(Clocked):
         """
         if self._half is None:
             return np.asarray(values, dtype=np.float32)
+        if self.dtype == DType.BF16:
+            return bf16_round(values)
         with np.errstate(over="ignore", invalid="ignore"):
             return np.asarray(values, dtype=self._half).astype(np.float32)
 

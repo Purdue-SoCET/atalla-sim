@@ -11,6 +11,7 @@ from .kernels import (  # noqa: F401
     NATIVE_ISA,
     CAST_HALF,
     CAST_INT8,
+    CAST_BF16,
     SaArrays,
     cast_array,
     cast_buffer_inplace,
