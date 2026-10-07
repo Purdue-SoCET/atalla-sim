@@ -9,10 +9,10 @@ Test programs stay inside what the functional sim supports: scratchpads 0
 and 1, rows 0-31, full 32-element rows, and they never write m0 (the
 functional sim lets a program write it; the RTL holds it at all ones).
 
-The functional sim runs with its reductions in the RTL's order
-(golden.hardware_reduce: per lane, then a BF16 tree), which is what the
-lane datapath computes; its own sequential fp32 sum can differ in the last
-BF16 bit.
+The functional sim runs with its reductions in the lane model's order
+(golden.lanes_reduce: per lane, then a tree across lanes, rounded once to
+BF16), which is what the lane datapath computes; its own sequential fp32
+sum can differ in the last BF16 bit.
 """
 import random
 import struct
@@ -126,7 +126,7 @@ def run_platform(prog, data, warm_icache=True):
 
 def compare_to_golden(prog, data):
     golden.require(pytest)
-    g = golden.run_golden_state(prog, data, reductions="hardware")
+    g = golden.run_golden_state(prog, data, reductions="lanes")
     plat = run_platform(prog, data)
     c = plat.core
     for rr in range(1, 256):
@@ -306,3 +306,24 @@ def test_gemm_writes_back_and_lw_vi_reserves_nothing():
     c = plat.core
     assert c.vector.stats["gsau_ops"] == 34
     assert c.decode2.scoreboard.idle and plat.vc.gsau.writebacks.is_empty()
+
+
+def test_transpose_pushes_rows_and_pops_columns():
+    """tpus.vi pushes vs1 into the transpose unit as a row; tpop.vi takes the
+    next transposed column into its register (named in the vs1 field, as the
+    ISA sheet's `vs1 <= transpose_unit` has it). 32 rows in, 32 columns out:
+    column j of the tile lands in the j-th tpop's register."""
+    pk = prologue(rows=32)
+    pk += [(vi("tpus.vi", 0, 8 + r, 0),) for r in range(32)]
+    pk += [(vi("tpop.vi", 0, 64 + j, 0),) for j in range(32)]
+    plat = run_platform(program(*pk, HALT), tile_data(DRAM_IN, 32, values))
+    vc = plat.vc
+    rows = [vc.read_vreg(8 + r) for r in range(32)]
+    for j in range(32):
+        assert vc.read_vreg(64 + j) == [rows[r][j] for r in range(32)], "column %d" % j
+    st = plat.core.vector.stats
+    assert (st["transpose_pushes"], st["transpose_pops"]) == (32, 32)
+    t = {p.pc: cy for cy, p in plat.core.issued}
+    first_push = min(cy for pc, cy in t.items() if pc >= 20 * (len(pk) - 64))
+    # 32 pushes at 9 cycles and a 257-cycle drain, at least
+    assert plat.cycle - first_push >= 32 * 9 + 32 * 8

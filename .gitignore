@@ -219,3 +219,5 @@ __marimo__/
 .streamlit/secrets.toml
 
 out/ 
+# Claude Code session state
+.claude/

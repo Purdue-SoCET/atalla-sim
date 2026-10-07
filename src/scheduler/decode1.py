@@ -41,6 +41,8 @@ _BY_NAME = {m: op for op, (m, _) in OPCODES.items()}
 ADD_S, HALT_S = _BY_NAME["add.s"], _BY_NAME["halt.s"]
 ADD_VV, MUL_VS = _BY_NAME["add.vv"], _BY_NAME["mul.vs"]
 MV_STM = _BY_NAME["mv.stm"]
+#: The transpose instructions sit above the RTL's vector range.
+TRANSPOSE_OPS = (_BY_NAME["tpop.vi"], _BY_NAME["tpus.vi"])
 SCPAD_LD, SCPAD_ST = _BY_NAME["scpad.ld"], _BY_NAME["scpad.st"]
 
 NONE, SCALAR, VECTOR, SCPAD = "none", "scalar", "vector", "scpad"
@@ -57,7 +59,8 @@ def classify(word: int) -> str:
     op = word & ((1 << OP_W) - 1)
     if ADD_S <= op <= HALT_S or op == MV_STM:
         return SCALAR
-    if ADD_VV <= op <= MUL_VS and op not in (MV_STM, SCPAD_LD, SCPAD_ST):
+    if (ADD_VV <= op <= MUL_VS and op not in (MV_STM, SCPAD_LD, SCPAD_ST)
+            or op in TRANSPOSE_OPS):
         return VECTOR
     if op in (SCPAD_LD, SCPAD_ST):
         return SCPAD

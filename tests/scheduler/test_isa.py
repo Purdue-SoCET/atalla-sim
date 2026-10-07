@@ -22,8 +22,12 @@ def test_packet_geometry_matches_the_rtl():
     assert PACKET_BYTE_W == 20
 
 
+#: tpop.vi, tpus.vi: from the spec sheet; the functional sim doesn't have them.
+TRANSPOSE = {0b1001110, 0b1001111}
+
+
 def test_the_table_covers_every_opcode_once():
-    assert len(OPCODES) == 77
+    assert len(OPCODES) == 79                 # the RTL's 77, and tpop.vi / tpus.vi
     mnemonics = [m for m, _ in OPCODES.values()]
     assert len(set(mnemonics)) == len(mnemonics), "duplicate mnemonic"
     assert all(0 <= op < (1 << OP_W) for op in OPCODES), "opcode wider than OP_W"
@@ -89,8 +93,10 @@ def test_get_bits_is_inclusive():
 
 def test_the_table_matches_the_functional_sim():
     golden.require(pytest)
-    assert set(OPCODES) == set(golden.GOLDEN_OPCODES), "opcode sets differ"
+    assert set(OPCODES) - TRANSPOSE == set(golden.GOLDEN_OPCODES), "opcode sets differ"
     for op, (mnemonic, ty) in OPCODES.items():
+        if op in TRANSPOSE:
+            continue
         g_mn, g_ty = golden.GOLDEN_OPCODES[op]
         assert (mnemonic, ty) == (g_mn.lower(), g_ty), \
             "opcode %d: ours %r golden %r" % (op, (mnemonic, ty), (g_mn, g_ty))
@@ -102,7 +108,7 @@ def test_random_packets_decode_identically():
     golden.require(pytest)
     rng = random.Random(20260925)
     for _ in range(2000):
-        opcode = rng.choice(sorted(OPCODES))
+        opcode = rng.choice(sorted(set(OPCODES) - TRANSPOSE))
         instr = opcode | (rng.getrandbits(INST_W - OP_W) << OP_W)
         ours = decode_instruction(instr)
         theirs = golden.golden_decode_instruction(instr)
@@ -122,10 +128,9 @@ SHEET = Path(__file__).parent / "data" / "atalla_isa_sheet.csv"
 #: two differ. When the RTL adds an opcode, move it out of this table and into
 #: isa.py -- this test then fails until you do. Anything not listed here that
 #: differs is a failure.
-SPEC_AHEAD_OF_RTL = {
-    78: "tpop.vi",   # vs1 <= transpose_unit -- not in the RTL enum or the functional sim
-    79: "tpus.vi",   # transpose_unit <= vs1 -- likewise
-}
+#: Every spec opcode is in isa.py now: tpop.vi (78) and tpus.vi (79) were
+#: added ahead of the RTL enum and the functional sim.
+SPEC_AHEAD_OF_RTL = {}
 SPEC_NAMES = {
     46: ("jalr", "jalr.s"),   # RTL enum JALR and the functional sim say jalr
 }

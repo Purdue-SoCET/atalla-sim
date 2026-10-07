@@ -120,6 +120,10 @@ def test_the_rtl_bit_slices_agree_with_the_isa_layout():
                         attr = "vs1"
                     if m == "gemm.vv" and k == "vs2":
                         continue                    # gemm reads vs1 only
+                    if m in ("tpus.vi", "tpop.vi") and k in ("vd", "imm", "mask"):
+                        continue                    # one register, in the vs1 field
+                    if m == "tpop.vi" and k == "vs1":
+                        attr = "vd"                 # vs1 <= transpose_unit
                     assert getattr(d, attr) == val, (m, k)
             else:
                 d = decode_sdma(w)

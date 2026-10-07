@@ -231,13 +231,11 @@ and formats what comes back for writeback.
 - **The lane datapath** (`vector_core/vector_lanes.py`) does the element ops:
   BF16 operands, the op, the result rounded to BF16 (through fp32, as the
   functional sim rounds).
-- **Reductions** run in the RTL's order (`alu_FU.sv`, `reduction_tree.sv`).
-  Each lane folds its slice, and a masked-off element contributes the op's
-  identity: 0, +inf or −inf. A pairwise tree across the lanes then combines
-  the partials, and every step rounds to BF16. With the RTL's 16 lanes
-  (the platform's default), that is a pair per lane and a 4-level tree. The
-  result is placed by `imm[6:5]`: broadcast, alone at `imm[4:0]`, or at
-  `imm[4:0]` over `vs1`.
+- **Reductions** are the lane model's: each lane sums (or compares) the
+  active elements of its slice, a pairwise tree combines the lanes that had
+  one, and the result is placed by `imm[6:5]`: broadcast, alone at
+  `imm[4:0]`, or at `imm[4:0]` over `vs1`. The sum leaves the lanes
+  unrounded; the 16-bit register file rounds it to BF16.
 - **The systolic array** computes `gemm.vv` (see Kernels, Weights).
 - **Writeback formatting** is the scheduler's part. It packs a compare's
   1/0 lanes into a mask. Masked-off elements and mask bits keep the
@@ -247,9 +245,23 @@ and formats what comes back for writeback.
 
 The functional sim sums a reduction sequentially in fp32 and keeps the
 result unrounded in the register. The 16-bit register file can't do that,
-and the RTL doesn't add in that order. So the golden comparisons run the
-functional sim with its reductions swapped for the RTL's order
-(`golden.run_golden_state(..., reductions="hardware")`).
+and the lanes don't add in that order. So the golden comparisons run the
+functional sim with its reductions swapped for the lane model's order
+(`golden.run_golden_state(..., reductions="lanes")`).
+
+**Transpose.** `tpus.vi` and `tpop.vi` (opcodes 79 and 78, from the ISA
+sheet; neither the RTL nor the functional sim decodes them yet) go to the
+vector core's transpose unit, a functional unit of its own:
+
+| instruction | semantics | what the scheduler does |
+|---|---|---|
+| `tpus.vi vs1` | `transpose_unit <= vs1` | `transpose.push(vs1)`: one row in |
+| `tpop.vi vs1` | `vs1 <= transpose_unit` | the next transposed column into the register in the `vs1` field |
+
+The unit drains a whole tile off one `pop()` request, so the first `tpop.vi`
+of a tile starts the drain and each `tpop.vi`, that one included, takes one
+column, in order. Requests wait in a two-entry queue in front of the unit,
+in program order. Its results write back after the GSAU's.
 
 ## Platform
 
@@ -283,6 +295,39 @@ DMA, and they behind it. The icache starts cold (`warm_icache=True` for
 tests that time something else). The ports' `stats` count bursts, bytes,
 cycles busy and cycles lost to contention.
 
+## Performance monitor
+
+`build_atalla_platform` attaches a `PerfMonitor` (`src/atalla/perf_monitor.py`)
+as `platform.perf`: a read-only observer, ticked last every cycle, that
+gathers metrics for workload and system analysis. `tools/run_kernel.py`
+prints its summary; `--perf-json PATH` writes the report, and `--timeline`
+adds the per-cycle record.
+
+- **Where the cycles go.** Every cycle goes in one bucket, which together
+  add up to the run: `issue` (a packet issued); `stall:hazard:<unit>` (decode
+  2 waited on a register, put down to the unit producing it: `gemm`,
+  `vreg_load`, `sdma`, `vector_lane`, a scalar class...); `stall:<unit>` (the
+  unit the packet needs was busy); `stall:regfile` (a register-file bank
+  conflict); `frontend:icache` (nothing to issue while the icache fills);
+  `frontend:refill` (after a flush, or at start); `halt:drain` (halted,
+  waiting for work in flight and the dcache's writebacks).
+- **Unit busy:** cycles each unit had work (EX2-4, the load/store unit, the
+  dcache, the lanes, the GSAU, the array, each VLSU, the transpose unit,
+  each scratchpad's DMA, the DRAM channel), and the fraction of the run.
+- **Issue and mix:** packets and ops per cycle, slot use, and the retired
+  instruction mix by class.
+- **Memory:** bursts and bytes per DRAM master (icache, dcache, scratchpads
+  0-3) and the cycles each waited for the channel; channel occupancy,
+  bandwidth used against peak; icache fills, the dcache's counters, the
+  scratchpad pads' reads, writes and stalls.
+- **Work:** FLOPs from the lanes and the array, FLOP/cycle, the array's MAC
+  utilisation, and arithmetic intensity against the bytes actually moved
+  over DRAM.
+
+On gemm, for example, a third of the cycles are decode 2 waiting for
+`gemm.vv` results and another sixth for `vreg.ld`s; on softmax, half are
+the icache filling straight-line code.
+
 ## Kernels
 
 `tools/run_kernel.py` runs a kernel through the whole machine: the
@@ -295,8 +340,8 @@ tools/run_kernel.py prog.in           # an already assembled program
 tools/run_kernel.py softmax --golden  # also run the functional sim and compare
 ```
 
-`--golden` compares against the functional sim with the RTL's reduction
-order; add `--functional-reductions` to compare against its own fp32 sums.
+`--golden` compares against the functional sim with the lane model's
+reduction order; add `--functional-reductions` to compare against its own fp32 sums.
 `--warm-icache` starts with the program in the icache.
 
 A kernel name is assembled by the functional sim's own build script
@@ -305,7 +350,7 @@ format; `build_kernel_platform(text)` does the same from Python.
 
 Every kernel in the functional sim's metrics list runs to halt and matches
 the functional sim exactly at the end: every register, and DRAM as the DMA
-reads it. The functional sim runs with the RTL's reduction order.
+reads it. The functional sim runs with the lane model's reduction order.
 
 | kernel | cycles |
 |---|---:|
@@ -320,6 +365,29 @@ Cycle counts are with the default platform: the MEISSA array, 16 lanes,
 DRAM latency 6, and a cold instruction cache fetching over the shared DRAM
 channel. Against the functional sim's own sequential fp32
 sums, `softmax`'s outputs differ by at most 2 BF16 steps.
+
+**C kernels.** `tools/run_kernel.py add_4x32.c` (a path, or a file in
+the compiler's `atalla_tests/kernels/`) compiles with `atalla_cc`, from the
+`third_party/aihw-ppci-compiler` submodule (branch `atalla-models`, the one
+with the kernels), and has the functional sim's C runner
+(`cli/run_c_kernel.py`) packetize it and lay out its DRAM data from the
+preset its name implies (`-- --preset ... ` overrides). It runs with the C
+loader's stack registers set (`c_entry_sregs`: `x2` and `x33` above the
+data, as the functional sim's loader does). Two fixes made this work:
+
+- The packetizer (`build_compiler.py` in the functional sim) packed several
+  scalar ALU ops into one packet, which the RTL can't execute (EX1 takes one
+  a packet; the rest are dropped and their registers stay busy, so the run
+  deadlocks). It now keeps each packet within the scheduler's limits
+  (`HW_PACKET_RESOURCES`: one instruction per EX unit, 4/4/2 register read
+  ports, one SDMA).
+- The C gemm, conv and attention kernels loaded weights first row first;
+  they now load last row first, as the `lw.vi` contract needs (a local
+  compiler branch, `lw-vi-shift-in-weight-order`).
+
+`relu_4x32.c` and `maxpool_2x2.c` fail the functional sim's own check, with
+or without these changes; that is a problem in those kernels or the
+compiler, not in atalla-sim.
 
 **Weights.** `lw.vi` shifts its vector into the systolic array's weights as
 column 0, moving every column one to the right, as the array is built
@@ -393,7 +461,7 @@ random words.
 `tests/scheduler/test_kernels.py` builds kernels with the functional sim's
 build scripts and runs them on both: `add`, `relu`, `sigmoid`, `layernorm`,
 `maxpool`, `softmax`, `gemm`, `gemm_tiled`, `gemms`, `conv` and `conv_tiled`
-must match exactly against the functional sim with the RTL's reduction
+must match exactly against the functional sim with the lane model's reduction
 order, and `softmax` within 2 BF16 steps of its own fp32 sums.
 
 `tests/scheduler/test_vector.py` checks stage 5 on the scheduler-driven

@@ -17,10 +17,10 @@ tests/scheduler/test_isa.py re-checks that agreement against the submodule
 whenever it is present, so the two cannot drift silently.
 
 Where the ISA spreadsheet disagrees, the RTL wins -- this module models the
-hardware as built. The spec defines tpus.vi (79) and tpop.vi (78) for the
-transpose unit and names opcode 46 jalr.s; neither RTL branch has the transpose
-opcodes and both call 46 jalr. So they are absent here, and the scheduler cannot
-issue a transpose until the RTL decodes one.
+hardware as built -- with one addition: the spreadsheet's transpose
+instructions, tpop.vi (78) and tpus.vi (79), which neither RTL branch nor
+the functional sim decodes yet (docs/modelling-rules.md). The spreadsheet
+also names opcode 46 jalr.s; the RTL calls it jalr.
 
 The RTL computes `PACKET_W = INST_W * PACKET_SIZE` and then comments it as
 "192 bits". The arithmetic gives 160, PACKET_BYTE_W is therefore 20, and the
@@ -113,6 +113,8 @@ OPCODES: Dict[int, tuple] = {
     0b0111001: ("rsum.vi", "VI"),         # RSUM_VI
     0b0111010: ("rmin.vi", "VI"),         # RMIN_VI
     0b0111011: ("rmax.vi", "VI"),         # RMAX_VI
+    0b1001110: ("tpop.vi", "VI"),         # TPOP_VI
+    0b1001111: ("tpus.vi", "VI"),         # TPUS_VI
     # ---- VM ----
     0b1000100: ("vreg.ld", "VM"),         # VREG_LD
     0b1000101: ("vreg.st", "VM"),         # VREG_ST

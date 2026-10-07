@@ -48,7 +48,7 @@ bubbles collapse instead of blocking:
 from typing import Dict, Iterable, Optional
 
 from base.clocked_object import Clocked
-from base.dtype import DType
+from base.dtype import DType, cast_vector
 from scheduler.dcache import DCache, DCacheConfig, WordMemory
 from scheduler.decode1 import D1D2Latch
 from scheduler.decode2 import Decode2
@@ -104,9 +104,11 @@ class VeggieStorage:
         return self.vc.read_vreg(r)
 
     def write(self, r: int, value) -> None:
-        # Straight into the banks: the values are already BF16.
+        # Straight into the banks, rounded to BF16: the register file is
+        # 16 bits wide (a reduction's sum arrives unrounded).
         bank, addr = self.vc._reg_to_bank_addr(r)
-        self.vc.veggie.data_banks[bank][addr] = [float(x) for x in value]
+        self.vc.veggie.data_banks[bank][addr] = cast_vector([float(x) for x in value],
+                                                            DType.BF16)
         self.vc.veggie.dtype_banks[bank][addr] = DType.BF16
 
 

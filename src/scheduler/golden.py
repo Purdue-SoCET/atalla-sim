@@ -49,54 +49,47 @@ def require(pytest_module) -> None:
         pytest_module.skip("functional sim unavailable (%s)" % load_error)
 
 
-#: Lanes feeding the RTL's reduction tree (vector_pkg.vh NUM_LANES).
-RTL_LANES = 16
-
-_IDENTITY = {"sum": 0.0, "min": float("inf"), "max": float("-inf")}
+#: The lanes AtallaPlatform builds (one slice of 2 elements each).
+LANES = 16
 
 
-def _bf16(x):
-    """The functional sim's bf16_round, on one float32."""
+def lanes_reduce(values, mask: int, op: str, lanes: int = LANES):
+    """A reduction in the lane model's order (vector_core/vector_lanes.py)
+    rather than the functional sim's sequential fp32 one: each lane sums or
+    compares its contiguous slice's active elements exactly, then a pairwise
+    tree across the lanes that had one; the result is rounded to BF16 once,
+    as the 16-bit register file takes it."""
     import numpy as np
-    u = np.array([x], dtype=np.float32).view(np.uint32)
-    u = (u + np.uint32(0x7FFF) + ((u >> 16) & np.uint32(1))) & np.uint32(0xFFFF0000)
-    return u.view(np.float32)[0]
-
-
-def hardware_reduce(values, mask: int, op: str, lanes: int = RTL_LANES):
-    """A reduction in the RTL's order rather than the functional sim's
-    sequential fp32 one: each lane folds its contiguous slice, a masked-off
-    element contributing the op's identity (alu_FU.sv); then a pairwise tree
-    across the lanes (reduction_tree.sv). Every step is a BF16 op: done in
-    fp32, rounded to BF16."""
-    import numpy as np
-    def pair(a, b):
-        if op == "sum":
-            with np.errstate(over="ignore", invalid="ignore"):
-                return _bf16(np.float32(a) + np.float32(b))
-        return min(a, b) if op == "min" else max(a, b)
-    q = [_bf16(v) for v in values]
+    from base.dtype import bf16_round
+    q = [float(bf16_round([v])[0]) for v in values]
     w = len(q) // lanes
+    pair = {"sum": lambda a, b: a + b, "min": min, "max": max}[op]
     level = []
     for lane in range(lanes):
-        acc = np.float32(_IDENTITY[op])
-        for i in range(lane * w, (lane + 1) * w):
-            if (int(mask) >> i) & 1:
-                acc = pair(acc, q[i])
-        level.append(acc)
+        act = [q[i] for i in range(lane * w, (lane + 1) * w) if (int(mask) >> i) & 1]
+        if act:
+            acc = act[0]
+            for x in act[1:]:
+                acc = pair(acc, x)
+            level.append(acc)
+    if not level:
+        return np.array({"sum": 0.0, "min": np.inf, "max": -np.inf}[op], dtype=np.float32)
     while len(level) > 1:
-        level = [pair(level[i], level[i + 1]) for i in range(0, len(level), 2)]
-    return np.array(level[0], dtype=np.float32)
+        nxt = [pair(level[i], level[i + 1]) for i in range(0, len(level) - 1, 2)]
+        if len(level) % 2:
+            nxt.append(level[-1])
+        level = nxt
+    return np.array(bf16_round([level[0]])[0], dtype=np.float32)
 
 
 def run_golden_state(instr, data=None, workdir=None, packet_length: int = 4,
-                     reductions: str = "functional"):
+                     reductions: str = "functional", init_sregs=None):
     """Run a program image on the functional sim; return its state at halt
     as plain values: {"sregs": {r: int}, "mregs": {r: int},
     "vregs": {r: [float]}, "mem": {addr: int}}.
 
-    reductions="hardware" swaps the functional sim's rsum/rmin/rmax for
-    hardware_reduce, the RTL's order. Only rsum can differ: a sum's value
+    reductions="lanes" swaps the functional sim's rsum/rmin/rmax for
+    lanes_reduce, the lane model's order. Only rsum can differ: a sum's value
     depends on its order, a minimum's does not."""
     if not HAVE_GOLDEN:
         raise RuntimeError("functional sim unavailable (%s)" % load_error)
@@ -112,19 +105,21 @@ def run_golden_state(instr, data=None, workdir=None, packet_length: int = 4,
     mem.instr_mem = dict(instr)
     mem.data_mem = dict(data or {})
     sregs, mregs, vregs = ScalarRegisterFile(), mask_register_file(), VectorRegisterFile()
+    for r, v in (init_sregs or {}).items():
+        sregs.write(int(r), int(v))
     tmp = tempfile.TemporaryDirectory() if workdir is None else None
     out = Path(workdir if workdir is not None else tmp.name)
     names = ["mem", "sregs", "vregs", "mregs", "scpad0", "scpad1", "perf"]
     files = [str(out / ("%s.out" % n)) for n in names]
     from src.components.vector_lanes import VectorLanes
     saved = {}
-    if reductions == "hardware":
+    if reductions == "lanes":
         for name, op in (("reduce_sum", "sum"), ("reduce_min", "min"), ("reduce_max", "max")):
             saved[name] = VectorLanes.__dict__[name]
             setattr(VectorLanes, name,
-                    lambda self, a, mask, _op=op: hardware_reduce(self._ensure_vec(a), mask, _op))
+                    lambda self, a, mask, _op=op: lanes_reduce(self._ensure_vec(a), mask, _op))
     elif reductions != "functional":
-        raise ValueError("reductions must be 'functional' or 'hardware'")
+        raise ValueError("reductions must be 'functional' or 'lanes'")
     try:
         run(mem, sregs, mregs, vregs,
             Scratchpad(slots_per_bank=32), Scratchpad(slots_per_bank=32), ExecuteUnit(),

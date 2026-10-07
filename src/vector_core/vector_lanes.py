@@ -154,17 +154,12 @@ class LaneFUContext:
         self.cursor = 0
         self.last_sent = False
         self.pending_count = 0
+        self.reduce_accum = 0.0
 
 
 class GlobalReductionUnit:
-    """The cross-lane half of a reduction (atalla vreduction.sv): a pairwise
-    tree over one partial per lane, each node rounded to the element type
-    (the RTL's tree is BF16 adders), then placed in the output vector."""
-
     SUPPORTED_OPS = ("sum", "min", "max")
     SUPPORTED_OUT_MODES = ("partial_zero", "partial_passthru", "broadcast")
-    #: What a masked-off element contributes (alu_FU.sv pads with these).
-    IDENTITY = {"sum": 0.0, "min": float("inf"), "max": float("-inf")}
 
     def __init__(self, vector_len: int):
         if vector_len <= 0:
@@ -182,8 +177,7 @@ class GlobalReductionUnit:
             return a if a >= b else b
         raise ValueError("unsupported reduction op: %s" % op)
 
-    def reduce_tree(self, values: Sequence[float], op: str,
-                    dtype: Optional[DType] = None) -> Optional[float]:
+    def reduce_tree(self, values: Sequence[float], op: str) -> Optional[float]:
         if op not in self.SUPPORTED_OPS:
             raise ValueError("unsupported reduction op: %s" % op)
         if not values:
@@ -194,8 +188,7 @@ class GlobalReductionUnit:
             next_level = []
             i = 0
             while i + 1 < len(level):
-                v = self._reduce_pair(op, level[i], level[i + 1])
-                next_level.append(cast_scalar(v, dtype) if dtype is not None else v)
+                next_level.append(self._reduce_pair(op, level[i], level[i + 1]))
                 self.reduce_ops += 1
                 i += 2
             if i < len(level):
@@ -286,7 +279,7 @@ class ResultCollector(Clocked):
             "dtype": dtype,
             "lane_done": [False] * self.lane_count,
             "lane_pending": [0] * self.lane_count,
-            "reduce_accum": [GlobalReductionUnit.IDENTITY.get(reduce_op, 0.0)] * self.lane_count,
+            "reduce_accum": [0.0] * self.lane_count,
             "reduce_seen": [False] * self.lane_count,
             "reduce_count": 0,
             "completion_scheduled": False,
@@ -296,15 +289,22 @@ class ResultCollector(Clocked):
         self.inflight[inst_id]["lane_pending"][lane_id] += 1
 
     def lane_reduce_accum(self, inst_id: int, lane_id: int, value: float) -> None:
-        """Fold one active element into its lane's partial. A lane starts
-        from the op's identity, which is what its masked-off elements
-        contribute, and rounds each step to the element type."""
         state = self.inflight[inst_id]
         reduce_op = state["reduce_op"]
-        acc = self.reduction_unit._reduce_pair(reduce_op, state["reduce_accum"][lane_id], value)
-        if state["dtype"] is not None:
-            acc = cast_scalar(acc, state["dtype"])
-        state["reduce_accum"][lane_id] = acc
+        if reduce_op == "sum":
+            state["reduce_accum"][lane_id] += value
+        elif reduce_op == "min":
+            if not state["reduce_seen"][lane_id]:
+                state["reduce_accum"][lane_id] = value
+            else:
+                state["reduce_accum"][lane_id] = min(state["reduce_accum"][lane_id], value)
+        elif reduce_op == "max":
+            if not state["reduce_seen"][lane_id]:
+                state["reduce_accum"][lane_id] = value
+            else:
+                state["reduce_accum"][lane_id] = max(state["reduce_accum"][lane_id], value)
+        else:
+            raise ValueError("unsupported reduction op: %s" % reduce_op)
         state["reduce_seen"][lane_id] = True
         state["reduce_count"] += 1
 
@@ -333,10 +333,12 @@ class ResultCollector(Clocked):
 
         reduction = None
         if state["reduce"]:
-            # Every lane feeds the tree; one with no active element feeds
-            # the identity.
-            reduction = self.reduction_unit.reduce_tree(
-                state["reduce_accum"], state["reduce_op"], state["dtype"])
+            lane_partials = [
+                state["reduce_accum"][lane_id]
+                for lane_id in range(self.lane_count)
+                if state["reduce_seen"][lane_id]
+            ]
+            reduction = self.reduction_unit.reduce_tree(lane_partials, state["reduce_op"])
             state["vector"] = self.reduction_unit.format_output_vector(
                 reduction=reduction,
                 out_mode=state["reduce_out_mode"],
@@ -533,6 +535,7 @@ class VectorLane(Clocked):
                     collector.lane_dispatched(ctx.inst_id, self.lane_id)
                     ctx.pending_count += 1
                     if ctx.reduce:
+                        ctx.reduce_accum += value
                         collector.lane_reduce_accum(ctx.inst_id, self.lane_id, value)
                 else:
                     # Pipeline refused entry; retry this element next cycle.
