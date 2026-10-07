@@ -58,7 +58,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from base.rtl_module import RTLModule
 from scheduler.control import (
-    SdmaOp, ScalarOp, VectorOp, V_ALU_ADD, V_EXP, V_GSAU, V_MUL, V_MVMT,
+    SdmaOp, ScalarOp, VectorOp, V_ALU_ADD, V_EXP, V_GSAU, V_MUL, V_MVMT, V_TRANS,
     V_REDU, V_VLSU, VECTOR_ALU_FUS, decode_scalar, decode_sdma, decode_vector)
 from scheduler.isa import INST_W, PACKET_SIZE
 
@@ -148,7 +148,7 @@ def contract_violations(pkt: DecodedPacket, sdma_sids: Sequence[int] = ()) -> Li
                            ("mask", len(pkt.mask_reads()), MASK_READ_PORTS)):
         if n > limit:
             out.append("%d %s register reads, %d ports" % (n, what, limit))
-    for fu, name in ((V_GSAU, "GSAU"), (V_MVMT, "move-to-scalar")):
+    for fu, name in ((V_GSAU, "GSAU"), (V_MVMT, "move-to-scalar"), (V_TRANS, "transpose")):
         if sum(o.fu == fu for o in v) > 1:
             out.append("more than one %s op" % name)
     lanes = sum(o.is_lane_op for o in v)
@@ -189,6 +189,17 @@ class Scoreboard(RTLModule):
             v |= set(issued.vector_writes())
             m |= set(issued.mask_writes())
         self.scalar_n, self.vector_n, self.mask_n = frozenset(s), frozenset(v), frozenset(m)
+
+    def first_hazard(self, pkt: DecodedPacket) -> Optional[Tuple[str, int]]:
+        """The first busy register the packet reads or writes, as ("s" | "v" |
+        "m", register), or None."""
+        for kind, regs, busy in (("s", pkt.scalar_reads() + pkt.scalar_writes(), self.scalar),
+                                 ("v", pkt.vector_reads() + pkt.vector_writes(), self.vector),
+                                 ("m", pkt.mask_reads() + pkt.mask_writes(), self.mask)):
+            for r in regs:
+                if r in busy:
+                    return kind, r
+        return None
 
     @property
     def scalar_halt_ready(self) -> bool:
@@ -314,7 +325,7 @@ def _with_data(entries) -> Tuple[List[int], List[Tuple[int, object]]]:
 
 # -- decode_2 ------------------------------------------------------------------------
 #: Every vector unit decode 2 asks after; "vlsu" is one flag per scratchpad.
-VECTOR_UNITS = ("alu", "mul", "exp", "reduction", "gsau", "movement")
+VECTOR_UNITS = ("alu", "mul", "exp", "reduction", "gsau", "movement", "transpose")
 
 
 @dataclass
@@ -357,6 +368,9 @@ class Decode2(RTLModule):
         self.mrf = RegFile("mrf", NUM_MASK_REGS, MASK_BANKS, zero_value=MASK32, reset=0)
         self.violations: List[Tuple[int, List[str]]] = []
         self.stall_reasons: Dict[str, int] = {}
+        self.last_stall: Optional[str] = None
+        self.blocked_by: Optional[str] = None
+        self.hazard_reg: Optional[Tuple[str, int]] = None
 
     # -- this cycle's view -----------------------------------------------------
     def _fu_ready(self, pkt: DecodedPacket, sids: Dict[int, int]) -> bool:
@@ -365,20 +379,29 @@ class Decode2(RTLModule):
         vlsu = self.in_vlsu_ready or [True] * 4
         busy = self.in_scpad_busy or [False] * 4
         s, v, d = pkt.valid_ops()
+        self.blocked_by = None
         for o in s:
             if o.ex is not None and not ex_ready.get(o.ex, True):
+                self.blocked_by = "ex%d" % o.ex
                 return False
         for o in v:
             unit = ("alu" if o.fu in VECTOR_ALU_FUS else "mul" if o.fu == V_MUL
                     else "reduction" if o.fu == V_REDU else "gsau" if o.fu == V_GSAU
-                    else "movement" if o.fu == V_MVMT else None)
+                    else "movement" if o.fu == V_MVMT
+                    else "transpose" if o.fu == V_TRANS else None)
             if o.fu == V_EXP:
                 continue                 # decode_2: EXP is always ready (TODO in RTL)
             if o.fu == V_VLSU and not vlsu[o.sid]:
+                self.blocked_by = "vlsu%d" % o.sid
                 return False
             if unit and not vec.get(unit, True):
+                self.blocked_by = unit
                 return False
-        return not any(busy[sid] for sid in sids.values())
+        for sid in sids.values():
+            if busy[sid]:
+                self.blocked_by = "sdma%d" % sid
+                return False
+        return True
 
     def eval_ready(self) -> None:
         pkt = DecodedPacket.from_words(self.in_scalar, self.in_vector, self.in_sdma)
@@ -396,9 +419,16 @@ class Decode2(RTLModule):
               self.mrf.eval_ready_for(pkt.mask_reads(), [r for r, _ in self._wb_m], deps)]
         rf = all(rf)
         self.out_ready = deps and fus and rf
+        #: This cycle's stall, for the performance monitor: None, "hazard",
+        #: "unit" (blocked_by names it) or "regfile".
+        self.last_stall = None
+        self.hazard_reg = None
         if not self.out_ready and self.in_valid and not pkt.empty:
             why = "hazard" if not deps else "unit" if not fus else "regfile"
             self.stall_reasons[why] = self.stall_reasons.get(why, 0) + 1
+            self.last_stall = why
+            if not deps:
+                self.hazard_reg = self.scoreboard.first_hazard(pkt)
 
     def eval_data(self) -> None:
         pkt, ready = self._pkt, self.out_ready

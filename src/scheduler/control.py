@@ -56,6 +56,8 @@ EX_OF_SCALAR_FU = {
 (V_ALU_ADD, V_ALU_SUB, V_ALU_AND, V_ALU_OR, V_ALU_XOR, V_ALU_NOT, V_ALU_MGT,
  V_ALU_MLT, V_ALU_MEQ, V_ALU_MNEQ, V_MUL, V_EXP, V_VLSU, V_GSAU, V_REDU,
  V_MVMT) = range(16)
+#: The transpose unit, which the RTL's enum doesn't have yet.
+V_TRANS = 16
 VECTOR_ALU_FUS = frozenset(range(V_ALU_ADD, V_ALU_MNEQ + 1))
 
 
@@ -158,7 +160,7 @@ class VectorOp:
     def is_lane_op(self) -> bool:
         """What scheduler_core routes to the lanes: everything but GSAU,
         VLSU and MVMT."""
-        return self.valid and self.fu not in (V_GSAU, V_VLSU, V_MVMT)
+        return self.valid and self.fu not in (V_GSAU, V_VLSU, V_MVMT, V_TRANS)
 
 
 @dataclass
@@ -288,6 +290,12 @@ def decode_vector(word: int, slot: int = 0) -> VectorOp:
         d.fu = {"expi.vi": V_EXP, "lw.vi": V_GSAU}.get(m, V_REDU)
         d.rm = d.fu == V_REDU
         d.vector_reg_write = m != "lw.vi"      # a weight load writes no vreg
+    elif m == "tpus.vi":                    # transpose_unit <= vs1
+        d.valid, d.fu, d.vs1, d.use_vs1 = True, V_TRANS, vs1, True
+    elif m == "tpop.vi":                    # vs1 <= transpose_unit
+        # The spreadsheet names the destination vs1, so it is read from
+        # the vs1 field [22:15].
+        d.valid, d.fu, d.vd, d.vector_reg_write = True, V_TRANS, vs1, True
     elif m in _VS:
         d.valid, d.fu, d.op2_src = True, _VS[m], 2
         d.vms, d.vs1, d.vd, d.rs1 = vms, vs1, vd, get_bits(word, 30, 23)

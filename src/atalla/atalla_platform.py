@@ -31,8 +31,9 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from atalla.sysarr_tpu_system import (
-    PHASE_BACKEND, PHASE_CORE, PHASE_SPAD, PHASE_SYSARR, PHASE_VLS,
+    PHASE_BACKEND, PHASE_CORE, PHASE_HARNESS, PHASE_SPAD, PHASE_SYSARR, PHASE_VLS,
     GSAUTPUBridge, RoundRobinBackendTicker, build_tpu_platform)
+from atalla.perf_monitor import PerfMonitor
 from base.sched import CompositeClocked
 from memory.backend import Backend
 from memory.bus import BusMaster
@@ -40,6 +41,16 @@ from memory.dram import DRAM
 from scheduler.core import SchedulerCore, load_program_text
 
 MASK32 = 0xFFFFFFFF
+
+
+def c_entry_sregs(data: Optional[Dict[int, int]]) -> Dict[int, int]:
+    """The scalar registers the functional sim's C-kernel loader sets before
+    a compiled program starts (core/kernel_services.run_emulator_from_in_path):
+    the stack pointer x2 a page above the highest data address, and x33 a
+    page above that. Hand-written assembly kernels don't need them."""
+    top = max(data) if data else 0
+    stack = ((top + 0x1000) & ~0xFFF) + 0x1000
+    return {2: stack, 33: stack + 0x1000}
 
 
 class DramWords:
@@ -81,6 +92,7 @@ class AtallaPlatform:
     sysarr_bridge: GSAUTPUBridge
     ports: Dict[str, BusMaster]
     root: CompositeClocked
+    perf: Optional[PerfMonitor] = None
     cycle: int = 0
 
     def tick(self) -> None:
@@ -99,10 +111,16 @@ class AtallaPlatform:
 def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]] = None, *,
                           systolic_array: str = "meissa", lane_count: int = 16,
                           dram_latency: int = 6, burst_bytes: int = 32,
-                          warm_icache: bool = False, **core_kw) -> AtallaPlatform:
+                          warm_icache: bool = False, perf: bool = True,
+                          perf_timeline: bool = False,
+                          init_sregs: Optional[Dict[int, int]] = None,
+                          **core_kw) -> AtallaPlatform:
     """`program` and `data` as load_program_text returns them; `data` words
     go into DRAM. `systolic_array` is "meissa" (the RTL's) or "tpu"; extra
-    keywords go to SchedulerCore."""
+    keywords go to SchedulerCore. `perf` attaches a PerfMonitor
+    (atalla/perf_monitor.py) as platform.perf; `perf_timeline` makes it keep
+    the per-cycle timeline too. `init_sregs` presets scalar registers, as a
+    loader would (c_entry_sregs for compiled C)."""
     parts = build_tpu_platform(dtype="bf16", lane_count=lane_count,
                                systolic_array=systolic_array,
                                backend_dram_latency=dram_latency,
@@ -119,6 +137,8 @@ def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]
                          dcache_port=ports["dcache"], **core_kw)
     if warm_icache:
         core.warm_icache()
+    for r, v in (init_sregs or {}).items():
+        core.decode2.srf.storage.write(int(r), int(v) & MASK32)
     sysarr_bridge = ArrayValueBridge(vc, parts.sa)
 
     # build_tpu_platform's tree, with the scheduler core in the vector core's
@@ -132,9 +152,14 @@ def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]
     # sim_ram_rr's order: icache, dcache, scratchpads 0-3.
     root.add_child(RoundRobinBackendTicker([ports["icache"], ports["dcache"], *backends]),
                    phase=PHASE_BACKEND)
-    return AtallaPlatform(core=core, vc=vc, spad=parts.spad, sa=parts.sa, dram=dram,
+    plat = AtallaPlatform(core=core, vc=vc, spad=parts.spad, sa=parts.sa, dram=dram,
                           backends=backends, vls_bridges=parts.vls_bridges,
                           sysarr_bridge=sysarr_bridge, ports=ports, root=root)
+    if perf:
+        # Last in every cycle: it observes and changes nothing.
+        plat.perf = PerfMonitor(plat, timeline=perf_timeline)
+        root.add_child(plat.perf, phase=PHASE_HARNESS)
+    return plat
 
 
 def build_kernel_platform(text: str, **kw) -> AtallaPlatform:

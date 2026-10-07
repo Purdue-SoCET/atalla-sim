@@ -54,7 +54,7 @@ from typing import Any, Callable, Deque, Dict, List, Optional, Sequence, Tuple
 
 from scheduler.control import (
     V_ALU_ADD, V_ALU_MEQ, V_ALU_MGT, V_ALU_MLT, V_ALU_MNEQ, V_ALU_SUB, V_EXP, V_GSAU,
-    V_MUL, V_MVMT, V_REDU, V_VLSU, VectorOp, SdmaOp)
+    V_MUL, V_MVMT, V_REDU, V_TRANS, V_VLSU, VectorOp, SdmaOp)
 from scheduler.execute import Result
 from scheduler.semantics import bits_fp32, fp32_bits
 
@@ -176,7 +176,12 @@ class VectorSide:
     2's register files (to merge masked writes with what they overwrite).
     """
 
-    VLSU_PRIORITY = ("vlsu0", "vlsu1", "vlsu2", "vlsu3", "gsau", "reduction", "lanes")
+    #: The transpose unit isn't in the RTL's arbiter; it sits with the other
+    #: non-lane units, after the GSAU.
+    VLSU_PRIORITY = ("vlsu0", "vlsu1", "vlsu2", "vlsu3", "gsau", "transpose",
+                     "reduction", "lanes")
+    #: Transpose requests that may wait in front of the unit.
+    TRANSPOSE_QUEUE = 2
 
     def __init__(self, vc, backends: Sequence = (), *, read_vreg: Callable[[int], List[float]],
                  read_mask: Callable[[int], int], spad_row_bytes: int = 64,
@@ -193,7 +198,14 @@ class VectorSide:
         self._vlsu_holds: Dict[int, Deque] = {s: deque() for s in range(len(vc.vls_units))}
         self.sdma_busy = [False] * max(4, len(self.backends))
         self._sdma_done: List[int] = []           # rs1s whose SDMA finished
+        #: Transpose requests in program order, ("push", vector) or
+        #: ("pop", vd), not yet given to the unit; the vds of tpop.vi waiting
+        #: for their column; and the columns left in the drain under way.
+        self._tp_reqs: Deque[Tuple[str, Any]] = deque()
+        self._tp_vds: Deque[int] = deque()
+        self._tp_cols_left = 0
         self.stats = dict(lane_ops=0, gsau_ops=0, vlsu_loads=0, vlsu_stores=0,
+                          transpose_pushes=0, transpose_pops=0,
                           sdma_loads=0, sdma_stores=0, vector_writes=0, mask_writes=0,
                           wb_conflict_cycles=0)
 
@@ -205,6 +217,7 @@ class VectorSide:
         g = self.vc.gsau
         vec["gsau"] = not g.to_systolic.is_full() and not g.rd_queue.is_full()
         vec["movement"] = self.mts.held is None
+        vec["transpose"] = len(self._tp_reqs) < self.TRANSPOSE_QUEUE
         vlsu = [v.can_accept_issue() for v in self.vc.vls_units]
         return vec, vlsu, list(self.sdma_busy[:4])
 
@@ -222,6 +235,11 @@ class VectorSide:
             # The systolic array's result, as the GSAU paired it with vd.
             out.append(VectorWrite("gsau", int(wb["dst"]),
                                    [float(x) for x in wb["data"]][: self.n]))
+        tp = self.vc.transpose
+        if self._tp_vds and tp.can_pop_writeback():
+            col = tp.peek_writeback()
+            out.append(VectorWrite("transpose", self._tp_vds[0],
+                                   [float(x) for x in col["data"]][: self.n]))
         if self._lane_results:
             out.append(self._lane_results[0])
         return out
@@ -250,6 +268,9 @@ class VectorSide:
         for s, vls in enumerate(self.vc.vls_units):
             if "vlsu%d" % s in granted:
                 vls.pop_writeback()
+        if "transpose" in granted:
+            self.vc.transpose.pop_writeback()
+            self._tp_vds.popleft()
         if "gsau" in granted:
             self.vc.gsau.pop_writeback()
         if self._lane_results and self._lane_results[0].source in granted:
@@ -268,6 +289,8 @@ class VectorSide:
                 continue                         # handled by offer_mts()
             if o.fu == V_VLSU:
                 self._dispatch_vlsu(o, ops)
+            elif o.fu == V_TRANS:
+                self._dispatch_transpose(o, ops)
             elif o.fu == V_GSAU:
                 self._dispatch_gsau(o, ops)
             else:
@@ -331,6 +354,39 @@ class VectorSide:
             w = VectorWrite("lanes", o.vd, merge(lo.old, vec, lo.mask))
         self._lane_results.append(w)
 
+    def _dispatch_transpose(self, o: VectorOp, ops: Dict) -> None:
+        """tpus.vi pushes vs1 in as a row; tpop.vi takes the next transposed
+        column into its register. The unit drains a whole tile off one pop
+        request (transpose.py), so the first tpop.vi of a tile starts the
+        drain and every tpop.vi, that one included, takes one column."""
+        if o.mnemonic == "tpus.vi":
+            self._tp_reqs.append(("push", list(ops["vs1"])))
+            self.stats["transpose_pushes"] += 1
+        else:
+            self._tp_reqs.append(("pop", o.vd))
+            self.stats["transpose_pops"] += 1
+
+    def _feed_transpose(self) -> None:
+        """Hand queued requests to the unit, in order, before it ticks."""
+        tp = self.vc.transpose
+        while self._tp_reqs:
+            kind, arg = self._tp_reqs[0]
+            if kind == "push":
+                if self._tp_cols_left or not tp.ready_in:
+                    return
+                assert tp.push(arg)
+            else:
+                if self._tp_cols_left == 0:
+                    if not tp.ready_in:
+                        return
+                    assert tp.pop()
+                    self._tp_cols_left = self.n
+                self._tp_cols_left -= 1
+                self._tp_vds.append(arg)
+            self._tp_reqs.popleft()
+            if kind == "push":
+                return                    # one request a cycle
+
     def _dispatch_gsau(self, o: VectorOp, ops: Dict) -> None:
         weight = o.mnemonic == "lw.vi"
         cmd = {"vdata": list(ops["vs1"]), "is_weight": weight,
@@ -380,6 +436,7 @@ class VectorSide:
 
     # -- the edge ------------------------------------------------------------------------
     def tick(self, cycle: int) -> None:
+        self._feed_transpose()
         self.vc.tick_units(float(cycle))
         self._collect_lanes()
 
@@ -397,4 +454,8 @@ class VectorSide:
                 and all(v.issue_q.is_empty() and v.req_q.is_empty() and v.rsp_q.is_empty()
                         and v.wb_q.is_empty() and v.outstanding_loads() == 0
                         for v in vc.vls_units)
-                and not any(self.sdma_busy) and self.mts.held is None)
+                and not any(self.sdma_busy) and self.mts.held is None
+                # every transpose request done; a push still writing its row
+                # counts, a drain left waiting for tpop.vi doesn't
+                and not self._tp_reqs and not self._tp_vds
+                and not (vc.transpose.busy and self._tp_cols_left == 0))

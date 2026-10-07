@@ -226,7 +226,7 @@ def test_every_opcode_lands_in_exactly_one_class():
     counts = {SCALAR: 0, VECTOR: 0, SCPAD: 0, NONE: 0}
     for op in OPCODES:
         counts[classify(op)] += 1
-    assert counts == {SCALAR: 51, VECTOR: 24, SCPAD: 2, NONE: 0}
+    assert counts == {SCALAR: 51, VECTOR: 26, SCPAD: 2, NONE: 0}   # with tpop/tpus
 
 
 def test_scalar_and_vector_keep_their_slot_scpad_compacts():

@@ -12,8 +12,8 @@ entries).
 
 The units compute every value: the lane datapath the element ops and
 reductions, the systolic array gemm.vv. The functional sim runs with its
-reductions in the RTL's order (golden.hardware_reduce), which is what the
-lane datapath does; its own sequential fp32 sum differs slightly, which
+reductions in the lane model's order (golden.lanes_reduce), which is what
+the lane datapath does; its own sequential fp32 sum differs slightly, which
 the last test bounds.
 """
 import os
@@ -44,7 +44,7 @@ def build(kernel: str, tmp_path: Path) -> str:
     return out.read_text()
 
 
-def run_both(text: str, reductions: str = "hardware"):
+def run_both(text: str, reductions: str = "lanes"):
     instr, data = load_program_text(text)
     g = golden.run_golden_state(instr, data, reductions=reductions)
     plat = build_atalla_platform(instr, data)
@@ -87,3 +87,39 @@ def test_softmax_against_the_functional_sims_own_sum(tmp_path):
     plat, g, dram = run_both(build("softmax", tmp_path), reductions="functional")
     off = [abs(m - r) for m, r in dram.values() if m != r]
     assert off and max(off) <= 2
+
+
+# -- C kernels ----------------------------------------------------------------------
+# Compiled with atalla_cc (third_party/aihw-ppci-compiler), packetized and given
+# their DRAM data by the functional sim's own C runner, and run with the C
+# loader's stack registers -- tools/run_kernel.py does the same.
+
+COMPILER = Path(__file__).resolve().parents[2] / "third_party" / "aihw-ppci-compiler"
+
+
+def build_c(name: str, tmp_path: Path) -> str:
+    golden.require(pytest)
+    kernels = COMPILER / "atalla_tests" / "kernels"
+    if not (kernels / name).is_file():
+        pytest.skip("compiler submodule (with atalla_tests/kernels) not checked out")
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
+    import run_kernel
+    return run_kernel.build_c_kernel(kernels / name, [], tmp_path).read_text()
+
+
+@pytest.mark.parametrize("kernel", ["add_4x32.c", "softmax_row32.c", "layernorm_4x4_active.c"])
+def test_c_kernel_matches_the_functional_sim(kernel, tmp_path):
+    from atalla.atalla_platform import c_entry_sregs
+    instr, data = load_program_text(build_c(kernel, tmp_path))
+    regs = c_entry_sregs(data)
+    g = golden.run_golden_state(instr, data, reductions="lanes", init_sregs=regs)
+    plat = build_atalla_platform(instr, data, init_sregs=regs)
+    plat.run_until_done(limit=2_000_000)
+    assert_registers_match(plat, g)
+    from src.misc.memory import Memory
+    gm = Memory()
+    gm.data_mem = dict(g["mem"])
+    bad = [b for b in sorted({(a & ~3) + k for a in g["mem"] for k in (0, 2)})
+           if int.from_bytes(plat.dram.read(b, 2), "little") != gm.read_bf16_le(b)]
+    assert not bad, [hex(b) for b in bad[:8]]
+    assert not plat.core.decode2.violations, "the packetizer made a packet the RTL can't run"

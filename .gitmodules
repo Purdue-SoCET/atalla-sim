@@ -1,3 +1,7 @@
 [submodule "third_party/atalla-functional-sim"]
 	path = third_party/atalla-functional-sim
 	url = git@github.com:Purdue-SoCET/atalla-functional-sim.git
+[submodule "third_party/aihw-ppci-compiler"]
+	path = third_party/aihw-ppci-compiler
+	url = git@github.com:Purdue-SoCET/aihw-ppci-compiler.git
+	branch = atalla-models

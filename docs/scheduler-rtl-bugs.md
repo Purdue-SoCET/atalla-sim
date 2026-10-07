@@ -489,7 +489,7 @@ a decision is needed either way.
 | `shw.s` | read-modify-write of the halfword (`ld_st_unit.sv:170-177`) | stores `rs >> 16` as a whole word |
 | `mod.s` with a negative operand | remainder takes the dividend's sign (`socetlib_shift_test_restore_divider.sv:81, 139-140`) | takes the divisor's sign (numpy `%`) |
 | `m0` | hardwired to all ones; writes dropped (`reggie.sv:187, 260`, `ZERO_REG_VAL = 1`) | writable, starts at all ones (the model follows the RTL) |
-| A reduction's result | each lane folds its pair, masked elements as the identity (`alu_FU.sv:45-61`), then a pairwise tree of BF16 adders (`reduction_tree.sv`); BF16 in the register | a sequential fp32 sum in element order, kept as an fp32 value in the vector register (the model follows the RTL) |
+| A reduction's result | each lane folds its pair, masked elements as the identity (`alu_FU.sv:45-61`), then a pairwise tree of BF16 adders (`reduction_tree.sv`); BF16 in the register | a sequential fp32 sum in element order, kept as an fp32 value in the vector register (atalla-sim follows its own lane model: per lane, then a tree, rounded to BF16 by the register file) |
 | Masked-off elements of a lane op | written as 0: the result collector stores `mask ? result : 0` (`result_collector.sv:67`) and the register file has no element write enable | keep the destination's old value (the model follows the functional sim) |
 
 ## Not bugs

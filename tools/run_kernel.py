@@ -10,9 +10,20 @@ array, the four scratchpad pads with their DMA backends, and DRAM
     tools/run_kernel.py path/to/prog.in      # an already assembled program
     tools/run_kernel.py softmax --golden     # also run the functional sim and compare
     tools/run_kernel.py gemm -- --rows 16    # arguments after -- go to the build script
+    tools/run_kernel.py gemm --perf-json gemm.json --timeline   # the monitor's report
 
 A kernel name is built with the functional sim's own build script,
 third_party/atalla-functional-sim/kernels/build_<name>.py.
+
+A C kernel (a .c path, or a file name in the compiler's atalla_tests/kernels/)
+is compiled with atalla_cc (third_party/aihw-ppci-compiler) and packetized
+and given its DRAM data by the functional sim's own C runner
+(cli/run_c_kernel.py), with the data preset its file name implies; arguments
+after -- go to that runner instead (e.g. -- --preset gemm --k 32). It runs
+with the C loader's stack registers set (atalla_platform.c_entry_sregs).
+
+    tools/run_kernel.py add_4x32.c --golden
+    tools/run_kernel.py gemm_32_tiled_t32_baseline.c -- --preset gemm --k 32
 """
 
 import argparse
@@ -28,11 +39,49 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from scheduler import golden                                     # noqa: E402
 from scheduler.core import load_program_text                      # noqa: E402
-from atalla.atalla_platform import build_atalla_platform           # noqa: E402
+from atalla.atalla_platform import build_atalla_platform, c_entry_sregs  # noqa: E402
 from scheduler.semantics import u32                               # noqa: E402
 from scheduler.vector import bf16_round                           # noqa: E402
 
 SIM = golden.SUBMODULE_PATH
+COMPILER = ROOT / "third_party" / "aihw-ppci-compiler"
+C_KERNELS = COMPILER / "atalla_tests" / "kernels"
+
+
+def _sim_env():
+    return dict(os.environ, PYTHONPATH=os.pathsep.join(
+        [str(COMPILER), str(SIM), str(SIM / "kernels"), str(SIM / "experiments" / "gemm")]))
+
+
+def c_preset(c_path: Path):
+    """The functional sim's data preset for a C kernel, from its file name."""
+    stem = c_path.stem
+    for prefix, preset in (("gemm", "gemm"), ("add", "add"), ("relu", "relu"),
+                           ("softmax", "softmax"), ("layernorm", "layernorm"),
+                           ("maxpool", "maxpool"), ("conv", "conv")):
+        if stem.startswith(prefix):
+            return preset
+    return None
+
+
+def build_c_kernel(c_path: Path, extra, out_dir: Path) -> Path:
+    """Compile and packetize with the functional sim's C runner; return the
+    .in it writes (instructions and DRAM data)."""
+    if not COMPILER.is_dir() or not any(COMPILER.iterdir()):
+        sys.exit("the compiler submodule isn't checked out: %s" % COMPILER)
+    args = list(extra)
+    if "--preset" not in args and "--data" not in args:
+        preset = c_preset(c_path)
+        if preset is None:
+            sys.exit("no data preset for %s; pass -- --preset NAME or -- --data PATH"
+                     % c_path.name)
+        args = ["--preset", preset] + args
+    p = subprocess.run([sys.executable, str(SIM / "cli" / "run_c_kernel.py"),
+                        "--c", str(c_path), "--out-dir", str(out_dir), *args],
+                       cwd=str(SIM), env=_sim_env(), capture_output=True, text=True)
+    if p.returncode != 0:
+        sys.exit("C build failed:\n" + (p.stderr or p.stdout)[-3000:])
+    return out_dir / ("%s.in" % c_path.stem)
 
 
 def build_kernel(name: str, extra, out_dir: Path) -> Path:
@@ -49,13 +98,13 @@ def build_kernel(name: str, extra, out_dir: Path) -> Path:
     return out
 
 
-def compare(plat, instr, data, reductions: str = "hardware") -> int:
+def compare(plat, instr, data, reductions: str = "lanes", init_sregs=None) -> int:
     """Differences from the functional sim: scalar and vector registers, and
-    DRAM as the DMA reads it. Returns how many. With reductions="hardware"
-    the functional sim reduces in the RTL's order, as the lane datapath
-    does; "functional" keeps its own sequential fp32 sum."""
+    DRAM as the DMA reads it. Returns how many. With reductions="lanes"
+    the functional sim reduces in the lane model's order; "functional"
+    keeps its own sequential fp32 sum."""
     from src.misc.memory import Memory
-    g = golden.run_golden_state(instr, data, reductions=reductions)
+    g = golden.run_golden_state(instr, data, reductions=reductions, init_sregs=init_sregs)
     c, bad = plat.core, 0
     for r in range(1, 256):
         if c.scalar_reg(r) != u32(g["sregs"].get(r, 0)):
@@ -93,30 +142,41 @@ def main() -> None:
                     help="start with every packet's line in the icache")
     ap.add_argument("--functional-reductions", action="store_true",
                     help="with --golden: compare against the functional sim's own "
-                         "fp32 sums instead of the RTL's reduction order")
+                         "fp32 sums instead of the lane model's reduction order")
+    ap.add_argument("--perf-json", metavar="PATH",
+                    help="write the performance monitor's report as JSON")
+    ap.add_argument("--timeline", action="store_true",
+                    help="with --perf-json: include the per-cycle timeline")
     args = ap.parse_args(argv)
 
+    init_sregs = None
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(args.kernel)
-        if not path.suffix == ".in":
-            path = build_kernel(args.kernel, extra, Path(tmp))
-        instr, data = load_program_text(path.read_text())
+        if path.suffix == ".c":
+            if not path.is_file():
+                path = C_KERNELS / path.name
+            path = build_c_kernel(path.resolve(), extra, Path(tmp))
+            instr, data = load_program_text(path.read_text())
+            init_sregs = c_entry_sregs(data)
+        else:
+            if path.suffix != ".in":
+                path = build_kernel(args.kernel, extra, Path(tmp))
+            instr, data = load_program_text(path.read_text())
 
     plat = build_atalla_platform(instr, data, dram_latency=args.dram_latency,
-                                    lane_count=args.lanes,
-                                    warm_icache=args.warm_icache, strict=False)
+                                 lane_count=args.lanes, warm_icache=args.warm_icache,
+                                 perf_timeline=args.timeline, init_sregs=init_sregs,
+                                 strict=False)
     t = time.time()
     cycles = plat.run_until_done(limit=args.limit)
     c = plat.core
     print("%s: %d cycles (%.1f s)" % (args.kernel, cycles, time.time() - t))
-    print("  packets issued %d, fetched %d, flushes %d" %
-          (len(c.issued), c.packets_fetched, c.flushes))
-    if c.decode2.stall_reasons:
-        print("  decode 2 stalls: %s" % ", ".join(
-            "%s %d" % kv for kv in sorted(c.decode2.stall_reasons.items())))
-    print("  vector side: %s" % ", ".join("%s %d" % kv for kv in c.vector.stats.items() if kv[1]))
-    print("  load/store unit: %s" % ", ".join("%s %d" % kv for kv in c.lsu.stats.items() if kv[1]))
-    print("  data cache: %s" % ", ".join("%s %d" % kv for kv in c.dcache.stats.items() if kv[1]))
+    print()
+    print(plat.perf.summary())
+    print()
+    if args.perf_json:
+        plat.perf.to_json(args.perf_json, timeline=args.timeline)
+        print("performance report written to %s" % args.perf_json)
     if c.decode2.violations:
         print("  packets the RTL would mangle: %d (first at pc %#x: %s)"
               % (len(c.decode2.violations), c.decode2.violations[0][0],
@@ -124,9 +184,9 @@ def main() -> None:
     if args.golden:
         if not golden.HAVE_GOLDEN:
             sys.exit("functional sim unavailable: %s" % golden.load_error)
-        red = "functional" if args.functional_reductions else "hardware"
+        red = "functional" if args.functional_reductions else "lanes"
         print("against the functional sim (%s reduction order):" % red)
-        compare(plat, instr, data, red)
+        compare(plat, instr, data, red, init_sregs)
 
 
 if __name__ == "__main__":
