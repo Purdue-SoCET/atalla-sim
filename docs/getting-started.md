@@ -99,6 +99,26 @@ Not every kernel that ships with the compiler and the functional sim computes
 what it claims. `docs/architecture/scheduler.md`, *Which kernels compute what
 they claim*, lists each one; the correct ones are a safe starting point.
 
+### See which units work when
+
+```bash
+python tools/run_kernel.py gemm --activity gemm.html
+```
+
+writes one self-contained page (open it in a browser, no server needed):
+the chip's blocks in panels, each coloured by what it was doing at the
+chosen cycle -- idle, active (moving work) or stalled (holding work it
+can't move: a busy DRAM channel, a bank conflict). A slider and a play
+button move through the run; a window of 10, 100 or 1000 cycles shows how
+busy each block was over that span instead. Each block prints its busy
+share of the whole run, and hovering it says what its states mean. Below,
+a timeline has a row per block and, on top, the performance monitor's
+cycle buckets; click it to jump there.
+
+`--activity gemm.json` saves the recording instead;
+`python tools/activity_view.py gemm.json` draws it later. The blocks and
+what "active" means for each are in `src/atalla/activity.py`.
+
 ## 3. Explore a design
 
 ### From the command line

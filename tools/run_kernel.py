@@ -24,6 +24,7 @@ harness (tools/c_kernels.py). It runs with the C loader's stack registers set.
     tools/run_kernel.py add.c                  # run, check against numpy
     tools/run_kernel.py relu.c --golden        # also compare with the functional sim
     tools/run_kernel.py add.c --save add.in    # keep the assembled image
+    tools/run_kernel.py gemm --activity gemm.html   # which blocks work when
 """
 
 import argparse
@@ -118,6 +119,9 @@ def main() -> None:
                          "fp32 sums instead of the lane model's reduction order")
     ap.add_argument("--save", metavar="PATH",
                     help="write the program image (.in) that ran, e.g. for the functional sim")
+    ap.add_argument("--activity", metavar="PATH",
+                    help="record which blocks are busy each cycle: a .html path draws the "
+                         "activity view (tools/activity_view.py), anything else saves the trace")
     ap.add_argument("--perf-json", metavar="PATH",
                     help="write the performance monitor's report as JSON")
     ap.add_argument("--timeline", action="store_true",
@@ -148,7 +152,8 @@ def main() -> None:
 
     plat = build_atalla_platform(instr, data, dram_latency=args.dram_latency,
                                  lane_count=args.lanes, systolic_array=args.array,
-                                 burst_bytes=args.burst_bytes, warm_icache=args.warm_icache,
+                                 burst_bytes=args.burst_bytes,
+                                 activity=bool(args.activity), warm_icache=args.warm_icache,
                                  perf_timeline=args.timeline, init_sregs=init_sregs,
                                  strict=False)
     t = time.time()
@@ -161,6 +166,16 @@ def main() -> None:
     if args.perf_json:
         plat.perf.to_json(args.perf_json, timeline=args.timeline)
         print("performance report written to %s" % args.perf_json)
+    if args.activity:
+        meta = dict(program=Path(args.kernel).name, array=args.array, lanes=args.lanes,
+                    burst_bytes=args.burst_bytes, dram_latency=args.dram_latency)
+        if args.activity.endswith(".html"):
+            import activity_view
+            Path(args.activity).write_text(activity_view.render(plat.activity.trace(meta)))
+            print("activity view written to %s" % args.activity)
+        else:
+            plat.activity.to_json(args.activity, meta)
+            print("activity trace written to %s (tools/activity_view.py draws it)" % args.activity)
     if c.decode2.violations:
         print("  packets the RTL would mangle: %d (first at pc %#x: %s)"
               % (len(c.decode2.violations), c.decode2.violations[0][0],

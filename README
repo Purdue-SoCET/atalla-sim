@@ -92,6 +92,7 @@ array, scratchpads and DRAM -- and get a cycle-by-cycle report:
     python tools/run_kernel.py relu.c --golden   # a C program, via the compiler
     python tools/run_kernel.py gemm              # an assembly kernel
     python tools/run_kernel.py prog.in           # an assembled program
+    python tools/run_kernel.py gemm --activity gemm.html   # which units work when
 
 docs/getting-started.md walks through installing, running, reading the
 report and exploring a design.

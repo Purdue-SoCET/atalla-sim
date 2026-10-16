@@ -640,6 +640,3 @@ class SystolicArrayMEISSA(Clocked):
     def get_buffer(self) -> List[List[float]]:
         """Every result vector produced so far, in order."""
         return self.output_rows
-
-    def pending_outputs(self) -> int:
-        return min(len(bank) for bank in self._banks) if self._banks else 0

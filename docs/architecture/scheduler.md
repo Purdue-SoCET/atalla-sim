@@ -330,6 +330,15 @@ On gemm, for example, a third of the cycles are decode 2 waiting for
 `gemm.vv` results and another sixth for `vreg.ld`s; on softmax, half are
 the icache filling straight-line code.
 
+**Activity probe.** `build_atalla_platform(activity=True)` adds a second
+observer, `ActivityProbe` (`atalla/activity.py`), ticked after the monitor.
+Each cycle it puts every block -- fetch, decode, each execute unit, each
+lane, the GSAU, the VLSUs, the array, each scratchpad and DMA engine, the
+cache ports, the DRAM channel -- in one of three states (idle, active,
+stalled) and keeps them as intervals. `tools/run_kernel.py --activity
+x.html` draws them (`tools/activity_view.py`). Where it measures what the
+monitor measures, the counts agree (`tests/atalla/test_activity.py`).
+
 ## Kernels
 
 `tools/run_kernel.py` runs a kernel through the whole machine: the

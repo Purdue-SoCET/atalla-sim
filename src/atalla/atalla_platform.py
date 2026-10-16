@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional
 from atalla.sysarr_tpu_system import (
     PHASE_BACKEND, PHASE_CORE, PHASE_HARNESS, PHASE_SPAD, PHASE_SYSARR, PHASE_VLS,
     GSAUTPUBridge, RoundRobinBackendTicker, build_tpu_platform)
+from atalla.activity import ActivityProbe
 from atalla.perf_monitor import PerfMonitor
 from base.sched import CompositeClocked
 from memory.backend import Backend
@@ -98,6 +99,7 @@ class AtallaPlatform:
     ports: Dict[str, BusMaster]
     root: CompositeClocked
     perf: Optional[PerfMonitor] = None
+    activity: Optional[ActivityProbe] = None
     cycle: int = 0
 
     def tick(self) -> None:
@@ -117,15 +119,17 @@ def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]
                           systolic_array: str = "meissa", lane_count: int = 16,
                           dram_latency: int = 6, burst_bytes: int = DRAM_BURST_BYTES,
                           warm_icache: bool = False, perf: bool = True,
-                          perf_timeline: bool = False,
+                          perf_timeline: bool = False, activity: bool = False,
                           init_sregs: Optional[Dict[int, int]] = None,
                           **core_kw) -> AtallaPlatform:
     """`program` and `data` as load_program_text returns them; `data` words
     go into DRAM. `systolic_array` is "meissa" (the RTL's) or "tpu"; extra
     keywords go to SchedulerCore. `perf` attaches a PerfMonitor
     (atalla/perf_monitor.py) as platform.perf; `perf_timeline` makes it keep
-    the per-cycle timeline too. `init_sregs` presets scalar registers, as a
-    loader would (c_entry_sregs for compiled C)."""
+    the per-cycle timeline too. `activity` attaches an ActivityProbe
+    (atalla/activity.py) as platform.activity, which records every block's
+    state each cycle for tools/activity_view.py. `init_sregs` presets scalar
+    registers, as a loader would (c_entry_sregs for compiled C)."""
     parts = build_tpu_platform(dtype="bf16", lane_count=lane_count,
                                systolic_array=systolic_array,
                                backend_dram_latency=dram_latency,
@@ -160,9 +164,13 @@ def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]
     plat = AtallaPlatform(core=core, vc=vc, spad=parts.spad, sa=parts.sa, dram=dram,
                           backends=backends, vls_bridges=parts.vls_bridges,
                           sysarr_bridge=sysarr_bridge, ports=ports, root=root)
-    if perf:
+    if perf or activity:
         # Last in every cycle: it observes and changes nothing.
-        plat.perf = PerfMonitor(plat, timeline=perf_timeline)
+        plat.perf = PerfMonitor(plat, timeline=perf_timeline or activity)
         root.add_child(plat.perf, phase=PHASE_HARNESS)
+    if activity:
+        # After the monitor, whose per-cycle bucket it records.
+        plat.activity = ActivityProbe(plat)
+        root.add_child(plat.activity, phase=PHASE_HARNESS)
     return plat
 
