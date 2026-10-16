@@ -123,10 +123,9 @@ It models what the RTL is meant to do, not its bugs:
 | `sqrt.bf` goes to EX2, but decode 2's structural check forgets it | `sqrt.bf` waits for EX2 |
 | Mask writes are tracked for vector slots 0–1 only, and `mv.stm` is never WAW-checked | every mask write is tracked |
 
-`li.s` is a pseudo-instruction (`lui.s` then `addi.s`). The RTL has no case
-for it, correctly, and neither does the model. The functional sim's
-assembler currently emits it as a real instruction (opcode 47) and runs it,
-so a program built that way would lose it on the hardware.
+`li.s` is a pseudo-instruction (`addi.s`, or `lui.s` then `addi.s`). The
+RTL has no case for it, and neither does the model: the assemblers expand
+it (see Kernels).
 
 ## Execute and writeback
 
@@ -188,12 +187,12 @@ document and the assembler, and otherwise the functional sim:
 
 | | model | RTL |
 |---|---|---|
-| load/store address | `rs1 + imm` | `imm` (bug 20) |
-| `jal`, `jalr` offset | bytes | × 4 (bug 21) |
-| branch increment | unsigned 0..127 | sign-extended (bug 22) |
+| load/store address | `rs1 + imm` | `imm` |
+| `jal`, `jalr` offset | bytes | × 4 |
+| branch increment | unsigned 0..127 | sign-extended |
 | `blt`/`bge`/`bgt`/`ble` | signed (the functional sim compares unsigned) | signed |
 | scalar BF16 values | fp32 layout, BF16 in the upper half | lower half |
-| `lhw.s`, `shw.s`, `mod.s` | as the functional sim | see the bug note |
+| `lhw.s`, `shw.s`, `mod.s` | as the functional sim | differs |
 | divide by zero | `rcp.bf` gives ±∞; `div`/`mod` follow RISC-V (−1, the dividend) | not checked (the functional sim raises) |
 
 ## Vector and DMA dispatch
@@ -221,9 +220,9 @@ to the vector core's units (`vector_core/`) and the scratchpad backends
 - **Halt** also waits for the vector side to drain: lanes, GSAU, VLSUs and
   DMA.
 
-Where the RTL is wrong this does what was meant: all four VLSUs write back
-(bug 4), write ports follow the register file's bank `vd[1:0]` (bug 5), and
-`lw.vi` writes no register (bug 3).
+Where the RTL is wrong this does what was meant: all four VLSUs write back,
+write ports follow the register file's bank `vd[1:0]`, and `lw.vi` writes no
+register.
 
 **Values** come from the units; the scheduler only routes operands to them
 and formats what comes back for writeback.
@@ -286,8 +285,11 @@ and reads their readiness for decode 2 and their results for writeback.
 **Memory.** In the RTL the icache, the dcache and the four scratchpad
 backends share one memory (`sim_ram_rr`, in the testbench), round robin.
 Here they are six masters on one DRAM channel: one burst launch a cycle
-across all of them, `burst_bytes` (32) each, back `dram_latency` (6) cycles
-later, taking turns in a round-robin ticker. The caches reach it through
+across all of them, `burst_bytes` each, back `dram_latency` (6) cycles
+later, taking turns in a round-robin ticker. A burst is 8 bytes by default
+(`memory.dram.DRAM_BURST_BYTES`): the RTL's 64-bit DRAM request, four BF16
+elements, so the channel peaks at 8 bytes a cycle. A DMA row narrower than a
+burst writes only its own elements, as the RTL's lane mask does. The caches reach it through
 bus ports (`memory/bus.py`): a line fill goes out as bursts and each 64-bit
 beat is taken when its burst is back; written beats gather into bursts in a
 small buffer. A cache line fill therefore waits behind the scratchpads'
@@ -346,73 +348,104 @@ reduction order; add `--functional-reductions` to compare against its own fp32 s
 
 A kernel name is assembled by the functional sim's own build script
 (`third_party/atalla-functional-sim/kernels/build_<name>.py`), in its `.in`
-format; `build_kernel_platform(text)` does the same from Python.
+format. From Python, `scheduler.core.load_program_text(text)` reads an
+`.in` and `atalla_platform.build_atalla_platform(instr, data)` builds the
+machine around it.
 
-Every kernel in the functional sim's metrics list runs to halt and matches
-the functional sim exactly at the end: every register, and DRAM as the DMA
-reads it. The functional sim runs with the lane model's reduction order.
+Every kernel below runs to halt and matches the functional sim exactly at
+the end: every register, and DRAM as the DMA reads it. That shows the two
+simulators agree, not that the kernel is right; see *Which kernels compute
+what they claim* below.
 
 | kernel | cycles |
 |---|---:|
-| `add`, `relu`, `sigmoid` | 1,597 / 1,729 / 430 |
-| `layernorm_param`, `maxpool` | 3,604 / 1,123 |
-| `gemm`, `gemm_tiled` | 2,332 / 1,370 |
-| `gemms`, `gemms_function`, `gemms_pipelined`, `…_loop_unroll` | 8,413 / 7,504 / 7,496 / 7,662 |
-| `conv`, `conv_tiled`, `conv_pipelined`, `conv_unrolled_pipelined` | 3,118 / 1,573 / 3,139 / 3,153 |
-| `softmax`, `attention`, `flash_attention` | 2,331 / 59,093 / 18,643 |
+| `add`, `relu`, `sigmoid` | 2,172 / 2,105 / 441 |
+| `layernorm_param`, `maxpool` | 4,034 / 1,415 |
+| `gemm`, `gemm_tiled` | 2,584 / 1,397 |
+| `gemms`, `gemms_function`, `gemms_pipelined`, `…_loop_unroll` | 9,552 / 8,679 / 8,661 / 8,829 |
+| `conv`, `conv_tiled`, `conv_pipelined`, `conv_unrolled_pipelined` | 3,160 / 1,604 / 3,181 / 3,195 |
+| `softmax`, `attention`, `flash_attention` | 2,694 / 65,654 / 20,795 |
 
 Cycle counts are with the default platform: the MEISSA array, 16 lanes,
-DRAM latency 6, and a cold instruction cache fetching over the shared DRAM
-channel. Against the functional sim's own sequential fp32
+DRAM latency 6, 8-byte DRAM requests, and a cold instruction cache fetching
+over the shared DRAM channel. Against the functional sim's own sequential fp32
 sums, `softmax`'s outputs differ by at most 2 BF16 steps.
 
-**C kernels.** `tools/run_kernel.py add_4x32.c` (a path, or a file in
-the compiler's `atalla_tests/kernels/`) compiles with `atalla_cc`, from the
-`third_party/aihw-ppci-compiler` submodule (branch `atalla-models`, the one
-with the kernels), and has the functional sim's C runner
-(`cli/run_c_kernel.py`) packetize it and lay out its DRAM data from the
-preset its name implies (`-- --preset ... ` overrides). It runs with the C
-loader's stack registers set (`c_entry_sregs`: `x2` and `x33` above the
-data, as the functional sim's loader does). Two fixes made this work:
+**C programs.** They go straight from the compiler to atalla-sim:
 
-- The packetizer (`build_compiler.py` in the functional sim) packed several
-  scalar ALU ops into one packet, which the RTL can't execute (EX1 takes one
-  a packet; the rest are dropped and their registers stay busy, so the run
-  deadlocks). It now keeps each packet within the scheduler's limits
-  (`HW_PACKET_RESOURCES`: one instruction per EX unit, 4/4/2 register read
-  ports, one SDMA).
-- The C gemm, conv and attention kernels loaded weights first row first;
-  they now load last row first, as the `lw.vi` contract needs (a local
-  compiler branch, `lw-vi-shift-in-weight-order`).
+    C --atalla_cc -p -S--> packetized assembly --src/scheduler/assembler.py--> image
 
-`relu_4x32.c` and `maxpool_2x2.c` fail the functional sim's own check, with
-or without these changes; that is a problem in those kernels or the
-compiler, not in atalla-sim.
+`third_party/aihw-ppci-compiler` (branch `atalla-shaunak`) packetizes: its
+output is already four-slot packets, padded with `nop`, a packet per label,
+within the scheduler's slot limits. The assembler only encodes and lays out
+what it is given (a `jal x1, main; halt.s` bootstrap first, `li.s` expanded),
+and its encodings match the functional sim's assembler word for word.
+`tools/run_kernel.py add.c` (a path, or a file in the compiler's
+`test_validation_kernels/` or `test_validation/`) compiles, assembles and
+runs one, seeds DRAM and checks the result with the compiler's own
+validation harness (numpy references; `x10` for the unit tests), and
+`--golden` also runs the functional sim on the identical image. The pieces
+are in `tools/c_kernels.py`. It runs with the C loader's stack registers set
+(`c_entry_sregs`: `x2` and `x33` above the data, as the functional sim's
+loader does).
+
+Against the functional sim (`tests/scheduler/test_kernels.py` lists each case):
+
+| | programs |
+|---|---|
+| identical | add, relu, maxpool, maxpool_2x2, softmax, conv_*, gemm_tiled_pipelined, gemm_tiled_pipelined_unrolled, scalar_sum_loop, sqrt_perfect_square |
+| differ: a DMA race | scpad_load_roundtrip: its vector load reads the scratchpad before its DMA has filled it (the functional sim has no timing, so it never races) |
+| differ: `vector_load` on a DRAM address | 9 unit tests: only the functional sim allows it; the hardware's `vreg.ld` reads the scratchpad |
+| differ: `num_cols` | gemm_tiled_baseline, in a vector register only (DRAM matches): `vreg.ld`/`vreg.st` move 32 lanes where the functional sim moves `num_cols + 1` |
+| differ: misaligned `sw.s` | layernorm (stack only): aligned down here, written at the byte address there |
+
+### Which kernels compute what they claim
+
+Checked against numpy on each kernel's own inputs (read back from its
+program image), and by reading the kernel against the instruction and
+intrinsic semantics. A kernel can match the functional sim and still be
+wrong: both simulators then run the same wrong program.
+
+| kernel | result | problem |
+|---|---|---|
+| C `add`, `scalar_sum_loop`, `sqrt_perfect_square` | correct | |
+| C `scpad_load_roundtrip` | a race | its `vector_load` doesn't wait for its `scpad_load`: the compiler gives the two different registers, and a `vreg.ld` waits for a DMA only by reading the register the DMA holds (its `rs1`). It reads stale data unless the DMA happens to finish first, as it did with 32-byte bursts. `relu` loads its zero vector the same way, harmlessly |
+| C `relu`, `maxpool` | correct, by luck | they rely on a masked op leaving its masked-off lanes holding the destination's old value, which the intrinsics don't define; it works because the compiler happens to pick the kept value's register as the destination. `maxpool` also reads its zero vector before loading the scratchpad, and pools vertically only (2×1). `relu` writes −0.0 for negative inputs |
+| C `make_mask_eq_vector` | passes without testing anything | it compares a vector with itself, loaded from a DRAM address with no DMA (and from row 1: the second argument of `vector_load` is a row offset, not a row count) |
+| C `softmax`, `layernorm`, `maxpool_2x2` | wrong | known compiler bugs (reductions write lane 0 only; masked-op merge) |
+| C `conv_*`, `gemm_tiled_*` | wrong | weight rows loaded first to last, so output columns are reversed |
+| asm `relu`, `softmax` | correct | `softmax` uses inputs 0..1023, which BF16 can't hold exactly, at an unaligned address (`0xcafa`) |
+| asm `maxpool` | correct for a vertical 2×1 pool | the name and `--pool 2` suggest a 2×2 pool; the width is never pooled |
+| asm `sigmoid` | computes `exp(-x)`, not a sigmoid | |
+| asm `add` | the arithmetic is right, the test isn't | A, B and C are placed 128 bytes apart but are 2 KB each, so they overlap and C's zero fill overwrites most of A and B |
+| asm `gemm`, `gemm_tiled` | compute `A @ Wᵀ` | their own reference is `A @ W`: they push W's rows into the array, where `gemm.vv` needs its columns |
+| asm `gemms` | wrong | it advances its input pointer with `addi.s $2, $2, 2048`; the immediate is 12-bit signed, so 2048 is encoded as −2048 and tiles 1 and 2 are read from the wrong addresses (atalla-sim's own assembler rejects this) |
+| asm `conv`, `conv_tiled` | wrong | they push W's rows (27×4) where the columns are needed, so only part of W reaches the array; `conv` also builds its lane mask as `0x07FFFF7F`, leaving lane 7 out |
+| asm `layernorm_param` | wrong | its DMA control word puts the matrix width (32) in the stride field, which takes width − 1, so every row is read and written one element out of place and one element per row is never normalized; it also normalizes the whole tile, not each row, has no γ/β, and its ε is 0 |
+
+These are problems in the kernels, which come from the compiler and the
+functional sim repositories, not in atalla-sim: report them there.
 
 **Weights.** `lw.vi` shifts its vector into the systolic array's weights as
 column 0, moving every column one to the right, as the array is built
 (MEISSA `mul_grid.sv`). Kernels load their weight rows last to first, so
 column j ends up holding `w_j`, and `gemm.vv` computes `out[j] = vs1 · w_j`
 with the functional sim's rounding (BF16 operands, fp32 dot products, a BF16
-result). The functional sim's `lw.vi` and its kernels were changed to that
-contract (`ASSEMBLY_SYNTAX.md`); before, it filled columns 0, 1, … in load
-order, which the hardware doesn't do. The systolic array model computes the
+result). To compute `x @ W`, push W's columns, last first. The systolic array model computes the
 values: its weight path shifts each vector in at column 0, and
 `ArrayValueBridge` (`atalla_platform.py`) hands its BF16 rows back to the
 GSAU, which pairs them with `vd`.
 
 **`li.s`** is a pseudo-instruction the hardware doesn't decode. The
-assembler (`build.py`, and `build_compiler.py` for C kernels) now expands
-every one: `addi.s rd, $0, imm` when it fits 12 bits, otherwise `lui.s` then
-`addi.s`. It used to emit most of them as a raw opcode 47, which the
-functional sim ran and the hardware would drop.
+assemblers (`build.py` for assembly kernels, `src/scheduler/assembler.py`
+for C programs) expand every one: `addi.s rd, $0, imm` when it fits 12
+bits, otherwise `lui.s` then `addi.s`.
 
 ## Data cache
 
 `dcache.py` is the scalar core's data cache: a lockup-free cache with miss
 status holding registers. It is what the RTL's `rtl/modules/scheduler/dcache/`
-sets out to be, without its bugs (8–10, 15, 17–19 in the bug note), and its
-geometry is configurable (`DCacheConfig`):
+sets out to be, without its known bugs, and its geometry is configurable (`DCacheConfig`):
 
 | parameter | default (the RTL's) |
 |---|---|

@@ -171,10 +171,6 @@ For the slide-oriented presentation plots, use:
 That writes the block overview, one-weight flow, compute-detail, and reuse
 balance PNGs next to the input log.
 
-See
-[../results/presentation-graphs.md](../results/presentation-graphs.md)
-for notes on what each presentation graph is meant to communicate.
-
 ## What Is Still Simplified
 
 This harness still makes a few simplifying choices:

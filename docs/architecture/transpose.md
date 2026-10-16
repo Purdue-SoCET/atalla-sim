@@ -81,8 +81,9 @@ So a row costs **9** cycles, a column **8**, and one pop drains the tile:
 1 cycle for IDLE to see the pop, then 32 columns — **257** cycles to the end of
 the last `DONE`, the last column handed over 256 cycles after the pop is
 taken. An M x 32 tile is 9M + 257 cycles in the unit. All three latencies are
-constructor parameters; `push_cycles`, `column_cycles` and `drain_cycles` give
-the costs for whatever they are set to.
+constructor parameters; the tests' `push_cycles` and `column_cycles`
+(`tests/vector_core/test_transpose_unit.py`) give the costs for whatever they
+are set to.
 
 `DONE` is the stall state. There is no output queue: if the consumer cannot
 take the column, the FSM stays in `DONE` holding it, and the drain stretches

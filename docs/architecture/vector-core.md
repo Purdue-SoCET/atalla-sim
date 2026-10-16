@@ -3,9 +3,6 @@
 A cycle-level model of the vector core. It executes VLIW packets: each packet
 carries one slot group per functional unit, and each group feeds that unit.
 
-For what changed recently and why, see
-[vector-core-old-vs-new.md](vector-core-old-vs-new.md).
-
 ## Shape
 
 ```
@@ -93,6 +90,5 @@ vc.pop_systolic_request();          vc.push_systolic_response(rsp)
 
 ## Related
 
-- [vector-core-old-vs-new.md](vector-core-old-vs-new.md) — what changed, with diagrams
 - [base-classes.md](base-classes.md) — the tick/cycle model
 - [queue-glossary.md](queue-glossary.md) — the FIFOs

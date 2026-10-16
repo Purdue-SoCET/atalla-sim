@@ -10,8 +10,6 @@ depths) before there is silicon to measure.
     This repo    https://github.com/Purdue-SoCET/Atalla-Sim/
     Contact      socet@purdue.edu
 
-> This repository is currently being built.
-
 
 THE MODELED SYSTEM
 ------------------
@@ -58,14 +56,19 @@ REPOSITORY LAYOUT
 
     src/
       base/          simulation framework: EventQueue, ClockDomain, Clocked,
-                     WakeGroup/CompositeClocked, SimQueue, dtypes, debug
-      memory/        DRAM, Backend, Scratchpad, Crossbar, SRAM banks, Frontend
-      vector_core/   VectorCore, VLSU, VectorDatapath, GSAU, Veggie
-      systolic_array/  SystolicArrayTPU and the Meissa black-box model
+                     wake groups, CompositeClocked, SimQueue, dtypes, debug
+      scheduler/     the VLIW scheduler: fetch, icache, decode, execute,
+                     data cache, vector dispatch; the ISA and the assembler
+      memory/        DRAM, Backend, Scratchpad, Crossbar, Frontend, bus ports
+      vector_core/   VectorCore, VLSU, VectorDatapath, GSAU, Veggie, transpose
+      systolic_array/  MEISSA (the default) and the TPU-style array
       native/        optional C++ SIMD kernels (AVX2 / AVX-512)
-      atalla/        platform integration, bridges, experiment harnesses
-    tests/           pytest unit and integration tests
-    tools/           sweep runners, plotting, benchmarks
+      atalla/        platforms (scheduler-driven and harness-driven), the
+                     performance monitor, experiment harnesses
+    tests/           pytest unit and integration tests; tests/equivalence
+                     holds the behaviour snapshot
+    tools/           run_kernel.py, sweep runners, plotting, benchmarks
+    third_party/     the C compiler and the functional simulator (submodules)
     docs/            see docs/README.md for the map
     logs/            simulation output (stats, gantt, schedule)
     Makefile  LICENSE  README
@@ -74,12 +77,29 @@ REPOSITORY LAYOUT
 GETTING STARTED
 ---------------
 
+    git clone --recurse-submodules git@github.com:Purdue-SoCET/atalla-sim.git
+    pip install numpy pytest       # and matplotlib for the plotting tools
     make native        # optional but recommended; see below
     pytest tests/
 
-    # the two long GEMM integration tests
-    pytest tests/atalla/test_scratchpad_vector_core_sysarr_tpu_tiled_1024.py
-    pytest tests/atalla/test_scratchpad_vector_core_sysarr_tpu_tiled_1024_blocked_mn.py
+The submodules (the compiler and the functional simulator) are private
+Purdue-SoCET repositories. Without them the simulator still runs assembled
+programs and the harnesses, and the tests that need them are skipped.
+
+Run a program on the whole machine -- the scheduler, vector core, systolic
+array, scratchpads and DRAM -- and get a cycle-by-cycle report:
+
+    python tools/run_kernel.py relu.c --golden   # a C program, via the compiler
+    python tools/run_kernel.py gemm              # an assembly kernel
+    python tools/run_kernel.py prog.in           # an assembled program
+
+docs/getting-started.md walks through installing, running, reading the
+report and exploring a design.
+
+Longer runs:
+
+    # the 1024x1024 tiled GEMM: about an hour, left out of plain `pytest`
+    pytest -m slow
 
     # parameter sweeps and plots
     python tools/run_sysarr_tpu_sweeps.py
@@ -93,12 +113,13 @@ gantt.log.
 DOCUMENTATION
 -------------
 
-Start at `docs/README.md`. The one to read first is
-`docs/architecture/base-classes.md`, which covers the tick/cycle model, the
-scheduler, and how to write a component.
+Start at `docs/README.md`. To run programs, read
+`docs/architecture/scheduler.md`; to change a component,
+`docs/architecture/base-classes.md`, which covers the tick/cycle model and
+how to write a component.
 
-    docs/architecture/   base-classes, platform-uml, queue-glossary,
-                         gem5-roadmap (what else is worth borrowing)
+    docs/architecture/   the scheduler, vector core, arrays, memory, and the
+                         simulation framework they are built on
     docs/harnesses/      how experiments drive the platform
     docs/results/        measurements from specific runs
     docs/sweeps/         parameter studies
@@ -126,32 +147,31 @@ domain reschedules itself each cycle. Phase order is declared once, in
 TICK SCHEDULING
 ---------------
 
-Components are ticked only when they have work. On a 16x16 GEMM, 92% of tick
-calls changed no state at all — an SRAM bank with an empty ready-heap, a
-functional unit with nothing in flight — so those are skipped. Worth ~12% on
-the 1024x1024 GEMM suite (1:18:38 -> 1:09:03).
+Components are ticked only when they have work: a VLSU with empty queues, a
+DMA backend with no transfer or an idle lane datapath sleeps until something
+hands it work. Results are unchanged; runs are 18-37% faster on the kernels
+and GEMM co-simulations (measured October 2026).
 
-A clocked object may declare when it next needs to run:
+A clocked object says when it next needs to run, and is woken when work
+reaches it from outside its own tick:
 
-    def next_wake(self, now) -> Optional[int]      # None == quiescent
+    def next_wake(self, now) -> Optional[int]      # None == asleep
+    self.wake()                                    # called by whoever hands it work
 
-The default returns `now + 1` ("tick me every cycle"), so an unconverted
-component behaves exactly as before and components convert one at a time. An
-override may only ever be CONSERVATIVE: waking too early costs a wasted tick,
-waking too late drops work silently.
+The default returns `now + 1` ("tick me every cycle"), so a component that
+does nothing special behaves exactly as before. Return None only when a tick
+would change nothing, not even a counter; waking too late drops work silently.
+A parent puts its children in a group with `add_child` and ticks them with
+`tick_children` (the vector core does this for its units).
 
 Scheduling must be invisible. Run the suite both ways and compare:
 
     ATALLA_SCHED=legacy pytest tests/     # tick everything, every cycle
     pytest tests/                         # default: skip idle components
 
-`tests/base/test_sched.py` asserts this end-to-end using per-pad read, write
-and stall counters, which shift if any request is accepted a cycle differently.
-
-Caveat when converting a component: anything derived from "when did I last
-run" goes stale once an object can sleep. The scratchpad's requesters pass the
-cycle they are in (`now=`) rather than letting it read its own last tick, which
-is a cycle behind when they run first. See docs/architecture/base-classes.md.
+`tests/equivalence` runs a kernel, a harness experiment, the transpose bench
+and a tiled GEMM both ways against the same snapshot. The rules for making a
+component sleep are in docs/architecture/base-classes.md, section 5.
 
 
 BUILDING THE SIMD KERNELS

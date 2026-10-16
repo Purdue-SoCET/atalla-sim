@@ -112,7 +112,7 @@ credits, one spent per vector injected and returned when one retires.
 ## Speed
 
 The model's arithmetic is trivial — 1024 multiplies and ~1024 adds per cycle at
-N=32. Everything else was overhead, and it came off in four layers:
+N=32. Everything else was overhead, and it came off in three layers:
 
 | | µs/cycle | vs start |
 |---|---|---|
@@ -120,25 +120,14 @@ N=32. Everything else was overhead, and it came off in four layers:
 | vectorised tree reduction | 171 | 5.5x |
 | lazy activity stats | 128 | 7.4x |
 | AVX kernel, per-cycle `tick()` | 65 | 14.6x |
-| AVX kernel, `run_cycles(128)` | 20 | 47.5x |
 
 **Vectorising the reduction** was the single biggest step and needed no C++: the
 tree is identical for every column, so one array operation per level replaces N
 scalar ones while leaving the pairing and order untouched.
 
-**Batching is what breaks the per-cycle floor.** A cycle is ~25 small numpy or
-ctypes operations, each costing more in dispatch than the arithmetic it
-performs. `tick()` still works and is bit-identical, but `run_cycles(k)` hands
-k cycles to the kernel in one call and amortises all of it — which is why it is
-3x faster again than the per-cycle kernel path.
-
-```python
-sa.run_cycles(n, activations=rows, weights=weight_stream)
-```
-
-Use it wherever the array runs unattended: a tile streamed in one burst, or the
-drain after the last vector. `activations[c]` is what to inject on cycle c, or
-`None` for a bubble.
+A batched `run_cycles(k)` entry point (k cycles in one kernel call, about 3x
+faster again) existed but nothing used it, so it was removed; the per-cycle
+`tick()` path is what the platforms run.
 
 ### The kernel
 

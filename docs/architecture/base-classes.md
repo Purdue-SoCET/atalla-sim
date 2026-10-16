@@ -16,8 +16,7 @@ The design is gem5-inspired: components are *clocked objects* driven by a
    ├── eventq.py          EventQueue   – time-ordered callback heap
    ├── clock_domain.py    ClockDomain  – turns events into per-cycle ticks
    ├── clocked_object.py  Clocked      – base class for anything with a tick()
-   ├── sched.py           SimClock     – shared "what cycle is it"
-   │                      WakeGroup    – ticks only members that have work
+   ├── sched.py           WakeGroup    – ticks only members that have work
    │                      CompositeClocked – a component made of components
    ├── core.py            Core         – holds the clock domains
    ├── sim.py             Sim          – run/stop entry point
@@ -83,7 +82,10 @@ The base class for every component that advances with time.
 class Clocked:
     def tick(self, time=None) -> None: ...
     def next_wake(self, now: int) -> Optional[int]: ...
+    def wake(self) -> None: ...
     def request_wake(self, cycle: int) -> None: ...
+    def add_child(self, child): ...
+    def tick_children(self, time=None) -> None: ...
     def _consume_tick(self, time, attr_name="_clocked_last_tick") -> Optional[int]: ...
 ```
 
@@ -114,9 +116,9 @@ def tick(self, time=None):
 `time=None` means "just advance by one", used by unit tests that drive a
 component directly.
 
-### `next_wake(now)` and `request_wake(cycle)`
+### `next_wake`, `wake`, `request_wake`, `add_child`, `tick_children`
 
-These drive scheduling; see §5.
+These let idle components sleep; see §5.
 
 ---
 
@@ -157,101 +159,83 @@ Each firing:
 
 ---
 
-## 5. Scheduling: SimClock, WakeGroup, CompositeClocked
+## 5. Scheduling: WakeGroup, CompositeClocked
 
-Ticking every component every cycle wastes most of its work. Measured on a
-16×16 tiled GEMM, **92% of tick calls changed no state at all** — an SRAM bank whose
-ready-heap is empty, a functional-unit pipeline with nothing in flight. `sched.py`
-lets a parent skip those.
+Ticking every component every cycle wastes most of the work: a VLSU with
+empty queues, a DMA backend with no transfer, the lanes between vector
+instructions. A component can sleep while it has nothing to do, and be woken
+when work reaches it. Results never change; only the simulation gets faster
+(18-37% on the kernels and GEMM co-simulations, measured when this was added).
 
-### `next_wake(now)` — the contract
+### The contract
 
 ```python
 def next_wake(self, now: int) -> Optional[int]:
     return now + 1        # default: "tick me every cycle"
 ```
 
-Return the earliest cycle at which this object *must* run, or `None` if it is
-quiescent.
+After each tick, a component says the next cycle it has work, or `None` to
+sleep. Whoever hands it work from outside its own tick calls `wake()`.
 
-- The **default is `now + 1`**, which reproduces the old tick-everything
-  behaviour exactly. An unconverted component keeps working untouched, so
-  components can be converted one at a time.
-- An override may only ever be **conservative**. Waking too early costs one
-  wasted tick. Waking too late drops work silently, and nothing will catch it.
+- The **default is `now + 1`**: a component that does nothing special is
+  ticked every cycle, exactly as before. Components opt in one at a time.
+- Return `None` **only when a tick would change nothing** -- no value, no
+  counter -- until someone calls `wake()`. Too early costs a wasted tick; too
+  late silently loses work.
+- Call `wake()` **everywhere work arrives** from outside: an `enqueue`, a
+  `push_response`, a transfer start. One missed call is a lost wake.
+- A sleeping component **stops counting cycles**, so it must not time anything
+  from its own last tick while asleep, and **a counter it increments every
+  tick** (busy cycles, say) is wrong once it sleeps. Audit both first.
 
-### WakeGroup
+`wake()` means "as soon as you would have seen it had you been ticked every
+cycle": this cycle if your group has not reached you yet, the next one if it
+has. So a hand-off forward in the tick order lands the same cycle and one
+backward lands the next -- the same as ticking everything.
 
-A set of sibling components plus a min-heap of wake cycles.
+### Children: `add_child` and `tick_children`
 
-```
-   WakeGroup.tick(now):
+Any Clocked can hold children:
 
-     heap: (wake_cycle, member_index)
-       ┌──────────────────────────────┐
-       │ (7, bank12) (7, bank30) (91, bank3) ...
-       └──────────┬───────────────────┘
-                  │ pop everything with wake_cycle <= now
-                  ▼
-            due = [12, 30]           ← sorted into REGISTRATION order,
-                  │                     so a partially-woken group ticks
-                  │                     in the same order the old flat
-                  ▼                     loop did
-            members[12].tick(now)
-            members[30].tick(now)
-                  │
-                  ▼
-            reinsert each at its new next_wake(now)
-            (None ⇒ not reinserted; it sleeps until someone wakes it)
-```
+```python
+class VectorCore(Clocked):
+    def __init__(...):
+        for unit in (self.datapath, *self.vls_units, self.gsau, self.transpose):
+            self.add_child(unit)         # ticked in this order
 
-A producer revives a sleeping consumer with `consumer.request_wake(cycle)`,
-which only ever moves a member *earlier* — a later request cannot push a
-pending wake back.
-
-### The ordering invariant
-
-> A member may wake a member of a group that ticks **later** in the same cycle,
-> or anyone for a **future** cycle — but never an earlier-ticking group for the
-> current cycle.
-
-Waking an already-passed group for the current cycle would run it one cycle
-sooner than the unscheduled code did. The memory pipeline satisfies this
-naturally, because its groups are ticked in the direction data flows:
-
-```
-   Scratchpad.tick(now):
-        clock.advance_to(now)
-        ┌──────────────┐   enqueue    ┌──────────────┐  enqueue   ┌───────────┐
-        │ frontends    │ ───────────► │ crossbars    │ ─────────► │ banks     │
-        │ (group 1)    │              │ (group 2)    │            │ (group 3) │
-        └──────────────┘              └──────────────┘            └───────────┘
-             ticked first                  then                      then
+    def tick_units(self, time=None):
+        self.tick_children(cycle)        # only the ones that are due
 ```
 
-### Stale time
+The children live in a `WakeGroup`: due members are ticked in the order they
+were added (`CHILDREN_ROTATE = True` on the parent for round robin, starting
+from child `cycle mod count`, as `RoundRobinBackendTicker` does). A child's
+`next_wake` is asked after all the children have ticked, so work handed to it
+later in the same cycle is seen.
 
-A sleeping object stops observing cycles, so anything it derives from *"when
-did I last run"* goes stale. `SimClock` is a one-field shared object giving any
-component the current cycle in O(1) without being ticked.
+### What sleeps today
 
-The scratchpad is the worked example. Its requesters — the VLSU bridges at
-phase 20 — run before it ticks at phase 40, so its own `now` is still last
-cycle's when they call, and further behind if it slept. Every latency computed
-from that would come out a cycle or more short — silently, in the direction of
-completing *too early*. So requesters pass the cycle they are in (`now=`).
+| Component | Asleep when | Woken by |
+|---|---|---|
+| `VectorDatapath` | nothing queued, in the lanes or the collector | `enqueue` |
+| `VectorLoadStoreUnit` | every queue empty | `enqueue_issue`, `push_response` |
+| `GSAU` | no array result waiting | `push_systolic_response` |
+| `TransposeUnit` | idle, no request | `push`, `pop` |
+| `Backend` | no transfer queued, active or in flight | `driver_to_backend_start_load/store`, `queue_sram_read_response` |
+| `Scratchpad` | every pad idle | its own `submit_*` |
 
-The same hazard hits **any counter incremented once per tick**: sleeping
-through a wait under-reports anything accumulated per tick. Accumulate by
-elapsed cycles instead.
-
-**When converting a component, audit every per-tick counter first.** These
-counters are the simulator's output; getting them wrong corrupts results
-without failing anything.
+The systolic arrays do not sleep: some of their statistics count every cycle,
+so a sleeping array would report less. Instead each has an idle fast path
+inside its tick (`SystolicArrayMEISSA._idle_tick`, `SystolicArrayTPU._idle_tick`):
+once drained, or settled into a fixed point, an idle cycle adds to those
+counters directly instead of running the datapath.
+`tests/systolic_array/test_idle_fast_path.py` checks them against the full
+datapath after every cycle.
 
 ### CompositeClocked
 
-A component whose `tick()` ticks its children in a declared phase order.
+A component whose `tick()` ticks its children in a declared phase order; the
+platforms' root.
 
 ```python
 root = CompositeClocked("tpu_platform")
@@ -263,10 +247,10 @@ root.tick(now)     # advances all of them, in phase order
 ```
 
 Children sort by `(phase, insertion order)`, so ties keep registration order
-and the ordering stays deterministic.
+and the ordering stays deterministic. Children that sleep are skipped.
 
 This exists because the order used to be re-specified as a list literal at
-every call site — which is how the DRAM and the backends came to be omitted
+every call site -- which is how the DRAM and the backends came to be omitted
 from some driving lists entirely. Stating it once makes that class of bug
 structurally impossible.
 
@@ -277,9 +261,10 @@ ATALLA_SCHED=legacy pytest tests/     # tick everything, every cycle
 pytest tests/                         # default: skip idle components
 ```
 
-Both must produce identical results. `tests/base/test_sched.py` asserts this
-end-to-end by comparing per-bank utilisation counters, which shift if any
-operation completes even one cycle differently.
+Both must produce identical results.
+`tests/equivalence/test_equivalence.py::test_legacy_scheduling_gives_the_same_results`
+runs a kernel, a harness experiment, the transpose bench and a tiled GEMM
+both ways against the same snapshot.
 
 ---
 
@@ -321,9 +306,10 @@ Thin. `Core` holds clock domains (`add_clock_domain`); `reset()` is a stub.
 ```python
 sim.run()              # run_all()  – until the queue drains
 sim.run(until=5000.0)  # run_until()
-sim.configure_debug(flags=["Xbar", "Clocked"], log_dir="logs")
 sim.close_debug()
 ```
+
+Debug logging is turned on with `base.debug.configure_debug(flags=[...])`.
 
 `dprintf(flag, msg)` writes to `logs/<flag>.log` when that flag is enabled; an
 empty flag set enables everything.
@@ -350,7 +336,7 @@ class MyUnit(Clocked):
     def submit(self, payload) -> bool:
         if not self.in_q.enqueue(payload):
             return False            # full: caller must retry
-        self.request_wake(self._tick + 1)   # revive us if asleep
+        self.wake()                 # revive us if asleep
         return True
 
     def next_wake(self, now):
@@ -390,10 +376,9 @@ platform.add_component(unit, phase=PHASE_SPAD)
 - [ ] Open `tick()` with `_consume_tick` and bail on `None`.
 - [ ] Implement `next_wake` **conservatively**, or leave it alone (the default
       is always correct, just slower).
-- [ ] Call `request_wake` wherever you hand this object work.
-- [ ] Convert any per-tick counter to accumulate by elapsed cycles.
-- [ ] Never derive "now" from your own last tick if you can sleep — use the
-      shared `SimClock`.
+- [ ] Call `wake()` wherever this object is handed work.
+- [ ] If it can sleep: no counter incremented every tick, and no "now"
+      taken from its own last tick (callers pass the cycle they are in).
 - [ ] Verify with `ATALLA_SCHED=legacy` and confirm results are unchanged.
 
 ---
