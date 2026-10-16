@@ -103,6 +103,12 @@ class _Pad:
 
 class Scratchpad(Clocked):
 
+    """The scratchpad: `num_tiles` independent pads of banked SRAM.
+
+    Each pad has its own request queue, read and write latencies, frontend
+    (frontends[p], for its VLSU) and DMA backend (attach_backend). Requests are
+    queued per pad and served in order; trace_hook, if set, sees each bank access.
+    """
     def __init__(
         self,
         num_banks: int = 32,
@@ -146,11 +152,6 @@ class Scratchpad(Clocked):
     def tile_bytes(self) -> int:
         """Capacity of one pad."""
         return self.num_banks * self.bank_size * self.elem_bytes
-
-    @property
-    def total_bytes(self) -> int:
-        """Capacity of the whole scratchpad -- the chip's local memory."""
-        return self.tile_bytes * self.num_tiles
 
     def _normalize_tile_id(self, tile_id: int) -> int:
         tile_id = int(tile_id)
@@ -232,11 +233,6 @@ class Scratchpad(Clocked):
         return self.read_row_now(sp_addr)
 
     # -- backends ------------------------------------------------------------------
-    def attach_backends(self, backend_objs):
-        if len(backend_objs) != len(self.tiles):
-            raise ValueError(f"expected {len(self.tiles)} backends, got {len(backend_objs)}")
-        return [self.attach_backend(b, tile_id=t) for t, b in enumerate(backend_objs)]
-
     def attach_backend(self, backend_obj, tile_id: Optional[int] = None):
         """Wire a backend's SRAM side to one pad. Its writes (DMA loads) and
         reads (DMA stores) go through the pad's request port like the

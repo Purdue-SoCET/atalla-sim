@@ -1,6 +1,7 @@
 """Stage 6: real kernels, end to end on the scheduler-driven platform.
 
-Each kernel is assembled by the functional sim's own build script
+Two kinds: assembly kernels (here) and C programs (further down, straight
+from the compiler). Each assembly kernel is assembled by the functional sim's own build script
 (third_party/atalla-functional-sim/kernels/build_*.py; the assembler expands
 li.s, and kernels load weight rows last to first because lw.vi shifts a
 column in at column 0), run on the platform
@@ -16,8 +17,6 @@ reductions in the lane model's order (golden.lanes_reduce), which is what
 the lane datapath does; its own sequential fp32 sum differs slightly, which
 the last test bounds.
 """
-import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -26,100 +25,143 @@ import pytest
 from scheduler import golden
 from scheduler.core import load_program_text
 from atalla.atalla_platform import build_atalla_platform
-from scheduler.semantics import u32
-from scheduler.vector import bf16_bits, bf16_round
 
-SIM = golden.SUBMODULE_PATH
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
+import run_kernel  # noqa: E402  (tools/run_kernel.py: builds the kernels)
 
 
 def build(kernel: str, tmp_path: Path) -> str:
-    golden.require(pytest)
-    out = tmp_path / ("%s.in" % kernel)
-    env = dict(os.environ, PYTHONPATH=os.pathsep.join(
-        [str(SIM), str(SIM / "kernels"), str(SIM / "experiments" / "gemm")]))
-    p = subprocess.run([sys.executable, str(SIM / "kernels" / ("build_%s.py" % kernel)),
-                        "-o", str(out)], cwd=str(SIM), env=env,
-                       capture_output=True, text=True, timeout=600)
-    assert p.returncode == 0, p.stderr[-2000:]
-    return out.read_text()
+    """An assembly kernel's program text (functional sim build script)."""
+    return run_kernel.build_kernel(kernel, [], tmp_path).read_text()
 
 
-def run_both(text: str, reductions: str = "lanes"):
+def run_both(text: str, reductions: str = "lanes", c_kernel: bool = False):
+    """Run a program on the platform and on the functional sim; returns
+    (platform, functional sim state). C kernels start with the C loader's
+    stack registers, in both."""
+    from atalla.atalla_platform import c_entry_sregs
     instr, data = load_program_text(text)
-    g = golden.run_golden_state(instr, data, reductions=reductions)
-    plat = build_atalla_platform(instr, data)
+    regs = c_entry_sregs(data) if c_kernel else None
+    g = golden.run_golden_state(instr, data, reductions=reductions, init_sregs=regs)
+    plat = build_atalla_platform(instr, data, init_sregs=regs)
     plat.run_until_done(limit=2_000_000)
-    from src.misc.memory import Memory              # the functional sim's
-    gm = Memory()
-    gm.data_mem = dict(g["mem"])
-    halves = sorted({(a & ~3) + k for a in g["mem"] for k in (0, 2)})
-    dram = {b: (int.from_bytes(plat.dram.read(b, 2), "little"), gm.read_bf16_le(b))
-            for b in halves}
-    return plat, g, dram
+    return plat, g
 
 
-def assert_registers_match(plat, g, skip=()):
-    c = plat.core
-    for r in range(1, 256):
-        if r in skip:
-            continue
-        assert c.scalar_reg(r) == u32(g["sregs"].get(r, 0)), "x%d" % r
-    for v in range(256):
-        assert plat.vc.read_vreg(v) == [bf16_round(x) for x in g["vregs"][v]], "v%d" % v
-
-
+@pytest.mark.golden
 @pytest.mark.parametrize("kernel", ["add", "relu", "sigmoid", "layernorm_param", "maxpool",
                                     "softmax", "gemm", "gemm_tiled", "gemms", "conv",
                                     "conv_tiled"])
 def test_kernel_matches_the_functional_sim(kernel, tmp_path):
-    plat, g, dram = run_both(build(kernel, tmp_path))
-    assert_registers_match(plat, g)
-    bad = {hex(b): v for b, v in dram.items() if v[0] != v[1]}
-    assert not bad
+    plat, g = run_both(build(kernel, tmp_path))
+    assert golden.differences(plat, g) == []
     assert not plat.core.decode2.violations
 
 
+@pytest.mark.golden
 def test_softmax_against_the_functional_sims_own_sum(tmp_path):
     """softmax sums with rsum.vi. The functional sim adds in fp32, in
-    element order, and keeps the sum unrounded; the RTL adds pairwise in
-    BF16. The sum's reciprocal scales every output, so outputs may differ
-    by a BF16 step or two, and nothing more."""
-    plat, g, dram = run_both(build("softmax", tmp_path), reductions="functional")
-    off = [abs(m - r) for m, r in dram.values() if m != r]
+    element order, and keeps the sum unrounded; the lanes add per lane and
+    then across lanes, and the register file rounds to BF16. The sum's
+    reciprocal scales every output, so outputs may differ by a BF16 step or
+    two, and nothing more."""
+    plat, g = run_both(build("softmax", tmp_path), reductions="functional")
+    off = [abs(m - r) for m, r in golden.dram_halfwords(plat, g).values() if m != r]
     assert off and max(off) <= 2
 
 
-# -- C kernels ----------------------------------------------------------------------
-# Compiled with atalla_cc (third_party/aihw-ppci-compiler), packetized and given
-# their DRAM data by the functional sim's own C runner, and run with the C
-# loader's stack registers -- tools/run_kernel.py does the same.
+# -- C programs ---------------------------------------------------------------------
+# Straight from the compiler: atalla_cc -p packetizes, src/scheduler/assembler.py
+# assembles, and the inputs and reference results come from the compiler's own
+# validation harness (tools/c_kernels.py). Each program is checked two ways:
+# against the functional sim running the identical image, and against its
+# reference result (numpy, or x10 for the unit tests).
+#
+# Known disagreements are strict xfails: when one is fixed the test reports
+# XPASS and fails, so remove its entry here.
 
-COMPILER = Path(__file__).resolve().parents[2] / "third_party" / "aihw-ppci-compiler"
+import c_kernels  # noqa: E402  (tools/c_kernels.py)
+
+C_PROGRAMS = (sorted(c_kernels.KERNELS.glob("*.c")) + sorted(c_kernels.UNIT_TESTS.glob("*.c"))
+              if (c_kernels.COMPILER / "ppci").is_dir() else [])
+
+#: vector_load() compiles to vreg.ld straight from a DRAM address. The functional
+#: sim special-cases that (src/components/scpad_ls.py, addresses >= 0x1000 read
+#: DRAM); the hardware's vreg.ld only reads the scratchpad. A compiler issue.
+_DRAM_SHORTCUT = "vreg.ld/st on a DRAM address: only the functional sim allows it"
+#: vreg.ld/st move all 32 lanes where the functional sim moves num_cols + 1, so
+#: a register loaded from a 4-wide tile holds different lanes 4..31.
+_NUM_COLS = "vreg.ld/st move 32 lanes; the functional sim moves num_cols + 1"
+#: sw.s to an address that is not a multiple of 4: the data cache aligns it
+#: down (word-addressed memory), the functional sim writes at the byte address.
+#: The vector load doesn't wait for the DMA that fills its scratchpad: the
+#: compiler gives scpad.ld and vreg.ld different registers, and only a read of
+#: the DMA's rs1 waits for it. Correct only when the DMA happens to win.
+_DMA_RACE = "vector_load doesn't wait for its scpad_load (no shared register)"
+_MISALIGNED = "misaligned sw.s on the stack: aligned down here, not in the functional sim"
+
+DIFFERS_FROM_FUNCTIONAL_SIM = {
+    **{n: _DRAM_SHORTCUT for n in (
+        "gemm_passthrough_lane0", "load_weights_lane0_dot", "make_mask_eq_vector",
+        "make_mask_gt_scalar", "scpad_store_roundtrip", "vec_op_masked_add_scalar_lane0",
+        "vec_op_masked_mul_vector_lane0", "vector_add_lane0", "vector_store_roundtrip")},
+    "gemm_tiled_baseline": _NUM_COLS,
+    "layernorm": _MISALIGNED,
+    "scpad_load_roundtrip": _DMA_RACE,
+}
+
+#: Why a program misses its reference result (besides the compiler's own
+#: EXPECTED_FAILURES list, which c_kernels.known_bug reads).
+_WEIGHT_ORDER = ("the kernel loads weight rows first to last; lw.vi shifts each into "
+                 "column 0, so tiles come out column-reversed")
+MISSES_REFERENCE = {
+    **{n: _WEIGHT_ORDER for n in ("conv_baseline", "conv_pipelined", "conv_pipelined_unrolled",
+                                  "gemm_tiled_baseline", "gemm_tiled_pipelined",
+                                  "gemm_tiled_pipelined_unrolled")},
+    **{n: _DRAM_SHORTCUT for n in DIFFERS_FROM_FUNCTIONAL_SIM
+       if DIFFERS_FROM_FUNCTIONAL_SIM[n] == _DRAM_SHORTCUT and n != "make_mask_eq_vector"},
+    "scpad_load_roundtrip": _DMA_RACE,
+}
+
+_built = {}
 
 
-def build_c(name: str, tmp_path: Path) -> str:
-    golden.require(pytest)
-    kernels = COMPILER / "atalla_tests" / "kernels"
-    if not (kernels / name).is_file():
-        pytest.skip("compiler submodule (with atalla_tests/kernels) not checked out")
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
-    import run_kernel
-    return run_kernel.build_c_kernel(kernels / name, [], tmp_path).read_text()
+def run_c(path: Path):
+    """Compile, assemble and run once per program; (program, data, regs, platform)."""
+    if path not in _built:
+        try:
+            program, data, regs = c_kernels.build(path)
+        except c_kernels.CompileError as exc:
+            pytest.fail(str(exc))
+        plat = build_atalla_platform(program.instr, data, init_sregs=regs)
+        plat.run_until_done(limit=2_000_000)
+        _built[path] = (program, data, regs, plat)
+    return _built[path]
 
 
-@pytest.mark.parametrize("kernel", ["add_4x32.c", "softmax_row32.c", "layernorm_4x4_active.c"])
-def test_c_kernel_matches_the_functional_sim(kernel, tmp_path):
-    from atalla.atalla_platform import c_entry_sregs
-    instr, data = load_program_text(build_c(kernel, tmp_path))
-    regs = c_entry_sregs(data)
-    g = golden.run_golden_state(instr, data, reductions="lanes", init_sregs=regs)
-    plat = build_atalla_platform(instr, data, init_sregs=regs)
-    plat.run_until_done(limit=2_000_000)
-    assert_registers_match(plat, g)
-    from src.misc.memory import Memory
-    gm = Memory()
-    gm.data_mem = dict(g["mem"])
-    bad = [b for b in sorted({(a & ~3) + k for a in g["mem"] for k in (0, 2)})
-           if int.from_bytes(plat.dram.read(b, 2), "little") != gm.read_bf16_le(b)]
-    assert not bad, [hex(b) for b in bad[:8]]
-    assert not plat.core.decode2.violations, "the packetizer made a packet the RTL can't run"
+def _xfail(request, reasons, name):
+    if name in reasons:
+        request.applymarker(pytest.mark.xfail(reason=reasons[name], strict=True))
+
+
+@pytest.mark.golden
+@pytest.mark.parametrize("path", C_PROGRAMS, ids=lambda p: p.name)
+def test_c_program_matches_the_functional_sim(path, request):
+    _xfail(request, DIFFERS_FROM_FUNCTIONAL_SIM, path.stem)
+    program, data, regs, plat = run_c(path)
+    g = golden.run_golden_state(program.instr, data, reductions="lanes", init_sregs=regs)
+    assert golden.differences(plat, g) == []
+
+
+@pytest.mark.golden
+@pytest.mark.parametrize("path", C_PROGRAMS, ids=lambda p: p.name)
+def test_c_program_gives_its_reference_result(path, request):
+    reasons = dict(MISSES_REFERENCE)
+    bug = c_kernels.known_bug(path)
+    if bug:
+        reasons[path.stem] = "known compiler bug: " + bug
+    _xfail(request, reasons, path.stem)
+    *_, plat = run_c(path)
+    assert not plat.core.decode2.violations, "the compiler made a packet the RTL can't run"
+    ok, message = c_kernels.check(path, plat)
+    assert ok, message

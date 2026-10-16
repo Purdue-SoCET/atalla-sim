@@ -87,24 +87,21 @@ def half_corpus():
     }
 
 
+def native_cast(values, mode):
+    """Cast through the SIMD kernel the way dtype.cast_vector does: in place,
+    on an array('d')."""
+    from array import array
+    buf = array("d", np.asarray(values, dtype=np.float64))
+    native.cast_buffer_inplace(buf, mode)
+    return np.array(buf)
+
+
 @requires_native
 @pytest.mark.parametrize("name", sorted(half_corpus().keys()))
 def test_native_cast_matches_numpy(name):
     values = half_corpus()[name]
-    got = native.cast_array(values, native.CAST_HALF)
+    got = native_cast(values, native.CAST_HALF)
     assert same_bits(got, numpy_half(values)), f"native half cast differs on {name}"
-
-
-@requires_native
-def test_native_cast_saturation_and_overflow_counts():
-    import ctypes
-    values = np.array([1.0, 65504.0, 65505.0, -70000.0, np.inf, np.nan, 0.0])
-    stats = (ctypes.c_int64 * 3)()
-    native.cast_array(values, native.CAST_HALF, track=True, stats=stats)
-    # saturation counts inputs whose magnitude exceeds the largest finite half
-    assert stats[0] == int(np.sum(np.abs(values) > 65504.0))
-    # overflow counts non-finite results
-    assert stats[1] == int(np.sum(~np.isfinite(numpy_half(values))))
 
 
 @pytest.mark.parametrize("name", sorted(half_corpus().keys()))

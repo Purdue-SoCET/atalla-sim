@@ -8,7 +8,7 @@ against it.
 Where the RTL, the functional sim and the ISA documents disagree, this
 follows the ISA document (ASSEMBLY_SYNTAX.md) and the assembler (build.py),
 which is what programs are written against, and otherwise the functional
-sim. Each disagreement is listed in docs/scheduler-rtl-bugs.md:
+sim. The disagreements:
 
   * Loads and stores address rs1 + imm. (The RTL drops rs1: execute_stage.sv
     drives ld_st_unit's address from the immediate alone.)
@@ -161,6 +161,10 @@ BRANCH_TAKEN = {
 
 @dataclass(frozen=True)
 class ControlOutcome:
+    """What a branch or jump does: whether it is taken, the next pc, and
+    the register it writes -- a jump's link register, or a branch's rs1
+    (branches increment it) -- with its new value.
+    """
     taken: bool               # jumps are always taken
     target: int              # where the next packet is, taken or not
     rd: Optional[int]        # register written, or None
@@ -178,6 +182,7 @@ def branch_increment(word: int) -> int:
 
 
 def control_outcome(op: ScalarOp, pc: int, rs1: int, rs2: int) -> ControlOutcome:
+    """Where a branch or jump at `pc` goes, given its register values."""
     m = op.mnemonic
     fall = u32(pc + PACKET_BYTE_W)
     if m in BRANCH_TAKEN:

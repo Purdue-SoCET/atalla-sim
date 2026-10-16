@@ -1,12 +1,7 @@
 import pytest
 
-import os, sys
 
 from base.testing import build_sim
-from base.eventq import EventQueue
-from base.clock_domain import ClockDomain
-from base.core import Core
-from base.sim import Sim
 
 from memory.backend import Backend
 
@@ -44,7 +39,7 @@ def test_backend_stalls():
 
     sim.run(until=16.0)
 
-    stats = backend.backend_to_driver_get_stats()
+    stats = backend.get_stats()
     print("Backend stats after forced stalls:", stats)
     # There should be at least 6 stalls (8 bursts attempted, 2 accepted, 6 stalled)
     assert stats["backend_stalls"] >= 6, f"Expected at least 6 backend stalls, got {stats['backend_stalls']}"

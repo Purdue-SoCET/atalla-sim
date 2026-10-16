@@ -29,7 +29,6 @@ cycle (the transpose FSM). Event-driven models use its deadline form,
 `next_enable()`, which is the same rule.
 """
 
-from typing import Any, List, Optional
 
 
 def done_delay(latency: int) -> int:
@@ -70,36 +69,3 @@ class SramChannel:
         return int(enabled_at) + done_delay(self.latency)
 
 
-class SramBank:
-    """Storage plus a read and a write channel, one clock edge per edge()."""
-
-    def __init__(self, height: int, read_latency: int = 2, write_latency: int = 4,
-                 init: Any = None):
-        self.height = int(height)
-        self.mem: List[Any] = [init] * self.height
-        self.rdata: Any = init
-        self.read = SramChannel(read_latency)
-        self.write = SramChannel(write_latency)
-
-    @property
-    def busy(self) -> bool:
-        return self.read.busy or self.write.busy
-
-    @property
-    def rdone(self) -> bool:
-        return self.read.done
-
-    @property
-    def wdone(self) -> bool:
-        return self.write.done
-
-    def edge(self, ren: bool = False, raddr: int = 0,
-             wen: bool = False, waddr: int = 0, wdata: Any = None) -> None:
-        """One rising edge. The data path ignores busy, as the RTL's does: a
-        read enable always loads rdata, a write enable always writes."""
-        if ren:
-            self.rdata = self.mem[int(raddr)]
-        if wen:
-            self.mem[int(waddr)] = wdata
-        self.read.edge(ren)
-        self.write.edge(wen)

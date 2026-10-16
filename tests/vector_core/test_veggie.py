@@ -1,13 +1,8 @@
 # tests/test_veggie.py
 import pytest
 
-import os, sys
 
 from base.testing import build_sim
-from base.eventq import EventQueue
-from base.clock_domain import ClockDomain
-from base.core import Core
-from base.sim import Sim
 from vector_core.veggie_file import Veggie, OpBuffer
 
 class IO:

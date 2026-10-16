@@ -27,9 +27,9 @@ result. Compares write the mask file. A write offered in cycle v reaches the
 register file in v + 1, through the EX/WB latch. An SDMA's completion clears
 the busy bit on its rs1 the same way.
 
-Where the RTL is wrong this does what was meant (docs/scheduler-rtl-bugs.md):
-all four VLSUs write back (bug 4), the write ports are chosen by the
-register file's bank vd[1:0] (bug 5), and lw.vi writes no register (bug 3).
+Where the RTL is wrong this does what was meant: all four VLSUs write back,
+the write ports are chosen by the register file's bank vd[1:0], and lw.vi
+writes no register.
 
 The units compute the values; this only routes operands to them and
 formats what comes back for writeback. The lane datapath
@@ -95,11 +95,8 @@ LANE_OP = {V_ALU_ADD: "add", V_ALU_SUB: "sub", V_MUL: "mul", V_EXP: "exp",
 COMPARES = (V_ALU_MGT, V_ALU_MLT, V_ALU_MEQ, V_ALU_MNEQ)
 REDUCE_OP = {"rsum.vi": "sum", "rmin.vi": "min", "rmax.vi": "max"}
 
-#: The decode-2 readiness name of each lane op's unit.
-UNIT_OF = {V_ALU_ADD: "alu", V_ALU_SUB: "alu", V_MUL: "mul", V_EXP: "exp",
-           V_ALU_MGT: "alu", V_ALU_MLT: "alu", V_ALU_MEQ: "alu", V_ALU_MNEQ: "alu",
-           V_REDU: "reduction"}
-#: ...and the lane model's functional unit behind it.
+#: Decode 2's readiness name for each lane unit -> the lane model's functional
+#: unit that does the work (multiplies and reductions run on the lane ALU).
 LANE_FU = {"alu": "alu", "mul": "alu", "exp": "exp", "reduction": "alu"}
 
 
@@ -142,6 +139,9 @@ class MoveToScalar:
         self.held: Optional[Result] = None
 
     def offer(self, op: Optional[VectorOp], operands: Dict) -> Optional[Result]:
+        """The scalar writeback of a vmov.vts / mv.mts, or the result still
+        held from a cycle writeback refused it.
+        """
         self._in = None
         if self.held is not None:
             return self.held
@@ -223,6 +223,9 @@ class VectorSide:
 
     # -- writeback offers ------------------------------------------------------------------
     def offers(self) -> List[VectorWrite]:
+        """The vector writebacks ready this cycle, one per source (each VLSU,
+        the GSAU, the transpose unit, the lanes). arbitrate() picks which go.
+        """
         out = []
         for s, vls in enumerate(self.vc.vls_units):
             wb = vls.wb_q.peek()
@@ -278,6 +281,9 @@ class VectorSide:
 
     # -- dispatch from the D2/EX latch ------------------------------------------------------
     def dispatch(self, issued) -> None:
+        """Hand each vector and SDMA op of the packet decode 2 just issued to
+        its unit.
+        """
         if issued is None:
             return
         pkt = issued.packet
@@ -446,6 +452,9 @@ class VectorSide:
 
     @property
     def idle(self) -> bool:
+        """True once no vector or SDMA work is in flight anywhere (the halt
+        waits for this).
+        """
         vc = self.vc
         return (not self._lane_ops and not self._lane_results
                 and vc.datapath.pending_issue.is_empty()

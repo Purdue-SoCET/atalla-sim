@@ -552,12 +552,13 @@ class MNReuseBlockedTPUCosim(TiledTPUCosim):
                         raise AssertionError("unexpected accumulator row load")
                     partial_bits = job.accum_load_rows.pop(row_idx)["data"]
                     self._mark_kernel_path_start(job.tag, "datapath_add", self.global_cycle)
-                    assert self.vc.enqueue_compute(
-                        op="add",
-                        dst=self.SUM_REG,
-                        src0=_decode_fp16_vector(partial_bits),
-                        src1=_decode_fp16_vector(list(wb.get("data", []))),
-                    )
+                    assert self.vc.enqueue_scheduler_instruction({
+                        "unit": "datapath",
+                        "op": "add",
+                        "dst": self.SUM_REG,
+                        "src0": _decode_fp16_vector(partial_bits),
+                        "src1": _decode_fp16_vector(list(wb.get("data", []))),
+                    })
                     job.sum_issue_rows.append(row_idx)
 
                 elif src == "gsau" and dst == self.OUT_REG:
@@ -874,12 +875,13 @@ class MNReuseBlockedTPUCosim(TiledTPUCosim):
             while pending_datapath_rows and _scheduler_datapath_backlog() < datapath_backlog_limit:
                 job, row_idx, partial_bits, accum_bits = pending_datapath_rows.pop(0)
                 self._mark_kernel_path_start(job.tag, "datapath_add", self.global_cycle)
-                assert self.vc.enqueue_compute(
-                    op="add",
-                    dst=self.SUM_REG,
-                    src0=_decode_fp16_vector(partial_bits),
-                    src1=_decode_fp16_vector(accum_bits),
-                )
+                assert self.vc.enqueue_scheduler_instruction({
+                    "unit": "datapath",
+                    "op": "add",
+                    "dst": self.SUM_REG,
+                    "src0": _decode_fp16_vector(partial_bits),
+                    "src1": _decode_fp16_vector(accum_bits),
+                })
                 datapath_issue_fifo.append((job, row_idx))
 
             for job in jobs:
@@ -1542,6 +1544,6 @@ def test_both_architectures_run_the_same_reuse_schedule() -> None:
     assert old.spad.num_tiles == 2 and new.spad.num_tiles == 4
     assert len(old.vc.vls_units) == 2 and len(new.vc.vls_units) == 4
     # capacity is a property of the chip, not of how it is cut up
-    assert old.spad.total_bytes == new.spad.total_bytes == 2 * 1024 * 1024
+    assert old.spad.tile_bytes * old.spad.num_tiles == new.spad.tile_bytes * new.spad.num_tiles == 2 * 1024 * 1024
     assert new.num_slots == 4, "the wider scratchpad must widen the double buffer"
     assert old.global_cycle > 0 and new.global_cycle > 0

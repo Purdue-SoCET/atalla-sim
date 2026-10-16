@@ -1,0 +1,5710 @@
+{
+ "blocked_cosim_64_reuse2": {
+  "output": "6b1a97b99423fd785a4a98d2b674933c5af4f6f1be3f14b630fe12d3a0b73529",
+  "stats": {
+   "activation_reuse_n": 2,
+   "active_pe_sum": 262144,
+   "arithmetic_intensity_internal": 1.689434364994664,
+   "avg_active_pes_during_compute_window": 606.8148148148148,
+   "avg_active_pes_per_active_cycle": 636.2718446601941,
+   "avg_active_pes_when_active": 636.2718446601941,
+   "backend_dram_burst_bytes": 32,
+   "bytes_internal": 959488,
+   "bytes_transmitted": 57344,
+   "cycles": 5648,
+   "execution_policy": "weight-stationary per tk: load one resident weight tile into the TPU, stream activation tiles back-to-back, then flush before the next weight tile",
+   "external_bandwidth_active_bytes_per_cycle": 67.94312796208531,
+   "external_bandwidth_avg_bytes_per_cycle": 10.152974504249292,
+   "flops_micro": 1620992,
+   "fp16_overflow_count": 0,
+   "fp16_saturation_count": 0,
+   "gemm_total_cycles_summary": {
+    "avg": 542.5,
+    "count": 8,
+    "max": 625,
+    "min": 460,
+    "total": 4340
+   },
+   "internal_bandwidth_bytes_per_cycle": 169.88101983002832,
+   "kernel_gantt_span_count": 112,
+   "kernel_gantt_tag_count": 8,
+   "mac_utilization": 0.0453257790368272,
+   "mac_utilization_sysarr_active": 0.6213592233009708,
+   "matrix_size": 64,
+   "matrix_total_cycles": 5648,
+   "max_abs_error": 0.0,
+   "max_active_pes_in_any_cycle": 1024,
+   "mean_abs_error": 0.0,
+   "num_tiles": 2,
+   "pe_add_ops": 1170432,
+   "pe_mac_ops": 442368,
+   "pe_mul_ops": 442368,
+   "pe_psum_adds": 838656,
+   "prefetch_slots": 2,
+   "queue_avg_depths": {
+    "gsau_from_systolic": 0.0453257790368272,
+    "gsau_rd_queue": 2.039660056657224,
+    "gsau_to_systolic": 0.0,
+    "gsau_writebacks": 0.0,
+    "scheduler_build_datapath": 0.0,
+    "scheduler_build_gsau": 0.0,
+    "scheduler_build_vlsu": 0.0,
+    "scheduler_packet_datapath": 0.0,
+    "scheduler_packet_gsau": 0.0,
+    "scheduler_packet_vlsu": 0.0,
+    "scheduler_packets": 0.0,
+    "vlsu_dst_fifo": 1.246458923512748,
+    "vlsu_issue_q": 0.0084985835694051,
+    "vlsu_req_q": 0.0,
+    "vlsu_rsp_q": 0.11331444759206799,
+    "vlsu_wb_q": 0.0,
+    "wb_buffer": 0.007082152974504249
+   },
+   "queue_avg_depths_valid_mac": {
+    "gsau_from_systolic": 0.14563106796116504,
+    "gsau_rd_queue": 12.514563106796116,
+    "gsau_to_systolic": 0.0,
+    "gsau_writebacks": 0.0,
+    "scheduler_build_datapath": 0.0,
+    "scheduler_build_gsau": 0.0,
+    "scheduler_build_vlsu": 0.0,
+    "scheduler_packet_datapath": 0.0,
+    "scheduler_packet_gsau": 0.0,
+    "scheduler_packet_vlsu": 0.0,
+    "scheduler_packets": 0.0,
+    "vlsu_dst_fifo": 3.854368932038835,
+    "vlsu_issue_q": 0.0,
+    "vlsu_req_q": 0.0,
+    "vlsu_rsp_q": 0.14563106796116504,
+    "vlsu_wb_q": 0.0,
+    "wb_buffer": 0.02912621359223301
+   },
+   "queue_max_depths": {
+    "gsau_from_systolic": 1,
+    "gsau_rd_queue": 15,
+    "gsau_to_systolic": 0,
+    "gsau_writebacks": 0,
+    "scheduler_build_datapath": 0,
+    "scheduler_build_gsau": 0,
+    "scheduler_build_vlsu": 0,
+    "scheduler_packet_datapath": 0,
+    "scheduler_packet_gsau": 0,
+    "scheduler_packet_vlsu": 0,
+    "scheduler_packets": 0,
+    "vlsu_dst_fifo": 4,
+    "vlsu_issue_q": 3,
+    "vlsu_req_q": 0,
+    "vlsu_rsp_q": 1,
+    "vlsu_wb_q": 0,
+    "wb_buffer": 1
+   },
+   "queue_valid_mac_samples": 412,
+   "reuse_act_internal_over_external": 32.0,
+   "reuse_psum_internal_over_external": 34.625,
+   "reuse_weight_internal_over_external": 16.5,
+   "sa_stats_not_applicable": [],
+   "sdma_load_cycles_summary": {
+    "avg": 900.75,
+    "count": 8,
+    "max": 904,
+    "min": 897,
+    "total": 7206
+   },
+   "slot_policy": "weights prefer tile0, activations prefer tile1, psums prefer tile1 then spill to tile0; every logical buffer carries its own tile/frontend id",
+   "spad_bank_size": 16384,
+   "spad_frontend_queue_size": 4,
+   "spad_pads": 2,
+   "spad_total_bytes": 2097152,
+   "systolic_array": "tpu",
+   "systolic_array_active_work_cycles": 412,
+   "systolic_array_compute_cycles_summary": {
+    "avg": 54.0,
+    "count": 8,
+    "max": 54,
+    "min": 54,
+    "total": 432
+   },
+   "systolic_array_valid_mac_cycles_summary": {
+    "avg": 51.5,
+    "count": 8,
+    "max": 52,
+    "min": 51,
+    "total": 412
+   },
+   "throughput_float_operations_per_cycle": 287.0028328611898,
+   "tile_size": 32,
+   "total_output_tiles": 4,
+   "total_tile_pairs": 8,
+   "vec_op_counts": {
+    "add": 8192,
+    "and": 0,
+    "div": 0,
+    "eq": 0,
+    "exp": 0,
+    "gt": 0,
+    "lt": 0,
+    "max": 0,
+    "min": 0,
+    "mul": 0,
+    "ne": 0,
+    "or": 0,
+    "shl": 0,
+    "shr": 0,
+    "sqrt": 0,
+    "sub": 0,
+    "xor": 0
+   },
+   "vec_reduce_ops": 0,
+   "vec_total_ops": 8192,
+   "vls_count": 2,
+   "weight_reuse_m": 2
+  }
+ },
+ "kernel_add": {
+  "cycles": 2172,
+  "dcache": {
+   "evictions": 0,
+   "fill_wait_cycles": 3,
+   "fills": 2,
+   "flush_writebacks": 0,
+   "hits": 0,
+   "max_mshrs": 2,
+   "mem_wait_cycles": 16,
+   "misses": 2,
+   "present_fills": 0,
+   "requests": 3,
+   "retries": 0,
+   "secondary": 1,
+   "writebacks": 0
+  },
+  "dram": "e7eb58103ddb98119660d0320f0954fa71e1032b7d94b24794b513205be4618f",
+  "flushes": 2,
+  "issue_trace": "8003acad60f3da1e75efed631b52c4ffb80c2782bdfe4f41f871cd3b6287ee95",
+  "lsu": {
+   "full_cycles": 0,
+   "hits": 0,
+   "loads": 3,
+   "max_waiting": 3,
+   "misses": 3,
+   "retries": 0,
+   "stores": 0
+  },
+  "mask_regs": "70ec11b33ff60b660ddfa335e2023d41b72319f70bd83c4310fa83ae70c0d643",
+  "packets_fetched": 245,
+  "perf": {
+   "cycle_breakdown": {
+    "frontend:icache": 74,
+    "frontend:refill": 3,
+    "halt:drain": 396,
+    "issue": 243,
+    "stall:hazard:branch": 123,
+    "stall:hazard:scalar_alu": 70,
+    "stall:hazard:scalar_load": 18,
+    "stall:hazard:sdma": 758,
+    "stall:hazard:vector_lane": 128,
+    "stall:hazard:vreg_load": 352,
+    "stall:regfile": 7
+   },
+   "cycles": 2172,
+   "instruction_mix": {
+    "branch": 64,
+    "convert": 1,
+    "halt": 1,
+    "scalar_alu": 43,
+    "scalar_load": 3,
+    "sdma_load": 2,
+    "sdma_store": 1,
+    "vector_lane": 32,
+    "vreg_load": 64,
+    "vreg_store": 32
+   },
+   "issue": {
+    "flushes": 2,
+    "ops": 243,
+    "ops_per_cycle": 0.11187845303867404,
+    "packets": 243,
+    "packets_fetched": 245,
+    "packets_per_cycle": 0.11187845303867404,
+    "slot_utilization": 0.25
+   },
+   "memory": {
+    "dcache": {
+     "evictions": 0,
+     "fill_wait_cycles": 3,
+     "fills": 2,
+     "flush_writebacks": 0,
+     "hits": 0,
+     "max_mshrs": 2,
+     "mem_wait_cycles": 16,
+     "misses": 2,
+     "present_fills": 0,
+     "requests": 3,
+     "retries": 0,
+     "secondary": 1,
+     "writebacks": 0
+    },
+    "dram_bursts": 856,
+    "dram_bytes": 6848,
+    "dram_bytes_per_cycle": 3.152854511970534,
+    "dram_channel_busy": 0.39410681399631675,
+    "dram_peak_bytes_per_cycle": 8,
+    "icache": {
+     "fills": 9,
+     "iwait_cycles": 60
+    },
+    "masters": {
+     "dcache": {
+      "bursts": 16,
+      "bytes": 128,
+      "read_bytes": 128,
+      "wait_cycles": 6,
+      "write_bytes": 0
+     },
+     "icache": {
+      "bursts": 72,
+      "bytes": 576,
+      "read_bytes": 576,
+      "wait_cycles": 15,
+      "write_bytes": 0
+     },
+     "scpad0": {
+      "bursts": 512,
+      "bytes": 4096,
+      "wait_cycles": 368
+     },
+     "scpad1": {
+      "bursts": 256,
+      "bytes": 2048,
+      "wait_cycles": 115
+     },
+     "scpad2": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     },
+     "scpad3": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     }
+    },
+    "scratchpad": [
+     {
+      "read_queue": 0,
+      "reads": 64,
+      "stalls": 0,
+      "tile": 0,
+      "write_queue": 0,
+      "writes": 64
+     },
+     {
+      "read_queue": 0,
+      "reads": 32,
+      "stalls": 0,
+      "tile": 1,
+      "write_queue": 0,
+      "writes": 32
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 2,
+      "write_queue": 0,
+      "writes": 0
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 3,
+      "write_queue": 0,
+      "writes": 0
+     }
+    ]
+   },
+   "unit_busy": {
+    "dcache": {
+     "cycles": 207,
+     "fraction": 0.09530386740331492
+    },
+    "dram_channel": {
+     "cycles": 856,
+     "fraction": 0.39410681399631675
+    },
+    "ex2": {
+     "cycles": 1,
+     "fraction": 0.00046040515653775324
+    },
+    "lanes": {
+     "cycles": 64,
+     "fraction": 0.029465930018416207
+    },
+    "lsu": {
+     "cycles": 80,
+     "fraction": 0.03683241252302026
+    },
+    "sdma0": {
+     "cycles": 666,
+     "fraction": 0.30662983425414364
+    },
+    "sdma1": {
+     "cycles": 397,
+     "fraction": 0.18278084714548803
+    },
+    "vlsu0": {
+     "cycles": 288,
+     "fraction": 0.13259668508287292
+    },
+    "vlsu1": {
+     "cycles": 288,
+     "fraction": 0.13259668508287292
+    }
+   },
+   "work": {
+    "arithmetic_intensity": 0.14953271028037382,
+    "array_flops": 0,
+    "array_mac_utilization": 0.0,
+    "flops": 1024,
+    "flops_per_cycle": 0.4714548802946593,
+    "lane_flops": 1024
+   }
+  },
+  "scalar_regs": "fc0cd53f11e7d2a61b70da12eb86846098cd4581f2fca358fb4c9b6e0d5aaf7b",
+  "vector_regs": "c5e2817cd4b1abe09b7aa08298f879c7aa1fdb583c3d371261beaf92c593ac64",
+  "vector_side": {
+   "gsau_ops": 0,
+   "lane_ops": 32,
+   "mask_writes": 0,
+   "sdma_loads": 2,
+   "sdma_stores": 1,
+   "transpose_pops": 0,
+   "transpose_pushes": 0,
+   "vector_writes": 96,
+   "vlsu_loads": 64,
+   "vlsu_stores": 32,
+   "wb_conflict_cycles": 0
+  }
+ },
+ "kernel_add.c": {
+  "cycles": 831,
+  "dcache": {
+   "evictions": 0,
+   "fill_wait_cycles": 3,
+   "fills": 3,
+   "flush_writebacks": 1,
+   "hits": 12,
+   "max_mshrs": 2,
+   "mem_wait_cycles": 23,
+   "misses": 3,
+   "present_fills": 0,
+   "requests": 16,
+   "retries": 0,
+   "secondary": 1,
+   "writebacks": 0
+  },
+  "dram": "5c355b62b1d32473e422a1c91a6e45677dbbe1958be1d0a33b9f526cc3f6e6ed",
+  "flushes": 7,
+  "issue_trace": "7e4a67f820276144ba615a0f3d4b1cd2810105100dd536b3dbc2b993c187ec62",
+  "lsu": {
+   "full_cycles": 0,
+   "hits": 12,
+   "loads": 9,
+   "max_waiting": 1,
+   "misses": 4,
+   "retries": 0,
+   "stores": 7
+  },
+  "mask_regs": "70ec11b33ff60b660ddfa335e2023d41b72319f70bd83c4310fa83ae70c0d643",
+  "packets_fetched": 184,
+  "perf": {
+   "cycle_breakdown": {
+    "frontend:icache": 337,
+    "frontend:refill": 89,
+    "halt:drain": 188,
+    "issue": 85,
+    "stall:hazard:branch": 7,
+    "stall:hazard:move": 11,
+    "stall:hazard:scalar_alu": 26,
+    "stall:hazard:scalar_load": 77,
+    "stall:hazard:sdma": 7,
+    "stall:regfile": 4
+   },
+   "cycles": 831,
+   "instruction_mix": {
+    "branch": 11,
+    "convert": 4,
+    "halt": 1,
+    "scalar_alu": 42,
+    "scalar_load": 9,
+    "scalar_store": 7,
+    "sdma_load": 2,
+    "sdma_store": 1,
+    "vector_lane": 4,
+    "vreg_load": 8,
+    "vreg_store": 4
+   },
+   "issue": {
+    "flushes": 7,
+    "ops": 93,
+    "ops_per_cycle": 0.11191335740072202,
+    "packets": 85,
+    "packets_fetched": 184,
+    "packets_per_cycle": 0.1022864019253911,
+    "slot_utilization": 0.2735294117647059
+   },
+   "memory": {
+    "dcache": {
+     "evictions": 0,
+     "fill_wait_cycles": 3,
+     "fills": 3,
+     "flush_writebacks": 1,
+     "hits": 12,
+     "max_mshrs": 2,
+     "mem_wait_cycles": 23,
+     "misses": 3,
+     "present_fills": 0,
+     "requests": 16,
+     "retries": 0,
+     "secondary": 1,
+     "writebacks": 0
+    },
+    "dram_bursts": 344,
+    "dram_bytes": 2752,
+    "dram_bytes_per_cycle": 3.3116726835138386,
+    "dram_channel_busy": 0.4139590854392298,
+    "dram_peak_bytes_per_cycle": 8,
+    "icache": {
+     "fills": 27,
+     "iwait_cycles": 175
+    },
+    "masters": {
+     "dcache": {
+      "bursts": 32,
+      "bytes": 256,
+      "read_bytes": 192,
+      "wait_cycles": 8,
+      "write_bytes": 64
+     },
+     "icache": {
+      "bursts": 216,
+      "bytes": 1728,
+      "read_bytes": 1728,
+      "wait_cycles": 40,
+      "write_bytes": 0
+     },
+     "scpad0": {
+      "bursts": 64,
+      "bytes": 512,
+      "wait_cycles": 73
+     },
+     "scpad1": {
+      "bursts": 32,
+      "bytes": 256,
+      "wait_cycles": 45
+     },
+     "scpad2": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     },
+     "scpad3": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     }
+    },
+    "scratchpad": [
+     {
+      "read_queue": 0,
+      "reads": 8,
+      "stalls": 0,
+      "tile": 0,
+      "write_queue": 0,
+      "writes": 8
+     },
+     {
+      "read_queue": 0,
+      "reads": 4,
+      "stalls": 0,
+      "tile": 1,
+      "write_queue": 0,
+      "writes": 4
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 2,
+      "write_queue": 0,
+      "writes": 0
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 3,
+      "write_queue": 0,
+      "writes": 0
+     }
+    ]
+   },
+   "unit_busy": {
+    "dcache": {
+     "cycles": 334,
+     "fraction": 0.4019253910950662
+    },
+    "dram_channel": {
+     "cycles": 344,
+     "fraction": 0.4139590854392298
+    },
+    "ex2": {
+     "cycles": 4,
+     "fraction": 0.0048134777376654635
+    },
+    "lanes": {
+     "cycles": 8,
+     "fraction": 0.009626955475330927
+    },
+    "lsu": {
+     "cycles": 174,
+     "fraction": 0.20938628158844766
+    },
+    "sdma0": {
+     "cycles": 116,
+     "fraction": 0.13959085439229843
+    },
+    "sdma1": {
+     "cycles": 71,
+     "fraction": 0.08543922984356198
+    },
+    "vlsu0": {
+     "cycles": 36,
+     "fraction": 0.04332129963898917
+    },
+    "vlsu1": {
+     "cycles": 36,
+     "fraction": 0.04332129963898917
+    }
+   },
+   "work": {
+    "arithmetic_intensity": 0.046511627906976744,
+    "array_flops": 0,
+    "array_mac_utilization": 0.0,
+    "flops": 128,
+    "flops_per_cycle": 0.15403128760529483,
+    "lane_flops": 128
+   }
+  },
+  "scalar_regs": "e997ede1e81e15e70bef8e0d6b9c834a5c42025ea10375f455642448c0c9d623",
+  "vector_regs": "4d0a958c93c54ba0404d6798a4f5a449c7c51bb53ccbcde0cd4baab58688a9db",
+  "vector_side": {
+   "gsau_ops": 0,
+   "lane_ops": 4,
+   "mask_writes": 0,
+   "sdma_loads": 2,
+   "sdma_stores": 1,
+   "transpose_pops": 0,
+   "transpose_pushes": 0,
+   "vector_writes": 12,
+   "vlsu_loads": 8,
+   "vlsu_stores": 4,
+   "wb_conflict_cycles": 0
+  }
+ },
+ "kernel_add_4x32.c": {
+  "cycles": 763,
+  "dcache": {
+   "evictions": 0,
+   "fill_wait_cycles": 1,
+   "fills": 3,
+   "flush_writebacks": 1,
+   "hits": 3,
+   "max_mshrs": 2,
+   "mem_wait_cycles": 24,
+   "misses": 3,
+   "present_fills": 0,
+   "requests": 7,
+   "retries": 0,
+   "secondary": 1,
+   "writebacks": 0
+  },
+  "dram": "a5d60a914bc59f9ac3a185500b58698a53b76403cd340d5ab0ad5c285ab438ea",
+  "flushes": 8,
+  "issue_trace": "0f03a29c86015677cb6d9e7f8e8e97fb2dcbb233f4c4948a818e3d6c2e3c07f5",
+  "lsu": {
+   "full_cycles": 0,
+   "hits": 3,
+   "loads": 5,
+   "max_waiting": 1,
+   "misses": 4,
+   "retries": 0,
+   "stores": 2
+  },
+  "mask_regs": "70ec11b33ff60b660ddfa335e2023d41b72319f70bd83c4310fa83ae70c0d643",
+  "packets_fetched": 119,
+  "perf": {
+   "cycle_breakdown": {
+    "frontend:icache": 203,
+    "frontend:refill": 17,
+    "halt:drain": 180,
+    "issue": 108,
+    "stall:hazard:branch": 7,
+    "stall:hazard:scalar_alu": 63,
+    "stall:hazard:scalar_load": 94,
+    "stall:hazard:scalar_muldiv": 4,
+    "stall:hazard:sdma": 50,
+    "stall:hazard:vector_lane": 8,
+    "stall:hazard:vreg_load": 21,
+    "stall:regfile": 8
+   },
+   "cycles": 763,
+   "instruction_mix": {
+    "branch": 12,
+    "convert": 4,
+    "halt": 1,
+    "scalar_alu": 72,
+    "scalar_load": 5,
+    "scalar_muldiv": 3,
+    "scalar_store": 2,
+    "sdma_load": 2,
+    "sdma_store": 1,
+    "vector_lane": 4,
+    "vreg_load": 8,
+    "vreg_store": 4
+   },
+   "issue": {
+    "flushes": 8,
+    "ops": 118,
+    "ops_per_cycle": 0.15465268676277852,
+    "packets": 108,
+    "packets_fetched": 119,
+    "packets_per_cycle": 0.14154652686762778,
+    "slot_utilization": 0.27314814814814814
+   },
+   "memory": {
+    "dcache": {
+     "evictions": 0,
+     "fill_wait_cycles": 1,
+     "fills": 3,
+     "flush_writebacks": 1,
+     "hits": 3,
+     "max_mshrs": 2,
+     "mem_wait_cycles": 24,
+     "misses": 3,
+     "present_fills": 0,
+     "requests": 7,
+     "retries": 0,
+     "secondary": 1,
+     "writebacks": 0
+    },
+    "dram_bursts": 312,
+    "dram_bytes": 2496,
+    "dram_bytes_per_cycle": 3.27129750982962,
+    "dram_channel_busy": 0.4089121887287025,
+    "dram_peak_bytes_per_cycle": 8,
+    "icache": {
+     "fills": 23,
+     "iwait_cycles": 139
+    },
+    "masters": {
+     "dcache": {
+      "bursts": 32,
+      "bytes": 256,
+      "read_bytes": 192,
+      "wait_cycles": 9,
+      "write_bytes": 64
+     },
+     "icache": {
+      "bursts": 184,
+      "bytes": 1472,
+      "read_bytes": 1472,
+      "wait_cycles": 28,
+      "write_bytes": 0
+     },
+     "scpad0": {
+      "bursts": 64,
+      "bytes": 512,
+      "wait_cycles": 64
+     },
+     "scpad1": {
+      "bursts": 32,
+      "bytes": 256,
+      "wait_cycles": 50
+     },
+     "scpad2": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     },
+     "scpad3": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     }
+    },
+    "scratchpad": [
+     {
+      "read_queue": 0,
+      "reads": 8,
+      "stalls": 0,
+      "tile": 0,
+      "write_queue": 0,
+      "writes": 8
+     },
+     {
+      "read_queue": 0,
+      "reads": 4,
+      "stalls": 0,
+      "tile": 1,
+      "write_queue": 0,
+      "writes": 4
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 2,
+      "write_queue": 0,
+      "writes": 0
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 3,
+      "write_queue": 0,
+      "writes": 0
+     }
+    ]
+   },
+   "unit_busy": {
+    "dcache": {
+     "cycles": 272,
+     "fraction": 0.3564875491480996
+    },
+    "dram_channel": {
+     "cycles": 312,
+     "fraction": 0.4089121887287025
+    },
+    "ex2": {
+     "cycles": 4,
+     "fraction": 0.005242463958060288
+    },
+    "ex4": {
+     "cycles": 6,
+     "fraction": 0.007863695937090432
+    },
+    "lanes": {
+     "cycles": 8,
+     "fraction": 0.010484927916120577
+    },
+    "lsu": {
+     "cycles": 113,
+     "fraction": 0.14809960681520315
+    },
+    "sdma0": {
+     "cycles": 103,
+     "fraction": 0.1349934469200524
+    },
+    "sdma1": {
+     "cycles": 75,
+     "fraction": 0.0982961992136304
+    },
+    "vlsu0": {
+     "cycles": 36,
+     "fraction": 0.047182175622542594
+    },
+    "vlsu1": {
+     "cycles": 36,
+     "fraction": 0.047182175622542594
+    }
+   },
+   "work": {
+    "arithmetic_intensity": 0.05128205128205128,
+    "array_flops": 0,
+    "array_mac_utilization": 0.0,
+    "flops": 128,
+    "flops_per_cycle": 0.16775884665792923,
+    "lane_flops": 128
+   }
+  },
+  "scalar_regs": "39ddbcadaa14fae5ab27538013baa5b4d855ed3ae9004ccf95f42dd916acc217",
+  "vector_regs": "6a8d3adaa1e334f713cf16e42bf9edf413a6cb40bfcccc40458be7d46124a5c0",
+  "vector_side": {
+   "gsau_ops": 0,
+   "lane_ops": 4,
+   "mask_writes": 0,
+   "sdma_loads": 2,
+   "sdma_stores": 1,
+   "transpose_pops": 0,
+   "transpose_pushes": 0,
+   "vector_writes": 12,
+   "vlsu_loads": 8,
+   "vlsu_stores": 4,
+   "wb_conflict_cycles": 0
+  }
+ },
+ "kernel_conv_h4_w4_r3_s3_k4_baseline.c": {
+  "cycles": 1202,
+  "dcache": {
+   "evictions": 0,
+   "fill_wait_cycles": 1,
+   "fills": 3,
+   "flush_writebacks": 1,
+   "hits": 6,
+   "max_mshrs": 2,
+   "mem_wait_cycles": 25,
+   "misses": 3,
+   "present_fills": 0,
+   "requests": 10,
+   "retries": 0,
+   "secondary": 1,
+   "writebacks": 0
+  },
+  "dram": "12b00d1be63aabfc99ee1bd6be6d9d946de47496e69d640e67e8ee9ea396927d",
+  "flushes": 14,
+  "issue_trace": "dfcc1eaba8e8ea30b382f8d1a61eb37f440c1caef3958ec008cc80fb94788f2c",
+  "lsu": {
+   "full_cycles": 0,
+   "hits": 6,
+   "loads": 8,
+   "max_waiting": 1,
+   "misses": 4,
+   "retries": 0,
+   "stores": 2
+  },
+  "mask_regs": "d2ffd9fc2b9678c03cb04f42f0227e25f48161af6c2ab31ef1119ae8584a9651",
+  "packets_fetched": 172,
+  "perf": {
+   "cycle_breakdown": {
+    "frontend:icache": 266,
+    "frontend:refill": 39,
+    "halt:drain": 147,
+    "issue": 151,
+    "stall:ex4": 1,
+    "stall:hazard:branch": 14,
+    "stall:hazard:gemm": 164,
+    "stall:hazard:scalar_alu": 64,
+    "stall:hazard:scalar_load": 70,
+    "stall:hazard:scalar_muldiv": 10,
+    "stall:hazard:sdma": 76,
+    "stall:hazard:vector_lane": 32,
+    "stall:hazard:vreg_load": 124,
+    "stall:regfile": 44
+   },
+   "cycles": 1202,
+   "instruction_mix": {
+    "branch": 22,
+    "convert": 4,
+    "gemm": 4,
+    "halt": 1,
+    "scalar_alu": 98,
+    "scalar_load": 8,
+    "scalar_muldiv": 6,
+    "scalar_store": 2,
+    "sdma_load": 3,
+    "sdma_store": 1,
+    "vector_lane": 16,
+    "vreg_load": 12,
+    "vreg_store": 4,
+    "weight_load": 4
+   },
+   "issue": {
+    "flushes": 14,
+    "ops": 185,
+    "ops_per_cycle": 0.15391014975041598,
+    "packets": 151,
+    "packets_fetched": 172,
+    "packets_per_cycle": 0.12562396006655574,
+    "slot_utilization": 0.30629139072847683
+   },
+   "memory": {
+    "dcache": {
+     "evictions": 0,
+     "fill_wait_cycles": 1,
+     "fills": 3,
+     "flush_writebacks": 1,
+     "hits": 6,
+     "max_mshrs": 2,
+     "mem_wait_cycles": 25,
+     "misses": 3,
+     "present_fills": 0,
+     "requests": 10,
+     "retries": 0,
+     "secondary": 1,
+     "writebacks": 0
+    },
+    "dram_bursts": 327,
+    "dram_bytes": 2616,
+    "dram_bytes_per_cycle": 2.1763727121464225,
+    "dram_channel_busy": 0.2720465890183028,
+    "dram_peak_bytes_per_cycle": 8,
+    "icache": {
+     "fills": 29,
+     "iwait_cycles": 171
+    },
+    "masters": {
+     "dcache": {
+      "bursts": 32,
+      "bytes": 256,
+      "read_bytes": 192,
+      "wait_cycles": 10,
+      "write_bytes": 64
+     },
+     "icache": {
+      "bursts": 232,
+      "bytes": 1856,
+      "read_bytes": 1856,
+      "wait_cycles": 26,
+      "write_bytes": 0
+     },
+     "scpad0": {
+      "bursts": 28,
+      "bytes": 224,
+      "wait_cycles": 39
+     },
+     "scpad1": {
+      "bursts": 35,
+      "bytes": 280,
+      "wait_cycles": 29
+     },
+     "scpad2": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     },
+     "scpad3": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     }
+    },
+    "scratchpad": [
+     {
+      "read_queue": 0,
+      "reads": 4,
+      "stalls": 0,
+      "tile": 0,
+      "write_queue": 0,
+      "writes": 4
+     },
+     {
+      "read_queue": 0,
+      "reads": 12,
+      "stalls": 0,
+      "tile": 1,
+      "write_queue": 0,
+      "writes": 35
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 2,
+      "write_queue": 0,
+      "writes": 0
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 3,
+      "write_queue": 0,
+      "writes": 0
+     }
+    ]
+   },
+   "unit_busy": {
+    "array": {
+     "cycles": 128,
+     "fraction": 0.1064891846921797
+    },
+    "dcache": {
+     "cycles": 285,
+     "fraction": 0.23710482529118138
+    },
+    "dram_channel": {
+     "cycles": 327,
+     "fraction": 0.2720465890183028
+    },
+    "ex2": {
+     "cycles": 4,
+     "fraction": 0.0033277870216306157
+    },
+    "ex4": {
+     "cycles": 12,
+     "fraction": 0.009983361064891847
+    },
+    "gsau": {
+     "cycles": 156,
+     "fraction": 0.129783693843594
+    },
+    "lanes": {
+     "cycles": 32,
+     "fraction": 0.026622296173044926
+    },
+    "lsu": {
+     "cycles": 126,
+     "fraction": 0.1048252911813644
+    },
+    "sdma0": {
+     "cycles": 68,
+     "fraction": 0.056572379367720464
+    },
+    "sdma1": {
+     "cycles": 193,
+     "fraction": 0.1605657237936772
+    },
+    "vlsu0": {
+     "cycles": 36,
+     "fraction": 0.029950083194675542
+    },
+    "vlsu1": {
+     "cycles": 72,
+     "fraction": 0.059900166389351084
+    }
+   },
+   "work": {
+    "arithmetic_intensity": 3.327217125382263,
+    "array_flops": 8192,
+    "array_mac_utilization": 0.0033277870216306157,
+    "flops": 8704,
+    "flops_per_cycle": 7.241264559068219,
+    "lane_flops": 512
+   }
+  },
+  "scalar_regs": "1f872f512c503e71083a43309148bfcc33f14254b820683439f600c27ee8195d",
+  "vector_regs": "92791e965305b1d89dac1f40d0240e0f870d7d46e8f23b1e7db7c3fca9bbe252",
+  "vector_side": {
+   "gsau_ops": 8,
+   "lane_ops": 16,
+   "mask_writes": 0,
+   "sdma_loads": 3,
+   "sdma_stores": 1,
+   "transpose_pops": 0,
+   "transpose_pushes": 0,
+   "vector_writes": 32,
+   "vlsu_loads": 12,
+   "vlsu_stores": 4,
+   "wb_conflict_cycles": 0
+  }
+ },
+ "kernel_conv_tiled": {
+  "cycles": 1604,
+  "dcache": {
+   "evictions": 0,
+   "fill_wait_cycles": 6,
+   "fills": 3,
+   "flush_writebacks": 0,
+   "hits": 0,
+   "max_mshrs": 2,
+   "mem_wait_cycles": 21,
+   "misses": 3,
+   "present_fills": 1,
+   "requests": 14,
+   "retries": 4,
+   "secondary": 7,
+   "writebacks": 0
+  },
+  "dram": "e9f6ef58abace934d4051b3dd5bed95705298693bcab05437ce1e8668d3249c5",
+  "flushes": 4,
+  "issue_trace": "270b54613c648dd483f5c4f5aa1a3a29ee5b6ddcc905e2b60d0faadfae3c8a44",
+  "lsu": {
+   "full_cycles": 0,
+   "hits": 0,
+   "loads": 10,
+   "max_waiting": 9,
+   "misses": 10,
+   "retries": 4,
+   "stores": 0
+  },
+  "mask_regs": "d5f000d9ef69b10f9621159d7f5427a6ccd2b8f4626366c8d739a9332dfe8288",
+  "packets_fetched": 243,
+  "perf": {
+   "cycle_breakdown": {
+    "frontend:icache": 305,
+    "frontend:refill": 27,
+    "halt:drain": 137,
+    "issue": 236,
+    "stall:ex4": 7,
+    "stall:hazard:branch": 56,
+    "stall:hazard:gemm": 163,
+    "stall:hazard:scalar_alu": 74,
+    "stall:hazard:scalar_muldiv": 24,
+    "stall:hazard:sdma": 118,
+    "stall:hazard:vector_lane": 16,
+    "stall:hazard:vreg_load": 334,
+    "stall:regfile": 64,
+    "stall:sdma0": 43
+   },
+   "cycles": 1604,
+   "instruction_mix": {
+    "branch": 37,
+    "convert": 2,
+    "gemm": 4,
+    "halt": 1,
+    "scalar_alu": 96,
+    "scalar_load": 10,
+    "scalar_muldiv": 12,
+    "sdma_load": 3,
+    "sdma_store": 1,
+    "vector_lane": 4,
+    "vreg_load": 35,
+    "vreg_store": 4,
+    "weight_load": 27
+   },
+   "issue": {
+    "flushes": 4,
+    "ops": 236,
+    "ops_per_cycle": 0.14713216957605985,
+    "packets": 236,
+    "packets_fetched": 243,
+    "packets_per_cycle": 0.14713216957605985,
+    "slot_utilization": 0.25
+   },
+   "memory": {
+    "dcache": {
+     "evictions": 0,
+     "fill_wait_cycles": 6,
+     "fills": 3,
+     "flush_writebacks": 0,
+     "hits": 0,
+     "max_mshrs": 2,
+     "mem_wait_cycles": 21,
+     "misses": 3,
+     "present_fills": 1,
+     "requests": 14,
+     "retries": 4,
+     "secondary": 7,
+     "writebacks": 0
+    },
+    "dram_bursts": 359,
+    "dram_bytes": 2872,
+    "dram_bytes_per_cycle": 1.7905236907730673,
+    "dram_channel_busy": 0.2238154613466334,
+    "dram_peak_bytes_per_cycle": 8,
+    "icache": {
+     "fills": 35,
+     "iwait_cycles": 184
+    },
+    "masters": {
+     "dcache": {
+      "bursts": 16,
+      "bytes": 128,
+      "read_bytes": 128,
+      "wait_cycles": 11,
+      "write_bytes": 0
+     },
+     "icache": {
+      "bursts": 280,
+      "bytes": 2240,
+      "read_bytes": 2240,
+      "wait_cycles": 9,
+      "write_bytes": 0
+     },
+     "scpad0": {
+      "bursts": 55,
+      "bytes": 440,
+      "wait_cycles": 21
+     },
+     "scpad1": {
+      "bursts": 8,
+      "bytes": 64,
+      "wait_cycles": 11
+     },
+     "scpad2": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     },
+     "scpad3": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     }
+    },
+    "scratchpad": [
+     {
+      "read_queue": 0,
+      "reads": 31,
+      "stalls": 0,
+      "tile": 0,
+      "write_queue": 0,
+      "writes": 31
+     },
+     {
+      "read_queue": 0,
+      "reads": 8,
+      "stalls": 0,
+      "tile": 1,
+      "write_queue": 0,
+      "writes": 8
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 2,
+      "write_queue": 0,
+      "writes": 0
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 3,
+      "write_queue": 0,
+      "writes": 0
+     }
+    ]
+   },
+   "unit_busy": {
+    "array": {
+     "cycles": 128,
+     "fraction": 0.0798004987531172
+    },
+    "dcache": {
+     "cycles": 229,
+     "fraction": 0.14276807980049874
+    },
+    "dram_channel": {
+     "cycles": 359,
+     "fraction": 0.2238154613466334
+    },
+    "ex2": {
+     "cycles": 2,
+     "fraction": 0.0012468827930174563
+    },
+    "ex4": {
+     "cycles": 24,
+     "fraction": 0.014962593516209476
+    },
+    "gsau": {
+     "cycles": 156,
+     "fraction": 0.09725685785536159
+    },
+    "lanes": {
+     "cycles": 8,
+     "fraction": 0.004987531172069825
+    },
+    "lsu": {
+     "cycles": 101,
+     "fraction": 0.06296758104738155
+    },
+    "sdma0": {
+     "cycles": 187,
+     "fraction": 0.11658354114713217
+    },
+    "sdma1": {
+     "cycles": 46,
+     "fraction": 0.028678304239401497
+    },
+    "vlsu0": {
+     "cycles": 279,
+     "fraction": 0.17394014962593515
+    },
+    "vlsu1": {
+     "cycles": 36,
+     "fraction": 0.022443890274314215
+    }
+   },
+   "work": {
+    "arithmetic_intensity": 2.896935933147632,
+    "array_flops": 8192,
+    "array_mac_utilization": 0.0024937655860349127,
+    "flops": 8320,
+    "flops_per_cycle": 5.187032418952619,
+    "lane_flops": 128
+   }
+  },
+  "scalar_regs": "189ea06fe50d01cb7f2227bdbc87afb5be723e654eab4fd83ba3250da7d0b751",
+  "vector_regs": "e1ce1635918ba475b847af116e149f972fb0784e02c3075926ba4a82aeaee2e0",
+  "vector_side": {
+   "gsau_ops": 31,
+   "lane_ops": 4,
+   "mask_writes": 0,
+   "sdma_loads": 3,
+   "sdma_stores": 1,
+   "transpose_pops": 0,
+   "transpose_pushes": 0,
+   "vector_writes": 43,
+   "vlsu_loads": 35,
+   "vlsu_stores": 4,
+   "wb_conflict_cycles": 0
+  }
+ },
+ "kernel_gemm": {
+  "cycles": 2584,
+  "dcache": {
+   "evictions": 0,
+   "fill_wait_cycles": 3,
+   "fills": 2,
+   "flush_writebacks": 0,
+   "hits": 0,
+   "max_mshrs": 2,
+   "mem_wait_cycles": 17,
+   "misses": 2,
+   "present_fills": 0,
+   "requests": 6,
+   "retries": 0,
+   "secondary": 4,
+   "writebacks": 0
+  },
+  "dram": "372b73b8620158b3bcb6cbc5c6583a54899ea6847208a255caa3259621b275e5",
+  "flushes": 4,
+  "issue_trace": "83ab60dcc1af324b5e5d01fa2e3771fa3cd7dc1744114f4fb972e8a913c4c82d",
+  "lsu": {
+   "full_cycles": 0,
+   "hits": 0,
+   "loads": 6,
+   "max_waiting": 6,
+   "misses": 6,
+   "retries": 0,
+   "stores": 0
+  },
+  "mask_regs": "70ec11b33ff60b660ddfa335e2023d41b72319f70bd83c4310fa83ae70c0d643",
+  "packets_fetched": 272,
+  "perf": {
+   "cycle_breakdown": {
+    "frontend:icache": 106,
+    "frontend:refill": 11,
+    "halt:drain": 243,
+    "issue": 265,
+    "stall:hazard:branch": 112,
+    "stall:hazard:gemm": 820,
+    "stall:hazard:scalar_alu": 85,
+    "stall:hazard:scalar_load": 44,
+    "stall:hazard:sdma": 402,
+    "stall:hazard:vector_lane": 80,
+    "stall:hazard:vreg_load": 410,
+    "stall:regfile": 6
+   },
+   "cycles": 2584,
+   "instruction_mix": {
+    "branch": 60,
+    "convert": 1,
+    "gemm": 20,
+    "halt": 1,
+    "scalar_alu": 53,
+    "scalar_load": 6,
+    "sdma_load": 3,
+    "sdma_store": 1,
+    "vector_lane": 20,
+    "vreg_load": 60,
+    "vreg_store": 20,
+    "weight_load": 20
+   },
+   "issue": {
+    "flushes": 4,
+    "ops": 265,
+    "ops_per_cycle": 0.10255417956656347,
+    "packets": 265,
+    "packets_fetched": 272,
+    "packets_per_cycle": 0.10255417956656347,
+    "slot_utilization": 0.25
+   },
+   "memory": {
+    "dcache": {
+     "evictions": 0,
+     "fill_wait_cycles": 3,
+     "fills": 2,
+     "flush_writebacks": 0,
+     "hits": 0,
+     "max_mshrs": 2,
+     "mem_wait_cycles": 17,
+     "misses": 2,
+     "present_fills": 0,
+     "requests": 6,
+     "retries": 0,
+     "secondary": 4,
+     "writebacks": 0
+    },
+    "dram_bursts": 512,
+    "dram_bytes": 4096,
+    "dram_bytes_per_cycle": 1.585139318885449,
+    "dram_channel_busy": 0.19814241486068113,
+    "dram_peak_bytes_per_cycle": 8,
+    "icache": {
+     "fills": 12,
+     "iwait_cycles": 92
+    },
+    "masters": {
+     "dcache": {
+      "bursts": 16,
+      "bytes": 128,
+      "read_bytes": 128,
+      "wait_cycles": 7,
+      "write_bytes": 0
+     },
+     "icache": {
+      "bursts": 96,
+      "bytes": 768,
+      "read_bytes": 768,
+      "wait_cycles": 32,
+      "write_bytes": 0
+     },
+     "scpad0": {
+      "bursts": 100,
+      "bytes": 800,
+      "wait_cycles": 62
+     },
+     "scpad1": {
+      "bursts": 300,
+      "bytes": 2400,
+      "wait_cycles": 259
+     },
+     "scpad2": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     },
+     "scpad3": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     }
+    },
+    "scratchpad": [
+     {
+      "read_queue": 0,
+      "reads": 20,
+      "stalls": 0,
+      "tile": 0,
+      "write_queue": 0,
+      "writes": 20
+     },
+     {
+      "read_queue": 0,
+      "reads": 60,
+      "stalls": 0,
+      "tile": 1,
+      "write_queue": 0,
+      "writes": 60
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 2,
+      "write_queue": 0,
+      "writes": 0
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 3,
+      "write_queue": 0,
+      "writes": 0
+     }
+    ]
+   },
+   "unit_busy": {
+    "array": {
+     "cycles": 640,
+     "fraction": 0.2476780185758514
+    },
+    "dcache": {
+     "cycles": 208,
+     "fraction": 0.0804953560371517
+    },
+    "dram_channel": {
+     "cycles": 512,
+     "fraction": 0.19814241486068113
+    },
+    "ex2": {
+     "cycles": 1,
+     "fraction": 0.0003869969040247678
+    },
+    "gsau": {
+     "cycles": 780,
+     "fraction": 0.3018575851393189
+    },
+    "lanes": {
+     "cycles": 40,
+     "fraction": 0.015479876160990712
+    },
+    "lsu": {
+     "cycles": 84,
+     "fraction": 0.032507739938080496
+    },
+    "sdma0": {
+     "cycles": 213,
+     "fraction": 0.08243034055727554
+    },
+    "sdma1": {
+     "cycles": 559,
+     "fraction": 0.2163312693498452
+    },
+    "vlsu0": {
+     "cycles": 180,
+     "fraction": 0.0696594427244582
+    },
+    "vlsu1": {
+     "cycles": 360,
+     "fraction": 0.1393188854489164
+    }
+   },
+   "work": {
+    "arithmetic_intensity": 10.15625,
+    "array_flops": 40960,
+    "array_mac_utilization": 0.007739938080495356,
+    "flops": 41600,
+    "flops_per_cycle": 16.09907120743034,
+    "lane_flops": 640
+   }
+  },
+  "scalar_regs": "3ab7a7bc572040028bbec058319fb41ce6858daf3654dba9df066c594c336588",
+  "vector_regs": "ccc96619ff5d319f9f0d3df5d2c34cf8a19cd74196124e124126d3147c70e9ef",
+  "vector_side": {
+   "gsau_ops": 40,
+   "lane_ops": 20,
+   "mask_writes": 0,
+   "sdma_loads": 3,
+   "sdma_stores": 1,
+   "transpose_pops": 0,
+   "transpose_pushes": 0,
+   "vector_writes": 100,
+   "vlsu_loads": 60,
+   "vlsu_stores": 20,
+   "wb_conflict_cycles": 0
+  }
+ },
+ "kernel_gemm_tiled": {
+  "cycles": 1397,
+  "dcache": {
+   "evictions": 0,
+   "fill_wait_cycles": 3,
+   "fills": 2,
+   "flush_writebacks": 0,
+   "hits": 1,
+   "max_mshrs": 2,
+   "mem_wait_cycles": 12,
+   "misses": 2,
+   "present_fills": 1,
+   "requests": 10,
+   "retries": 0,
+   "secondary": 7,
+   "writebacks": 0
+  },
+  "dram": "92ceaab60505609ffd0e4daab7986aac2c7cee1530f3bb9a6ebc2619d2367bb1",
+  "flushes": 4,
+  "issue_trace": "9d955263d3cddaafe4bca9464aff4145a35714ec4fcd73848e07523652b86022",
+  "lsu": {
+   "full_cycles": 0,
+   "hits": 1,
+   "loads": 10,
+   "max_waiting": 7,
+   "misses": 9,
+   "retries": 0,
+   "stores": 0
+  },
+  "mask_regs": "729625aa961f54e43d6ae4641279ec1645306629becf1b268f757a14f0e8a7ac",
+  "packets_fetched": 194,
+  "perf": {
+   "cycle_breakdown": {
+    "frontend:icache": 325,
+    "frontend:refill": 20,
+    "halt:drain": 148,
+    "issue": 188,
+    "stall:ex4": 8,
+    "stall:hazard:branch": 26,
+    "stall:hazard:gemm": 328,
+    "stall:hazard:scalar_alu": 51,
+    "stall:hazard:scalar_muldiv": 18,
+    "stall:hazard:sdma": 59,
+    "stall:hazard:vector_lane": 32,
+    "stall:hazard:vreg_load": 168,
+    "stall:regfile": 26
+   },
+   "cycles": 1397,
+   "instruction_mix": {
+    "branch": 22,
+    "convert": 2,
+    "gemm": 8,
+    "halt": 1,
+    "scalar_alu": 81,
+    "scalar_load": 10,
+    "scalar_muldiv": 12,
+    "sdma_load": 3,
+    "sdma_store": 1,
+    "vector_lane": 8,
+    "vreg_load": 24,
+    "vreg_store": 8,
+    "weight_load": 8
+   },
+   "issue": {
+    "flushes": 4,
+    "ops": 188,
+    "ops_per_cycle": 0.13457408732999285,
+    "packets": 188,
+    "packets_fetched": 194,
+    "packets_per_cycle": 0.13457408732999285,
+    "slot_utilization": 0.25
+   },
+   "memory": {
+    "dcache": {
+     "evictions": 0,
+     "fill_wait_cycles": 3,
+     "fills": 2,
+     "flush_writebacks": 0,
+     "hits": 1,
+     "max_mshrs": 2,
+     "mem_wait_cycles": 12,
+     "misses": 2,
+     "present_fills": 1,
+     "requests": 10,
+     "retries": 0,
+     "secondary": 7,
+     "writebacks": 0
+    },
+    "dram_bursts": 352,
+    "dram_bytes": 2816,
+    "dram_bytes_per_cycle": 2.015748031496063,
+    "dram_channel_busy": 0.25196850393700787,
+    "dram_peak_bytes_per_cycle": 8,
+    "icache": {
+     "fills": 35,
+     "iwait_cycles": 200
+    },
+    "masters": {
+     "dcache": {
+      "bursts": 8,
+      "bytes": 64,
+      "read_bytes": 64,
+      "wait_cycles": 7,
+      "write_bytes": 0
+     },
+     "icache": {
+      "bursts": 280,
+      "bytes": 2240,
+      "read_bytes": 2240,
+      "wait_cycles": 25,
+      "write_bytes": 0
+     },
+     "scpad0": {
+      "bursts": 32,
+      "bytes": 256,
+      "wait_cycles": 20
+     },
+     "scpad1": {
+      "bursts": 32,
+      "bytes": 256,
+      "wait_cycles": 30
+     },
+     "scpad2": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     },
+     "scpad3": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     }
+    },
+    "scratchpad": [
+     {
+      "read_queue": 0,
+      "reads": 16,
+      "stalls": 0,
+      "tile": 0,
+      "write_queue": 0,
+      "writes": 16
+     },
+     {
+      "read_queue": 0,
+      "reads": 16,
+      "stalls": 0,
+      "tile": 1,
+      "write_queue": 0,
+      "writes": 16
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 2,
+      "write_queue": 0,
+      "writes": 0
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 3,
+      "write_queue": 0,
+      "writes": 0
+     }
+    ]
+   },
+   "unit_busy": {
+    "array": {
+     "cycles": 256,
+     "fraction": 0.18324982104509663
+    },
+    "dcache": {
+     "cycles": 192,
+     "fraction": 0.13743736578382248
+    },
+    "dram_channel": {
+     "cycles": 352,
+     "fraction": 0.25196850393700787
+    },
+    "ex2": {
+     "cycles": 2,
+     "fraction": 0.0014316392269148174
+    },
+    "ex4": {
+     "cycles": 24,
+     "fraction": 0.01717967072297781
+    },
+    "gsau": {
+     "cycles": 312,
+     "fraction": 0.22333571939871152
+    },
+    "lanes": {
+     "cycles": 16,
+     "fraction": 0.01145311381531854
+    },
+    "lsu": {
+     "cycles": 64,
+     "fraction": 0.04581245526127416
+    },
+    "sdma0": {
+     "cycles": 100,
+     "fraction": 0.07158196134574088
+    },
+    "sdma1": {
+     "cycles": 84,
+     "fraction": 0.06012884753042233
+    },
+    "vlsu0": {
+     "cycles": 144,
+     "fraction": 0.10307802433786686
+    },
+    "vlsu1": {
+     "cycles": 72,
+     "fraction": 0.05153901216893343
+    }
+   },
+   "work": {
+    "arithmetic_intensity": 5.909090909090909,
+    "array_flops": 16384,
+    "array_mac_utilization": 0.00572655690765927,
+    "flops": 16640,
+    "flops_per_cycle": 11.911238367931281,
+    "lane_flops": 256
+   }
+  },
+  "scalar_regs": "e8ed7ef11c44d45d56afd5ef6bbd9b67afa706adde648f48e921d56a2819b904",
+  "vector_regs": "a71074cad6ef6f9746ed702b2b1724f1e88dbb417e667af861b85550c0d04163",
+  "vector_side": {
+   "gsau_ops": 16,
+   "lane_ops": 8,
+   "mask_writes": 0,
+   "sdma_loads": 3,
+   "sdma_stores": 1,
+   "transpose_pops": 0,
+   "transpose_pushes": 0,
+   "vector_writes": 40,
+   "vlsu_loads": 24,
+   "vlsu_stores": 8,
+   "wb_conflict_cycles": 0
+  }
+ },
+ "kernel_layernorm_4x4_active.c": {
+  "cycles": 873,
+  "dcache": {
+   "evictions": 0,
+   "fill_wait_cycles": 1,
+   "fills": 2,
+   "flush_writebacks": 1,
+   "hits": 5,
+   "max_mshrs": 2,
+   "mem_wait_cycles": 29,
+   "misses": 2,
+   "present_fills": 0,
+   "requests": 8,
+   "retries": 0,
+   "secondary": 1,
+   "writebacks": 0
+  },
+  "dram": "f7e05ed0ff1c9fd70ac7bcd3e14be62344c6be751402b9ced8f8b4cfd89a45fe",
+  "flushes": 2,
+  "issue_trace": "a3328f0b675f59749307c3dbcd263c3731091df987d91d746a6573a135ac359a",
+  "lsu": {
+   "full_cycles": 0,
+   "hits": 5,
+   "loads": 6,
+   "max_waiting": 1,
+   "misses": 3,
+   "retries": 0,
+   "stores": 2
+  },
+  "mask_regs": "853ea2793f496e0728e2f1b6dc9642f6d07d5da3048b29e3d3817f2ef2ee84cf",
+  "packets_fetched": 137,
+  "perf": {
+   "cycle_breakdown": {
+    "frontend:icache": 358,
+    "frontend:refill": 13,
+    "halt:drain": 180,
+    "issue": 134,
+    "stall:hazard:move": 26,
+    "stall:hazard:scalar_alu": 45,
+    "stall:hazard:scalar_bf16": 21,
+    "stall:hazard:scalar_load": 9,
+    "stall:hazard:scalar_muldiv": 3,
+    "stall:hazard:sdma": 49,
+    "stall:hazard:vector_lane": 20,
+    "stall:hazard:vector_reduce": 3,
+    "stall:regfile": 12
+   },
+   "cycles": 873,
+   "instruction_mix": {
+    "branch": 2,
+    "convert": 29,
+    "halt": 1,
+    "move": 1,
+    "scalar_alu": 82,
+    "scalar_bf16": 3,
+    "scalar_load": 6,
+    "scalar_muldiv": 2,
+    "scalar_store": 2,
+    "sdma_load": 1,
+    "sdma_store": 1,
+    "vector_lane": 26,
+    "vector_reduce": 8,
+    "vreg_load": 4,
+    "vreg_store": 4
+   },
+   "issue": {
+    "flushes": 2,
+    "ops": 172,
+    "ops_per_cycle": 0.1970217640320733,
+    "packets": 134,
+    "packets_fetched": 137,
+    "packets_per_cycle": 0.15349369988545247,
+    "slot_utilization": 0.3208955223880597
+   },
+   "memory": {
+    "dcache": {
+     "evictions": 0,
+     "fill_wait_cycles": 1,
+     "fills": 2,
+     "flush_writebacks": 1,
+     "hits": 5,
+     "max_mshrs": 2,
+     "mem_wait_cycles": 29,
+     "misses": 2,
+     "present_fills": 0,
+     "requests": 8,
+     "retries": 0,
+     "secondary": 1,
+     "writebacks": 0
+    },
+    "dram_bursts": 432,
+    "dram_bytes": 3456,
+    "dram_bytes_per_cycle": 3.9587628865979383,
+    "dram_channel_busy": 0.4948453608247423,
+    "dram_peak_bytes_per_cycle": 8,
+    "icache": {
+     "fills": 43,
+     "iwait_cycles": 218
+    },
+    "masters": {
+     "dcache": {
+      "bursts": 24,
+      "bytes": 192,
+      "read_bytes": 128,
+      "wait_cycles": 19,
+      "write_bytes": 64
+     },
+     "icache": {
+      "bursts": 344,
+      "bytes": 2752,
+      "read_bytes": 2752,
+      "wait_cycles": 8,
+      "write_bytes": 0
+     },
+     "scpad0": {
+      "bursts": 64,
+      "bytes": 512,
+      "wait_cycles": 61
+     },
+     "scpad1": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     },
+     "scpad2": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     },
+     "scpad3": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     }
+    },
+    "scratchpad": [
+     {
+      "read_queue": 0,
+      "reads": 8,
+      "stalls": 0,
+      "tile": 0,
+      "write_queue": 0,
+      "writes": 8
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 1,
+      "write_queue": 0,
+      "writes": 0
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 2,
+      "write_queue": 0,
+      "writes": 0
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 3,
+      "write_queue": 0,
+      "writes": 0
+     }
+    ]
+   },
+   "unit_busy": {
+    "dcache": {
+     "cycles": 253,
+     "fraction": 0.2898052691867125
+    },
+    "dram_channel": {
+     "cycles": 432,
+     "fraction": 0.4948453608247423
+    },
+    "ex2": {
+     "cycles": 51,
+     "fraction": 0.058419243986254296
+    },
+    "ex3": {
+     "cycles": 1,
+     "fraction": 0.001145475372279496
+    },
+    "ex4": {
+     "cycles": 4,
+     "fraction": 0.004581901489117984
+    },
+    "lanes": {
+     "cycles": 92,
+     "fraction": 0.10538373424971363
+    },
+    "lsu": {
+     "cycles": 94,
+     "fraction": 0.10767468499427263
+    },
+    "sdma0": {
+     "cycles": 100,
+     "fraction": 0.1145475372279496
+    },
+    "vlsu0": {
+     "cycles": 36,
+     "fraction": 0.041237113402061855
+    }
+   },
+   "work": {
+    "arithmetic_intensity": 0.3148148148148148,
+    "array_flops": 0,
+    "array_mac_utilization": 0.0,
+    "flops": 1088,
+    "flops_per_cycle": 1.2462772050400917,
+    "lane_flops": 1088
+   }
+  },
+  "scalar_regs": "dbb6b4c13f4769459e4f7ce9e60b92548956e6303c4a29053450547166c92a0d",
+  "vector_regs": "19d63199b5a81b58023a362c418544322b64be29134b2b41cf2514ad62e480b8",
+  "vector_side": {
+   "gsau_ops": 0,
+   "lane_ops": 34,
+   "mask_writes": 0,
+   "sdma_loads": 1,
+   "sdma_stores": 1,
+   "transpose_pops": 0,
+   "transpose_pushes": 0,
+   "vector_writes": 38,
+   "vlsu_loads": 4,
+   "vlsu_stores": 4,
+   "wb_conflict_cycles": 0
+  }
+ },
+ "kernel_layernorm_param": {
+  "cycles": 4034,
+  "dcache": {
+   "evictions": 0,
+   "fill_wait_cycles": 3,
+   "fills": 2,
+   "flush_writebacks": 0,
+   "hits": 1,
+   "max_mshrs": 2,
+   "mem_wait_cycles": 24,
+   "misses": 2,
+   "present_fills": 0,
+   "requests": 3,
+   "retries": 0,
+   "secondary": 0,
+   "writebacks": 0
+  },
+  "dram": "1b61ea3b597bca856f0179d24a0e29df7813b51cfbdce249a61d142086d99274",
+  "flushes": 0,
+  "issue_trace": "479655f28f4ac91bd287996e51f0495f28838d0499e1157fe692f9a4d2358422",
+  "lsu": {
+   "full_cycles": 0,
+   "hits": 1,
+   "loads": 3,
+   "max_waiting": 2,
+   "misses": 2,
+   "retries": 0,
+   "stores": 0
+  },
+  "mask_regs": "70ec11b33ff60b660ddfa335e2023d41b72319f70bd83c4310fa83ae70c0d643",
+  "packets_fetched": 354,
+  "perf": {
+   "cycle_breakdown": {
+    "frontend:icache": 800,
+    "frontend:refill": 30,
+    "halt:drain": 398,
+    "issue": 354,
+    "stall:alu": 19,
+    "stall:ex2": 3,
+    "stall:hazard:convert": 2,
+    "stall:hazard:move": 2,
+    "stall:hazard:scalar_alu": 6,
+    "stall:hazard:scalar_bf16": 26,
+    "stall:hazard:scalar_load": 19,
+    "stall:hazard:sdma": 242,
+    "stall:hazard:vector_lane": 39,
+    "stall:hazard:vector_reduce": 1974,
+    "stall:hazard:vreg_load": 11,
+    "stall:mul": 31,
+    "stall:regfile": 78
+   },
+   "cycles": 4034,
+   "instruction_mix": {
+    "convert": 2,
+    "halt": 1,
+    "move": 1,
+    "scalar_alu": 49,
+    "scalar_bf16": 3,
+    "scalar_load": 3,
+    "sdma_load": 1,
+    "sdma_store": 1,
+    "vector_lane": 165,
+    "vector_reduce": 64,
+    "vreg_load": 32,
+    "vreg_store": 32
+   },
+   "issue": {
+    "flushes": 0,
+    "ops": 354,
+    "ops_per_cycle": 0.08775409023301933,
+    "packets": 354,
+    "packets_fetched": 354,
+    "packets_per_cycle": 0.08775409023301933,
+    "slot_utilization": 0.25
+   },
+   "memory": {
+    "dcache": {
+     "evictions": 0,
+     "fill_wait_cycles": 3,
+     "fills": 2,
+     "flush_writebacks": 0,
+     "hits": 1,
+     "max_mshrs": 2,
+     "mem_wait_cycles": 24,
+     "misses": 2,
+     "present_fills": 0,
+     "requests": 3,
+     "retries": 0,
+     "secondary": 0,
+     "writebacks": 0
+    },
+    "dram_bursts": 1416,
+    "dram_bytes": 11328,
+    "dram_bytes_per_cycle": 2.8081308874566187,
+    "dram_channel_busy": 0.35101636093207733,
+    "dram_peak_bytes_per_cycle": 8,
+    "icache": {
+     "fills": 111,
+     "iwait_cycles": 589
+    },
+    "masters": {
+     "dcache": {
+      "bursts": 16,
+      "bytes": 128,
+      "read_bytes": 128,
+      "wait_cycles": 14,
+      "write_bytes": 0
+     },
+     "icache": {
+      "bursts": 888,
+      "bytes": 7104,
+      "read_bytes": 7104,
+      "wait_cycles": 34,
+      "write_bytes": 0
+     },
+     "scpad0": {
+      "bursts": 512,
+      "bytes": 4096,
+      "wait_cycles": 418
+     },
+     "scpad1": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     },
+     "scpad2": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     },
+     "scpad3": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     }
+    },
+    "scratchpad": [
+     {
+      "read_queue": 0,
+      "reads": 64,
+      "stalls": 0,
+      "tile": 0,
+      "write_queue": 0,
+      "writes": 64
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 1,
+      "write_queue": 0,
+      "writes": 0
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 2,
+      "write_queue": 0,
+      "writes": 0
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 3,
+      "write_queue": 0,
+      "writes": 0
+     }
+    ]
+   },
+   "unit_busy": {
+    "dcache": {
+     "cycles": 219,
+     "fraction": 0.05428854734754586
+    },
+    "dram_channel": {
+     "cycles": 1416,
+     "fraction": 0.35101636093207733
+    },
+    "ex2": {
+     "cycles": 35,
+     "fraction": 0.008676251859196828
+    },
+    "lanes": {
+     "cycles": 2442,
+     "fraction": 0.6053544868616758
+    },
+    "lsu": {
+     "cycles": 91,
+     "fraction": 0.02255825483391175
+    },
+    "sdma0": {
+     "cycles": 714,
+     "fraction": 0.17699553792761527
+    },
+    "vlsu0": {
+     "cycles": 288,
+     "fraction": 0.07139315815567675
+    }
+   },
+   "work": {
+    "arithmetic_intensity": 0.6468926553672316,
+    "array_flops": 0,
+    "array_mac_utilization": 0.0,
+    "flops": 7328,
+    "flops_per_cycle": 1.8165592464055529,
+    "lane_flops": 7328
+   }
+  },
+  "scalar_regs": "6b0c2a925c5027fd696eb057c1982c51143c06bcab8d223b2aba6a34565a28ac",
+  "vector_regs": "da66f9e2b8514bbf953069432edca3ab3c6d6f64ed09d595da3d5cba08da85b9",
+  "vector_side": {
+   "gsau_ops": 0,
+   "lane_ops": 229,
+   "mask_writes": 0,
+   "sdma_loads": 1,
+   "sdma_stores": 1,
+   "transpose_pops": 0,
+   "transpose_pushes": 0,
+   "vector_writes": 261,
+   "vlsu_loads": 32,
+   "vlsu_stores": 32,
+   "wb_conflict_cycles": 0
+  }
+ },
+ "kernel_maxpool": {
+  "cycles": 1415,
+  "dcache": {
+   "evictions": 0,
+   "fill_wait_cycles": 3,
+   "fills": 2,
+   "flush_writebacks": 0,
+   "hits": 0,
+   "max_mshrs": 2,
+   "mem_wait_cycles": 12,
+   "misses": 2,
+   "present_fills": 0,
+   "requests": 4,
+   "retries": 0,
+   "secondary": 2,
+   "writebacks": 0
+  },
+  "dram": "46a7454362ce60787754f81895db44bd6732b23650897d670bd925c014d6c549",
+  "flushes": 2,
+  "issue_trace": "99dcad454fa776baf6fbb84a9e9a6ea200bb365fdcdb443aa6d5196a71e751ba",
+  "lsu": {
+   "full_cycles": 0,
+   "hits": 0,
+   "loads": 4,
+   "max_waiting": 4,
+   "misses": 4,
+   "retries": 0,
+   "stores": 0
+  },
+  "mask_regs": "86b92dc1206d1cd06c291136a05ff7429d210fb1fd3e3e4ce1c7eff86faf7144",
+  "packets_fetched": 197,
+  "perf": {
+   "cycle_breakdown": {
+    "frontend:icache": 96,
+    "frontend:refill": 4,
+    "halt:drain": 270,
+    "issue": 195,
+    "stall:hazard:branch": 29,
+    "stall:hazard:scalar_alu": 66,
+    "stall:hazard:scalar_load": 51,
+    "stall:hazard:sdma": 358,
+    "stall:hazard:vector_lane": 124,
+    "stall:hazard:vreg_load": 124,
+    "stall:regfile": 98
+   },
+   "cycles": 1415,
+   "instruction_mix": {
+    "branch": 32,
+    "convert": 1,
+    "halt": 1,
+    "scalar_alu": 58,
+    "scalar_load": 4,
+    "sdma_load": 1,
+    "sdma_store": 1,
+    "vector_lane": 49,
+    "vreg_load": 32,
+    "vreg_store": 16
+   },
+   "issue": {
+    "flushes": 2,
+    "ops": 195,
+    "ops_per_cycle": 0.13780918727915195,
+    "packets": 195,
+    "packets_fetched": 197,
+    "packets_per_cycle": 0.13780918727915195,
+    "slot_utilization": 0.25
+   },
+   "memory": {
+    "dcache": {
+     "evictions": 0,
+     "fill_wait_cycles": 3,
+     "fills": 2,
+     "flush_writebacks": 0,
+     "hits": 0,
+     "max_mshrs": 2,
+     "mem_wait_cycles": 12,
+     "misses": 2,
+     "present_fills": 0,
+     "requests": 4,
+     "retries": 0,
+     "secondary": 2,
+     "writebacks": 0
+    },
+    "dram_bursts": 480,
+    "dram_bytes": 3840,
+    "dram_bytes_per_cycle": 2.7137809187279154,
+    "dram_channel_busy": 0.3392226148409894,
+    "dram_peak_bytes_per_cycle": 8,
+    "icache": {
+     "fills": 10,
+     "iwait_cycles": 62
+    },
+    "masters": {
+     "dcache": {
+      "bursts": 16,
+      "bytes": 128,
+      "read_bytes": 128,
+      "wait_cycles": 2,
+      "write_bytes": 0
+     },
+     "icache": {
+      "bursts": 80,
+      "bytes": 640,
+      "read_bytes": 640,
+      "wait_cycles": 12,
+      "write_bytes": 0
+     },
+     "scpad0": {
+      "bursts": 256,
+      "bytes": 2048,
+      "wait_cycles": 120
+     },
+     "scpad1": {
+      "bursts": 128,
+      "bytes": 1024,
+      "wait_cycles": 128
+     },
+     "scpad2": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     },
+     "scpad3": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     }
+    },
+    "scratchpad": [
+     {
+      "read_queue": 0,
+      "reads": 32,
+      "stalls": 0,
+      "tile": 0,
+      "write_queue": 0,
+      "writes": 32
+     },
+     {
+      "read_queue": 0,
+      "reads": 16,
+      "stalls": 0,
+      "tile": 1,
+      "write_queue": 0,
+      "writes": 16
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 2,
+      "write_queue": 0,
+      "writes": 0
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 3,
+      "write_queue": 0,
+      "writes": 0
+     }
+    ]
+   },
+   "unit_busy": {
+    "dcache": {
+     "cycles": 203,
+     "fraction": 0.14346289752650176
+    },
+    "dram_channel": {
+     "cycles": 480,
+     "fraction": 0.3392226148409894
+    },
+    "ex2": {
+     "cycles": 1,
+     "fraction": 0.0007067137809187279
+    },
+    "lanes": {
+     "cycles": 98,
+     "fraction": 0.06925795053003533
+    },
+    "lsu": {
+     "cycles": 77,
+     "fraction": 0.05441696113074205
+    },
+    "sdma0": {
+     "cycles": 404,
+     "fraction": 0.2855123674911661
+    },
+    "sdma1": {
+     "cycles": 139,
+     "fraction": 0.09823321554770319
+    },
+    "vlsu0": {
+     "cycles": 240,
+     "fraction": 0.1696113074204947
+    }
+   },
+   "work": {
+    "arithmetic_intensity": 0.4083333333333333,
+    "array_flops": 0,
+    "array_mac_utilization": 0.0,
+    "flops": 1568,
+    "flops_per_cycle": 1.1081272084805653,
+    "lane_flops": 1568
+   }
+  },
+  "scalar_regs": "dadfd9fd27ebd7a648d361a97e31247f217ba89a6284f77d656098dafbd820ef",
+  "vector_regs": "d6fed4dc0b2c33c8fdff320872188a0230a1f7d8d4067f460b4d885bc18668e8",
+  "vector_side": {
+   "gsau_ops": 0,
+   "lane_ops": 49,
+   "mask_writes": 16,
+   "sdma_loads": 1,
+   "sdma_stores": 1,
+   "transpose_pops": 0,
+   "transpose_pushes": 0,
+   "vector_writes": 65,
+   "vlsu_loads": 32,
+   "vlsu_stores": 16,
+   "wb_conflict_cycles": 0
+  }
+ },
+ "kernel_maxpool.c": {
+  "cycles": 876,
+  "dcache": {
+   "evictions": 0,
+   "fill_wait_cycles": 3,
+   "fills": 3,
+   "flush_writebacks": 1,
+   "hits": 8,
+   "max_mshrs": 2,
+   "mem_wait_cycles": 23,
+   "misses": 3,
+   "present_fills": 0,
+   "requests": 12,
+   "retries": 0,
+   "secondary": 1,
+   "writebacks": 0
+  },
+  "dram": "38baa82588b4292d2642a0cf9d9d6cecda9a4c17e3c780ad2704874feebebe11",
+  "flushes": 11,
+  "issue_trace": "977333b3274c914e899cd18e10197bc61df938fb8b2b43618a8f69c176b09ebb",
+  "lsu": {
+   "full_cycles": 0,
+   "hits": 8,
+   "loads": 6,
+   "max_waiting": 1,
+   "misses": 4,
+   "retries": 0,
+   "stores": 6
+  },
+  "mask_regs": "74e7f0363c372c876b279e71d2e3a7d39e8659a0258a132be98feac4bd67add1",
+  "packets_fetched": 229,
+  "perf": {
+   "cycle_breakdown": {
+    "frontend:icache": 367,
+    "frontend:refill": 103,
+    "halt:drain": 155,
+    "issue": 110,
+    "stall:hazard:branch": 8,
+    "stall:hazard:move": 24,
+    "stall:hazard:scalar_alu": 19,
+    "stall:hazard:scalar_load": 76,
+    "stall:hazard:scalar_muldiv": 6,
+    "stall:regfile": 8
+   },
+   "cycles": 876,
+   "instruction_mix": {
+    "branch": 16,
+    "convert": 9,
+    "halt": 1,
+    "move": 4,
+    "scalar_alu": 54,
+    "scalar_load": 6,
+    "scalar_muldiv": 6,
+    "scalar_store": 6,
+    "sdma_load": 1,
+    "sdma_store": 1,
+    "vector_lane": 9,
+    "vreg_load": 9,
+    "vreg_store": 4
+   },
+   "issue": {
+    "flushes": 11,
+    "ops": 126,
+    "ops_per_cycle": 0.14383561643835616,
+    "packets": 110,
+    "packets_fetched": 229,
+    "packets_per_cycle": 0.12557077625570776,
+    "slot_utilization": 0.2863636363636364
+   },
+   "memory": {
+    "dcache": {
+     "evictions": 0,
+     "fill_wait_cycles": 3,
+     "fills": 3,
+     "flush_writebacks": 1,
+     "hits": 8,
+     "max_mshrs": 2,
+     "mem_wait_cycles": 23,
+     "misses": 3,
+     "present_fills": 0,
+     "requests": 12,
+     "retries": 0,
+     "secondary": 1,
+     "writebacks": 0
+    },
+    "dram_bursts": 312,
+    "dram_bytes": 2496,
+    "dram_bytes_per_cycle": 2.8493150684931505,
+    "dram_channel_busy": 0.3561643835616438,
+    "dram_peak_bytes_per_cycle": 8,
+    "icache": {
+     "fills": 32,
+     "iwait_cycles": 172
+    },
+    "masters": {
+     "dcache": {
+      "bursts": 32,
+      "bytes": 256,
+      "read_bytes": 192,
+      "wait_cycles": 8,
+      "write_bytes": 64
+     },
+     "icache": {
+      "bursts": 256,
+      "bytes": 2048,
+      "read_bytes": 2048,
+      "wait_cycles": 12,
+      "write_bytes": 0
+     },
+     "scpad0": {
+      "bursts": 24,
+      "bytes": 192,
+      "wait_cycles": 19
+     },
+     "scpad1": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     },
+     "scpad2": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     },
+     "scpad3": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     }
+    },
+    "scratchpad": [
+     {
+      "read_queue": 0,
+      "reads": 13,
+      "stalls": 0,
+      "tile": 0,
+      "write_queue": 0,
+      "writes": 12
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 1,
+      "write_queue": 0,
+      "writes": 0
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 2,
+      "write_queue": 0,
+      "writes": 0
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 3,
+      "write_queue": 0,
+      "writes": 0
+     }
+    ]
+   },
+   "unit_busy": {
+    "dcache": {
+     "cycles": 313,
+     "fraction": 0.3573059360730594
+    },
+    "dram_channel": {
+     "cycles": 312,
+     "fraction": 0.3561643835616438
+    },
+    "ex2": {
+     "cycles": 9,
+     "fraction": 0.010273972602739725
+    },
+    "ex4": {
+     "cycles": 12,
+     "fraction": 0.0136986301369863
+    },
+    "lanes": {
+     "cycles": 18,
+     "fraction": 0.02054794520547945
+    },
+    "lsu": {
+     "cycles": 153,
+     "fraction": 0.17465753424657535
+    },
+    "sdma0": {
+     "cycles": 73,
+     "fraction": 0.08333333333333333
+    },
+    "vlsu0": {
+     "cycles": 62,
+     "fraction": 0.07077625570776255
+    }
+   },
+   "work": {
+    "arithmetic_intensity": 0.11538461538461539,
+    "array_flops": 0,
+    "array_mac_utilization": 0.0,
+    "flops": 288,
+    "flops_per_cycle": 0.3287671232876712,
+    "lane_flops": 288
+   }
+  },
+  "scalar_regs": "1dc701e498c21dd6377a41f6fb19cb232d3e7a82ba4a8a7d1882734d15f1293a",
+  "vector_regs": "03bc7fc9853098d016e622dc6d99079ff48ef7ded6fcf0a619c5f291461158ab",
+  "vector_side": {
+   "gsau_ops": 0,
+   "lane_ops": 9,
+   "mask_writes": 4,
+   "sdma_loads": 1,
+   "sdma_stores": 1,
+   "transpose_pops": 0,
+   "transpose_pushes": 0,
+   "vector_writes": 14,
+   "vlsu_loads": 9,
+   "vlsu_stores": 4,
+   "wb_conflict_cycles": 0
+  }
+ },
+ "kernel_relu": {
+  "cycles": 2105,
+  "dcache": {
+   "evictions": 0,
+   "fill_wait_cycles": 3,
+   "fills": 2,
+   "flush_writebacks": 0,
+   "hits": 0,
+   "max_mshrs": 2,
+   "mem_wait_cycles": 25,
+   "misses": 2,
+   "present_fills": 0,
+   "requests": 2,
+   "retries": 0,
+   "secondary": 0,
+   "writebacks": 0
+  },
+  "dram": "4d7b8181e9f1dbefe2533d80848ec0ee73e0af575e25028ea392bd21011d8685",
+  "flushes": 0,
+  "issue_trace": "6b4b27db5f89a1150dbfd1c2473e49da4686e4c6d89bb24558499f9f34f13bfd",
+  "lsu": {
+   "full_cycles": 0,
+   "hits": 0,
+   "loads": 2,
+   "max_waiting": 2,
+   "misses": 2,
+   "retries": 0,
+   "stores": 0
+  },
+  "mask_regs": "014829ecc77f3fb07c302a4cdf07142df56e28884c62ba6a922938394a699232",
+  "packets_fetched": 240,
+  "perf": {
+   "cycle_breakdown": {
+    "frontend:icache": 467,
+    "frontend:refill": 14,
+    "halt:drain": 398,
+    "issue": 239,
+    "stall:hazard:scalar_alu": 39,
+    "stall:hazard:scalar_load": 20,
+    "stall:hazard:sdma": 384,
+    "stall:hazard:vector_lane": 112,
+    "stall:hazard:vreg_load": 304,
+    "stall:regfile": 128
+   },
+   "cycles": 2105,
+   "instruction_mix": {
+    "convert": 1,
+    "halt": 1,
+    "scalar_alu": 72,
+    "scalar_load": 2,
+    "sdma_load": 1,
+    "sdma_store": 1,
+    "vector_lane": 97,
+    "vreg_load": 32,
+    "vreg_store": 32
+   },
+   "issue": {
+    "flushes": 0,
+    "ops": 239,
+    "ops_per_cycle": 0.11353919239904989,
+    "packets": 239,
+    "packets_fetched": 240,
+    "packets_per_cycle": 0.11353919239904989,
+    "slot_utilization": 0.25
+   },
+   "memory": {
+    "dcache": {
+     "evictions": 0,
+     "fill_wait_cycles": 3,
+     "fills": 2,
+     "flush_writebacks": 0,
+     "hits": 0,
+     "max_mshrs": 2,
+     "mem_wait_cycles": 25,
+     "misses": 2,
+     "present_fills": 0,
+     "requests": 2,
+     "retries": 0,
+     "secondary": 0,
+     "writebacks": 0
+    },
+    "dram_bursts": 1128,
+    "dram_bytes": 9024,
+    "dram_bytes_per_cycle": 4.286935866983373,
+    "dram_channel_busy": 0.5358669833729216,
+    "dram_peak_bytes_per_cycle": 8,
+    "icache": {
+     "fills": 75,
+     "iwait_cycles": 383
+    },
+    "masters": {
+     "dcache": {
+      "bursts": 16,
+      "bytes": 128,
+      "read_bytes": 128,
+      "wait_cycles": 15,
+      "write_bytes": 0
+     },
+     "icache": {
+      "bursts": 600,
+      "bytes": 4800,
+      "read_bytes": 4800,
+      "wait_cycles": 8,
+      "write_bytes": 0
+     },
+     "scpad0": {
+      "bursts": 512,
+      "bytes": 4096,
+      "wait_cycles": 380
+     },
+     "scpad1": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     },
+     "scpad2": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     },
+     "scpad3": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     }
+    },
+    "scratchpad": [
+     {
+      "read_queue": 0,
+      "reads": 64,
+      "stalls": 0,
+      "tile": 0,
+      "write_queue": 0,
+      "writes": 64
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 1,
+      "write_queue": 0,
+      "writes": 0
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 2,
+      "write_queue": 0,
+      "writes": 0
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 3,
+      "write_queue": 0,
+      "writes": 0
+     }
+    ]
+   },
+   "unit_busy": {
+    "dcache": {
+     "cycles": 216,
+     "fraction": 0.10261282660332542
+    },
+    "dram_channel": {
+     "cycles": 1128,
+     "fraction": 0.5358669833729216
+    },
+    "ex2": {
+     "cycles": 1,
+     "fraction": 0.00047505938242280285
+    },
+    "lanes": {
+     "cycles": 194,
+     "fraction": 0.09216152019002376
+    },
+    "lsu": {
+     "cycles": 88,
+     "fraction": 0.04180522565320665
+    },
+    "sdma0": {
+     "cycles": 675,
+     "fraction": 0.32066508313539194
+    },
+    "vlsu0": {
+     "cycles": 288,
+     "fraction": 0.1368171021377672
+    }
+   },
+   "work": {
+    "arithmetic_intensity": 0.34397163120567376,
+    "array_flops": 0,
+    "array_mac_utilization": 0.0,
+    "flops": 3104,
+    "flops_per_cycle": 1.4745843230403801,
+    "lane_flops": 3104
+   }
+  },
+  "scalar_regs": "178d25cda6081f743bce3add181cf7fb0d31c2b9cd77a1c8c4b32e2c4bc69910",
+  "vector_regs": "a752d7083339b95358991f43832179f4cbeab8d709956a60d3eee92464518ea5",
+  "vector_side": {
+   "gsau_ops": 0,
+   "lane_ops": 97,
+   "mask_writes": 32,
+   "sdma_loads": 1,
+   "sdma_stores": 1,
+   "transpose_pops": 0,
+   "transpose_pushes": 0,
+   "vector_writes": 97,
+   "vlsu_loads": 32,
+   "vlsu_stores": 32,
+   "wb_conflict_cycles": 0
+  }
+ },
+ "kernel_relu.c": {
+  "cycles": 830,
+  "dcache": {
+   "evictions": 0,
+   "fill_wait_cycles": 3,
+   "fills": 3,
+   "flush_writebacks": 1,
+   "hits": 7,
+   "max_mshrs": 2,
+   "mem_wait_cycles": 23,
+   "misses": 3,
+   "present_fills": 0,
+   "requests": 11,
+   "retries": 0,
+   "secondary": 1,
+   "writebacks": 0
+  },
+  "dram": "88b02161dac8be7d0ef6d3208f96cda6ad75cda9b4c06f6e3ad4a1b3fdf39871",
+  "flushes": 7,
+  "issue_trace": "4a3589661fdf351c907c30fea840db82fc84dd0823c39cac3e53c1a761351716",
+  "lsu": {
+   "full_cycles": 0,
+   "hits": 7,
+   "loads": 6,
+   "max_waiting": 1,
+   "misses": 4,
+   "retries": 0,
+   "stores": 5
+  },
+  "mask_regs": "94b75a68cd9b617ff78cfa09f0164f5a726b1b4af8fedb3dd6ce881a9fb0f5ca",
+  "packets_fetched": 197,
+  "perf": {
+   "cycle_breakdown": {
+    "frontend:icache": 313,
+    "frontend:refill": 96,
+    "halt:drain": 188,
+    "issue": 86,
+    "stall:hazard:branch": 7,
+    "stall:hazard:move": 29,
+    "stall:hazard:scalar_alu": 17,
+    "stall:hazard:scalar_load": 74,
+    "stall:hazard:sdma": 13,
+    "stall:hazard:vector_lane": 3,
+    "stall:regfile": 4
+   },
+   "cycles": 830,
+   "instruction_mix": {
+    "branch": 11,
+    "convert": 9,
+    "halt": 1,
+    "move": 4,
+    "scalar_alu": 42,
+    "scalar_load": 6,
+    "scalar_store": 5,
+    "sdma_load": 1,
+    "sdma_store": 1,
+    "vector_lane": 9,
+    "vreg_load": 5,
+    "vreg_store": 4
+   },
+   "issue": {
+    "flushes": 7,
+    "ops": 98,
+    "ops_per_cycle": 0.1180722891566265,
+    "packets": 86,
+    "packets_fetched": 197,
+    "packets_per_cycle": 0.10361445783132531,
+    "slot_utilization": 0.28488372093023256
+   },
+   "memory": {
+    "dcache": {
+     "evictions": 0,
+     "fill_wait_cycles": 3,
+     "fills": 3,
+     "flush_writebacks": 1,
+     "hits": 7,
+     "max_mshrs": 2,
+     "mem_wait_cycles": 23,
+     "misses": 3,
+     "present_fills": 0,
+     "requests": 11,
+     "retries": 0,
+     "secondary": 1,
+     "writebacks": 0
+    },
+    "dram_bursts": 312,
+    "dram_bytes": 2496,
+    "dram_bytes_per_cycle": 3.0072289156626506,
+    "dram_channel_busy": 0.3759036144578313,
+    "dram_peak_bytes_per_cycle": 8,
+    "icache": {
+     "fills": 27,
+     "iwait_cycles": 146
+    },
+    "masters": {
+     "dcache": {
+      "bursts": 32,
+      "bytes": 256,
+      "read_bytes": 192,
+      "wait_cycles": 8,
+      "write_bytes": 64
+     },
+     "icache": {
+      "bursts": 216,
+      "bytes": 1728,
+      "read_bytes": 1728,
+      "wait_cycles": 11,
+      "write_bytes": 0
+     },
+     "scpad0": {
+      "bursts": 64,
+      "bytes": 512,
+      "wait_cycles": 77
+     },
+     "scpad1": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     },
+     "scpad2": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     },
+     "scpad3": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     }
+    },
+    "scratchpad": [
+     {
+      "read_queue": 0,
+      "reads": 9,
+      "stalls": 0,
+      "tile": 0,
+      "write_queue": 0,
+      "writes": 8
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 1,
+      "write_queue": 0,
+      "writes": 0
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 2,
+      "write_queue": 0,
+      "writes": 0
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 3,
+      "write_queue": 0,
+      "writes": 0
+     }
+    ]
+   },
+   "unit_busy": {
+    "dcache": {
+     "cycles": 304,
+     "fraction": 0.36626506024096384
+    },
+    "dram_channel": {
+     "cycles": 312,
+     "fraction": 0.3759036144578313
+    },
+    "ex2": {
+     "cycles": 9,
+     "fraction": 0.010843373493975903
+    },
+    "lanes": {
+     "cycles": 18,
+     "fraction": 0.021686746987951807
+    },
+    "lsu": {
+     "cycles": 144,
+     "fraction": 0.17349397590361446
+    },
+    "sdma0": {
+     "cycles": 118,
+     "fraction": 0.14216867469879518
+    },
+    "vlsu0": {
+     "cycles": 45,
+     "fraction": 0.05421686746987952
+    }
+   },
+   "work": {
+    "arithmetic_intensity": 0.11538461538461539,
+    "array_flops": 0,
+    "array_mac_utilization": 0.0,
+    "flops": 288,
+    "flops_per_cycle": 0.3469879518072289,
+    "lane_flops": 288
+   }
+  },
+  "scalar_regs": "e997ede1e81e15e70bef8e0d6b9c834a5c42025ea10375f455642448c0c9d623",
+  "vector_regs": "93bd4a2f1c301d9ddcbc9990301f75a1a239e586f2b9450e6bac307f74f076c8",
+  "vector_side": {
+   "gsau_ops": 0,
+   "lane_ops": 9,
+   "mask_writes": 4,
+   "sdma_loads": 1,
+   "sdma_stores": 1,
+   "transpose_pops": 0,
+   "transpose_pushes": 0,
+   "vector_writes": 10,
+   "vlsu_loads": 5,
+   "vlsu_stores": 4,
+   "wb_conflict_cycles": 0
+  }
+ },
+ "kernel_sigmoid": {
+  "cycles": 441,
+  "dcache": {
+   "evictions": 0,
+   "fill_wait_cycles": 3,
+   "fills": 1,
+   "flush_writebacks": 0,
+   "hits": 0,
+   "max_mshrs": 1,
+   "mem_wait_cycles": 10,
+   "misses": 1,
+   "present_fills": 0,
+   "requests": 2,
+   "retries": 0,
+   "secondary": 1,
+   "writebacks": 0
+  },
+  "dram": "9dfbf74e6df50e2c3751444a460d299eea3996cd25919b7509ecebf085b7cfe8",
+  "flushes": 0,
+  "issue_trace": "8a51f6f89d1a8fc9503d853453ccef09704827d6bb76bd1e7c5c6059c1bf950b",
+  "lsu": {
+   "full_cycles": 0,
+   "hits": 0,
+   "loads": 2,
+   "max_waiting": 2,
+   "misses": 2,
+   "retries": 0,
+   "stores": 0
+  },
+  "mask_regs": "70ec11b33ff60b660ddfa335e2023d41b72319f70bd83c4310fa83ae70c0d643",
+  "packets_fetched": 38,
+  "perf": {
+   "cycle_breakdown": {
+    "frontend:icache": 85,
+    "frontend:refill": 1,
+    "halt:drain": 152,
+    "issue": 37,
+    "stall:hazard:scalar_alu": 6,
+    "stall:hazard:scalar_load": 29,
+    "stall:hazard:sdma": 13,
+    "stall:hazard:vector_lane": 58,
+    "stall:hazard:vreg_load": 44,
+    "stall:regfile": 16
+   },
+   "cycles": 441,
+   "instruction_mix": {
+    "convert": 1,
+    "halt": 1,
+    "scalar_alu": 15,
+    "scalar_load": 2,
+    "sdma_load": 1,
+    "sdma_store": 1,
+    "vector_lane": 8,
+    "vreg_load": 4,
+    "vreg_store": 4
+   },
+   "issue": {
+    "flushes": 0,
+    "ops": 37,
+    "ops_per_cycle": 0.08390022675736962,
+    "packets": 37,
+    "packets_fetched": 38,
+    "packets_per_cycle": 0.08390022675736962,
+    "slot_utilization": 0.25
+   },
+   "memory": {
+    "dcache": {
+     "evictions": 0,
+     "fill_wait_cycles": 3,
+     "fills": 1,
+     "flush_writebacks": 0,
+     "hits": 0,
+     "max_mshrs": 1,
+     "mem_wait_cycles": 10,
+     "misses": 1,
+     "present_fills": 0,
+     "requests": 2,
+     "retries": 0,
+     "secondary": 1,
+     "writebacks": 0
+    },
+    "dram_bursts": 120,
+    "dram_bytes": 960,
+    "dram_bytes_per_cycle": 2.17687074829932,
+    "dram_channel_busy": 0.272108843537415,
+    "dram_peak_bytes_per_cycle": 8,
+    "icache": {
+     "fills": 12,
+     "iwait_cycles": 62
+    },
+    "masters": {
+     "dcache": {
+      "bursts": 8,
+      "bytes": 64,
+      "read_bytes": 64,
+      "wait_cycles": 5,
+      "write_bytes": 0
+     },
+     "icache": {
+      "bursts": 96,
+      "bytes": 768,
+      "read_bytes": 768,
+      "wait_cycles": 2,
+      "write_bytes": 0
+     },
+     "scpad0": {
+      "bursts": 16,
+      "bytes": 128,
+      "wait_cycles": 13
+     },
+     "scpad1": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     },
+     "scpad2": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     },
+     "scpad3": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     }
+    },
+    "scratchpad": [
+     {
+      "read_queue": 0,
+      "reads": 8,
+      "stalls": 0,
+      "tile": 0,
+      "write_queue": 0,
+      "writes": 8
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 1,
+      "write_queue": 0,
+      "writes": 0
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 2,
+      "write_queue": 0,
+      "writes": 0
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 3,
+      "write_queue": 0,
+      "writes": 0
+     }
+    ]
+   },
+   "unit_busy": {
+    "dcache": {
+     "cycles": 173,
+     "fraction": 0.3922902494331066
+    },
+    "dram_channel": {
+     "cycles": 120,
+     "fraction": 0.272108843537415
+    },
+    "ex2": {
+     "cycles": 1,
+     "fraction": 0.0022675736961451248
+    },
+    "lanes": {
+     "cycles": 68,
+     "fraction": 0.15419501133786848
+    },
+    "lsu": {
+     "cycles": 46,
+     "fraction": 0.10430839002267574
+    },
+    "sdma0": {
+     "cycles": 47,
+     "fraction": 0.10657596371882086
+    },
+    "vlsu0": {
+     "cycles": 36,
+     "fraction": 0.08163265306122448
+    }
+   },
+   "work": {
+    "arithmetic_intensity": 0.26666666666666666,
+    "array_flops": 0,
+    "array_mac_utilization": 0.0,
+    "flops": 256,
+    "flops_per_cycle": 0.5804988662131519,
+    "lane_flops": 256
+   }
+  },
+  "scalar_regs": "ba4fb0685f156595a57ccdca4e755b9fcb79b10045bc05b4408c8dce8151bbfd",
+  "vector_regs": "45e732b313067114b9ebf43e7796be8c7ca41e8c51b25b8c47dbd046e416513b",
+  "vector_side": {
+   "gsau_ops": 0,
+   "lane_ops": 8,
+   "mask_writes": 0,
+   "sdma_loads": 1,
+   "sdma_stores": 1,
+   "transpose_pops": 0,
+   "transpose_pushes": 0,
+   "vector_writes": 12,
+   "vlsu_loads": 4,
+   "vlsu_stores": 4,
+   "wb_conflict_cycles": 0
+  }
+ },
+ "kernel_softmax": {
+  "cycles": 2694,
+  "dcache": {
+   "evictions": 0,
+   "fill_wait_cycles": 3,
+   "fills": 2,
+   "flush_writebacks": 0,
+   "hits": 0,
+   "max_mshrs": 2,
+   "mem_wait_cycles": 12,
+   "misses": 2,
+   "present_fills": 0,
+   "requests": 2,
+   "retries": 0,
+   "secondary": 0,
+   "writebacks": 0
+  },
+  "dram": "4115993040c3ca408af879d6af4548be7d65cb3deed1f2c7366ba96c1ff6f01b",
+  "flushes": 0,
+  "issue_trace": "6c85cd42c0ad349baaf5a755cc71428bf7cab94bbb989b6778b59abb6f9bdcf8",
+  "lsu": {
+   "full_cycles": 0,
+   "hits": 0,
+   "loads": 2,
+   "max_waiting": 2,
+   "misses": 2,
+   "retries": 0,
+   "stores": 0
+  },
+  "mask_regs": "70ec11b33ff60b660ddfa335e2023d41b72319f70bd83c4310fa83ae70c0d643",
+  "packets_fetched": 396,
+  "perf": {
+   "cycle_breakdown": {
+    "frontend:icache": 1160,
+    "frontend:refill": 78,
+    "halt:drain": 399,
+    "issue": 396,
+    "stall:alu": 2,
+    "stall:ex2": 50,
+    "stall:hazard:scalar_alu": 33,
+    "stall:hazard:scalar_load": 62,
+    "stall:hazard:sdma": 382,
+    "stall:hazard:vector_reduce": 42,
+    "stall:reduction": 22,
+    "stall:regfile": 68
+   },
+   "cycles": 2694,
+   "instruction_mix": {
+    "convert": 1,
+    "halt": 1,
+    "move": 64,
+    "scalar_alu": 70,
+    "scalar_bf16": 32,
+    "scalar_load": 2,
+    "sdma_load": 1,
+    "sdma_store": 1,
+    "vector_lane": 96,
+    "vector_reduce": 64,
+    "vreg_load": 32,
+    "vreg_store": 32
+   },
+   "issue": {
+    "flushes": 0,
+    "ops": 396,
+    "ops_per_cycle": 0.14699331848552338,
+    "packets": 396,
+    "packets_fetched": 396,
+    "packets_per_cycle": 0.14699331848552338,
+    "slot_utilization": 0.25
+   },
+   "memory": {
+    "dcache": {
+     "evictions": 0,
+     "fill_wait_cycles": 3,
+     "fills": 2,
+     "flush_writebacks": 0,
+     "hits": 0,
+     "max_mshrs": 2,
+     "mem_wait_cycles": 12,
+     "misses": 2,
+     "present_fills": 0,
+     "requests": 2,
+     "retries": 0,
+     "secondary": 0,
+     "writebacks": 0
+    },
+    "dram_bursts": 1528,
+    "dram_bytes": 12224,
+    "dram_bytes_per_cycle": 4.537490720118782,
+    "dram_channel_busy": 0.5671863400148478,
+    "dram_peak_bytes_per_cycle": 8,
+    "icache": {
+     "fills": 125,
+     "iwait_cycles": 624
+    },
+    "masters": {
+     "dcache": {
+      "bursts": 16,
+      "bytes": 128,
+      "read_bytes": 128,
+      "wait_cycles": 2,
+      "write_bytes": 0
+     },
+     "icache": {
+      "bursts": 1000,
+      "bytes": 8000,
+      "read_bytes": 8000,
+      "wait_cycles": 3,
+      "write_bytes": 0
+     },
+     "scpad0": {
+      "bursts": 512,
+      "bytes": 4096,
+      "wait_cycles": 364
+     },
+     "scpad1": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     },
+     "scpad2": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     },
+     "scpad3": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     }
+    },
+    "scratchpad": [
+     {
+      "read_queue": 0,
+      "reads": 64,
+      "stalls": 0,
+      "tile": 0,
+      "write_queue": 0,
+      "writes": 64
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 1,
+      "write_queue": 0,
+      "writes": 0
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 2,
+      "write_queue": 0,
+      "writes": 0
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 3,
+      "write_queue": 0,
+      "writes": 0
+     }
+    ]
+   },
+   "unit_busy": {
+    "dcache": {
+     "cycles": 203,
+     "fraction": 0.07535263548626578
+    },
+    "dram_channel": {
+     "cycles": 1528,
+     "fraction": 0.5671863400148478
+    },
+    "ex2": {
+     "cycles": 353,
+     "fraction": 0.13103192279138828
+    },
+    "lanes": {
+     "cycles": 1104,
+     "fraction": 0.40979955456570155
+    },
+    "lsu": {
+     "cycles": 75,
+     "fraction": 0.02783964365256125
+    },
+    "sdma0": {
+     "cycles": 659,
+     "fraction": 0.24461766889383815
+    },
+    "vlsu0": {
+     "cycles": 252,
+     "fraction": 0.0935412026726058
+    }
+   },
+   "work": {
+    "arithmetic_intensity": 0.418848167539267,
+    "array_flops": 0,
+    "array_mac_utilization": 0.0,
+    "flops": 5120,
+    "flops_per_cycle": 1.900519673348181,
+    "lane_flops": 5120
+   }
+  },
+  "scalar_regs": "851ea45729465ef439865563c3e18cb4787e933e0dcc5cddefae27d1c93ece7a",
+  "vector_regs": "89192ef8a68ed0cc8010b301dca21ee692189b051dc62bbe77cf1a771000bd00",
+  "vector_side": {
+   "gsau_ops": 0,
+   "lane_ops": 160,
+   "mask_writes": 0,
+   "sdma_loads": 1,
+   "sdma_stores": 1,
+   "transpose_pops": 0,
+   "transpose_pushes": 0,
+   "vector_writes": 192,
+   "vlsu_loads": 32,
+   "vlsu_stores": 32,
+   "wb_conflict_cycles": 0
+  }
+ },
+ "kernel_softmax_row32.c": {
+  "cycles": 514,
+  "dcache": {
+   "evictions": 0,
+   "fill_wait_cycles": 1,
+   "fills": 2,
+   "flush_writebacks": 1,
+   "hits": 2,
+   "max_mshrs": 2,
+   "mem_wait_cycles": 29,
+   "misses": 2,
+   "present_fills": 0,
+   "requests": 5,
+   "retries": 0,
+   "secondary": 1,
+   "writebacks": 0
+  },
+  "dram": "30e277ce0f4e8a35b81e79e720640545c6421c59f1cbd1ea5811ad765c97ad66",
+  "flushes": 5,
+  "issue_trace": "a8cf125494e9f72233be34173276f3fa38e54c1234ecccb916a4777d13ebe284",
+  "lsu": {
+   "full_cycles": 0,
+   "hits": 2,
+   "loads": 3,
+   "max_waiting": 1,
+   "misses": 3,
+   "retries": 0,
+   "stores": 2
+  },
+  "mask_regs": "70ec11b33ff60b660ddfa335e2023d41b72319f70bd83c4310fa83ae70c0d643",
+  "packets_fetched": 64,
+  "perf": {
+   "cycle_breakdown": {
+    "frontend:icache": 149,
+    "frontend:refill": 13,
+    "halt:drain": 151,
+    "issue": 58,
+    "stall:hazard:branch": 1,
+    "stall:hazard:move": 6,
+    "stall:hazard:scalar_alu": 23,
+    "stall:hazard:scalar_bf16": 13,
+    "stall:hazard:sdma": 13,
+    "stall:hazard:vector_lane": 23,
+    "stall:hazard:vector_reduce": 58,
+    "stall:regfile": 6
+   },
+   "cycles": 514,
+   "instruction_mix": {
+    "branch": 6,
+    "convert": 5,
+    "halt": 1,
+    "move": 1,
+    "scalar_alu": 41,
+    "scalar_bf16": 2,
+    "scalar_load": 3,
+    "scalar_muldiv": 1,
+    "scalar_store": 2,
+    "sdma_load": 1,
+    "sdma_store": 1,
+    "vector_lane": 4,
+    "vector_reduce": 2,
+    "vreg_load": 1,
+    "vreg_store": 1
+   },
+   "issue": {
+    "flushes": 5,
+    "ops": 72,
+    "ops_per_cycle": 0.14007782101167315,
+    "packets": 58,
+    "packets_fetched": 64,
+    "packets_per_cycle": 0.11284046692607004,
+    "slot_utilization": 0.3103448275862069
+   },
+   "memory": {
+    "dcache": {
+     "evictions": 0,
+     "fill_wait_cycles": 1,
+     "fills": 2,
+     "flush_writebacks": 1,
+     "hits": 2,
+     "max_mshrs": 2,
+     "mem_wait_cycles": 29,
+     "misses": 2,
+     "present_fills": 0,
+     "requests": 5,
+     "retries": 0,
+     "secondary": 1,
+     "writebacks": 0
+    },
+    "dram_bursts": 184,
+    "dram_bytes": 1472,
+    "dram_bytes_per_cycle": 2.8638132295719845,
+    "dram_channel_busy": 0.35797665369649806,
+    "dram_peak_bytes_per_cycle": 8,
+    "icache": {
+     "fills": 18,
+     "iwait_cycles": 93
+    },
+    "masters": {
+     "dcache": {
+      "bursts": 24,
+      "bytes": 192,
+      "read_bytes": 128,
+      "wait_cycles": 19,
+      "write_bytes": 64
+     },
+     "icache": {
+      "bursts": 144,
+      "bytes": 1152,
+      "read_bytes": 1152,
+      "wait_cycles": 3,
+      "write_bytes": 0
+     },
+     "scpad0": {
+      "bursts": 16,
+      "bytes": 128,
+      "wait_cycles": 22
+     },
+     "scpad1": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     },
+     "scpad2": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     },
+     "scpad3": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     }
+    },
+    "scratchpad": [
+     {
+      "read_queue": 0,
+      "reads": 2,
+      "stalls": 0,
+      "tile": 0,
+      "write_queue": 0,
+      "writes": 2
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 1,
+      "write_queue": 0,
+      "writes": 0
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 2,
+      "write_queue": 0,
+      "writes": 0
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 3,
+      "write_queue": 0,
+      "writes": 0
+     }
+    ]
+   },
+   "unit_busy": {
+    "dcache": {
+     "cycles": 241,
+     "fraction": 0.4688715953307393
+    },
+    "dram_channel": {
+     "cycles": 184,
+     "fraction": 0.35797665369649806
+    },
+    "ex2": {
+     "cycles": 16,
+     "fraction": 0.0311284046692607
+    },
+    "ex3": {
+     "cycles": 1,
+     "fraction": 0.0019455252918287938
+    },
+    "ex4": {
+     "cycles": 2,
+     "fraction": 0.0038910505836575876
+    },
+    "lanes": {
+     "cycles": 87,
+     "fraction": 0.16926070038910507
+    },
+    "lsu": {
+     "cycles": 83,
+     "fraction": 0.1614785992217899
+    },
+    "sdma0": {
+     "cycles": 34,
+     "fraction": 0.06614785992217899
+    },
+    "vlsu0": {
+     "cycles": 9,
+     "fraction": 0.017509727626459144
+    }
+   },
+   "work": {
+    "arithmetic_intensity": 0.13043478260869565,
+    "array_flops": 0,
+    "array_mac_utilization": 0.0,
+    "flops": 192,
+    "flops_per_cycle": 0.3735408560311284,
+    "lane_flops": 192
+   }
+  },
+  "scalar_regs": "1175e6d26c3ee22ea0121582feb9610954b4dda950a48f9b506adedb690084f3",
+  "vector_regs": "ff4d4c4694917921afb96f74ba25b8e6de14ebd3478d989e143d7c42c4eb6efa",
+  "vector_side": {
+   "gsau_ops": 0,
+   "lane_ops": 6,
+   "mask_writes": 0,
+   "sdma_loads": 1,
+   "sdma_stores": 1,
+   "transpose_pops": 0,
+   "transpose_pushes": 0,
+   "vector_writes": 7,
+   "vlsu_loads": 1,
+   "vlsu_stores": 1,
+   "wb_conflict_cycles": 0
+  }
+ },
+ "scalar_program_0": {
+  "cycles": 554,
+  "dcache": {
+   "evictions": 0,
+   "fill_wait_cycles": 15,
+   "fills": 6,
+   "flush_writebacks": 5,
+   "hits": 18,
+   "max_mshrs": 3,
+   "mem_wait_cycles": 0,
+   "misses": 6,
+   "present_fills": 0,
+   "requests": 27,
+   "retries": 0,
+   "secondary": 3,
+   "writebacks": 0
+  },
+  "flushes": 0,
+  "issue_trace": "641e3a97c5e9a3d01fe2593d9c86907b8919bcdb4afcdda18274209f79db73da",
+  "lsu": {
+   "full_cycles": 0,
+   "hits": 18,
+   "loads": 13,
+   "max_waiting": 3,
+   "misses": 9,
+   "retries": 0,
+   "stores": 14
+  },
+  "memory": "47efd5a96248b268283dc0e229c5182dc1bdf43da0a4911395a05e6ebb0aa209",
+  "packets_fetched": 66,
+  "scalar_regs": "3b03ef3c93f0797c67ca9ec07bf3bc0f141c1b77cf9db45562af34313ca0e9b2"
+ },
+ "scalar_program_1": {
+  "cycles": 594,
+  "dcache": {
+   "evictions": 0,
+   "fill_wait_cycles": 20,
+   "fills": 8,
+   "flush_writebacks": 6,
+   "hits": 17,
+   "max_mshrs": 3,
+   "mem_wait_cycles": 0,
+   "misses": 8,
+   "present_fills": 2,
+   "requests": 26,
+   "retries": 0,
+   "secondary": 1,
+   "writebacks": 0
+  },
+  "flushes": 0,
+  "issue_trace": "7965264b879fc86d66947b22c08ad3dd482bdcfb0b1432ff635420f4bf0347ed",
+  "lsu": {
+   "full_cycles": 0,
+   "hits": 17,
+   "loads": 8,
+   "max_waiting": 1,
+   "misses": 9,
+   "retries": 0,
+   "stores": 18
+  },
+  "memory": "ca667adf23f991cf674439b654667fed345bec6a50c18def9b79c85c035afcdd",
+  "packets_fetched": 67,
+  "scalar_regs": "b22b961c4a539fab13664d8a8c969beff99491e23f485e11d0997e220eec3ab5"
+ },
+ "scalar_program_2": {
+  "cycles": 651,
+  "dcache": {
+   "evictions": 0,
+   "fill_wait_cycles": 10,
+   "fills": 6,
+   "flush_writebacks": 6,
+   "hits": 24,
+   "max_mshrs": 3,
+   "mem_wait_cycles": 0,
+   "misses": 6,
+   "present_fills": 0,
+   "requests": 31,
+   "retries": 0,
+   "secondary": 1,
+   "writebacks": 0
+  },
+  "flushes": 0,
+  "issue_trace": "05e6a5ec605ceb08796d63adcdf2ca4209c867fc566445736ce2db16310e4362",
+  "lsu": {
+   "full_cycles": 0,
+   "hits": 24,
+   "loads": 11,
+   "max_waiting": 2,
+   "misses": 7,
+   "retries": 0,
+   "stores": 20
+  },
+  "memory": "8768cc014447ce296ff1bfa528f3a916af132c466c70163a6208694d4e3e20d7",
+  "packets_fetched": 66,
+  "scalar_regs": "6c1e51fb393ac14033792a21f6ec53f1b18674b6908ec0eb34c000085d1ee134"
+ },
+ "scalar_program_small_cache_0": {
+  "cycles": 594,
+  "dcache": {
+   "evictions": 0,
+   "fill_wait_cycles": 38,
+   "fills": 11,
+   "flush_writebacks": 10,
+   "hits": 17,
+   "max_mshrs": 2,
+   "mem_wait_cycles": 0,
+   "misses": 11,
+   "present_fills": 0,
+   "requests": 36,
+   "retries": 8,
+   "secondary": 0,
+   "writebacks": 0
+  },
+  "flushes": 0,
+  "issue_trace": "76f561a6f104e6d4174e73b10087254b6c2315f05108bfbc22d2d2da18d5dc48",
+  "lsu": {
+   "full_cycles": 0,
+   "hits": 17,
+   "loads": 14,
+   "max_waiting": 2,
+   "misses": 11,
+   "retries": 8,
+   "stores": 14
+  },
+  "memory": "142d66a52658467679f662177f72c00d8fc64d4d71a90b4e524ec2947ddfc7bc",
+  "packets_fetched": 86,
+  "scalar_regs": "11b546688c49e71850482c68fbf41392b26d897a195a65a878aec3790fa0c005"
+ },
+ "scalar_program_small_cache_1": {
+  "cycles": 661,
+  "dcache": {
+   "evictions": 0,
+   "fill_wait_cycles": 21,
+   "fills": 12,
+   "flush_writebacks": 9,
+   "hits": 17,
+   "max_mshrs": 2,
+   "mem_wait_cycles": 0,
+   "misses": 12,
+   "present_fills": 0,
+   "requests": 34,
+   "retries": 2,
+   "secondary": 3,
+   "writebacks": 0
+  },
+  "flushes": 0,
+  "issue_trace": "f435a342f3ad21f4c19e1a615ca047b8534238b02c20322c4c229b5179ff42af",
+  "lsu": {
+   "full_cycles": 0,
+   "hits": 17,
+   "loads": 19,
+   "max_waiting": 2,
+   "misses": 15,
+   "retries": 2,
+   "stores": 13
+  },
+  "memory": "12489c10df9f90cc96b09f0257542de9aaa25bf2f55db88036ac07699c8dff1b",
+  "packets_fetched": 86,
+  "scalar_regs": "40a415a7311c5e44ffefe05ec0aec89cb03f9f957ef57a1cb84397c85f19af90"
+ },
+ "scalar_program_small_cache_2": {
+  "cycles": 647,
+  "dcache": {
+   "evictions": 0,
+   "fill_wait_cycles": 30,
+   "fills": 12,
+   "flush_writebacks": 10,
+   "hits": 17,
+   "max_mshrs": 2,
+   "mem_wait_cycles": 0,
+   "misses": 12,
+   "present_fills": 0,
+   "requests": 32,
+   "retries": 2,
+   "secondary": 1,
+   "writebacks": 0
+  },
+  "flushes": 0,
+  "issue_trace": "f34f86f1796b2a928b2823a62eb45f725f1708477903141d31c3c0971a13da59",
+  "lsu": {
+   "full_cycles": 0,
+   "hits": 17,
+   "loads": 14,
+   "max_waiting": 2,
+   "misses": 13,
+   "retries": 2,
+   "stores": 16
+  },
+  "memory": "9598b16b288363ad48870a81d3a11e1b1538df6fd4a57140d4c9d288d4a08f47",
+  "packets_fetched": 86,
+  "scalar_regs": "fa7d8beaa21374d4d54f2c18f9fa04f0e94c14b7b5d07d03a7c81f476923f832"
+ },
+ "tiled_cosim_64": {
+  "output": "6b1a97b99423fd785a4a98d2b674933c5af4f6f1be3f14b630fe12d3a0b73529",
+  "stats": {
+   "active_pe_sum": 260864,
+   "arithmetic_intensity_internal": 2.647586227037762,
+   "avg_active_pes_during_compute_window": 429.05263157894734,
+   "avg_active_pes_per_active_cycle": 443.6462585034014,
+   "avg_active_pes_when_active": 443.6462585034014,
+   "backend_dram_burst_bytes": 32,
+   "bytes_internal": 1095712,
+   "bytes_transmitted": 65536,
+   "cycles": 7600,
+   "external_bandwidth_active_bytes_per_cycle": 67.98340248962656,
+   "external_bandwidth_avg_bytes_per_cycle": 8.623157894736842,
+   "flops_micro": 2900992,
+   "fp16_overflow_count": 0,
+   "fp16_saturation_count": 0,
+   "gemm_total_cycles_summary": {
+    "avg": 428.5,
+    "count": 8,
+    "max": 431,
+    "min": 426,
+    "total": 3428
+   },
+   "internal_bandwidth_bytes_per_cycle": 144.17263157894737,
+   "kernel_gantt_span_count": 112,
+   "kernel_gantt_tag_count": 8,
+   "mac_utilization": 0.03351973684210526,
+   "mac_utilization_sysarr_active": 0.4332482993197279,
+   "matrix_size": 64,
+   "matrix_total_cycles": 7600,
+   "max_abs_error": 0.0,
+   "max_active_pes_in_any_cycle": 928,
+   "mean_abs_error": 0.0,
+   "num_tiles": 2,
+   "pe_add_ops": 2270208,
+   "pe_mac_ops": 622592,
+   "pe_mul_ops": 622592,
+   "pe_psum_adds": 1803264,
+   "prefetch_slots": 2,
+   "queue_avg_depths": {
+    "gsau_from_systolic": 0.03368421052631579,
+    "gsau_rd_queue": 1.5157894736842106,
+    "gsau_to_systolic": 0.0,
+    "gsau_writebacks": 0.006842105263157895,
+    "scheduler_build_datapath": 0.0,
+    "scheduler_build_gsau": 0.0,
+    "scheduler_build_vlsu": 0.0,
+    "scheduler_packet_datapath": 0.0,
+    "scheduler_packet_gsau": 0.0,
+    "scheduler_packet_vlsu": 0.0,
+    "scheduler_packets": 0.0,
+    "vlsu_dst_fifo": 1.2173684210526317,
+    "vlsu_issue_q": 0.01263157894736842,
+    "vlsu_req_q": 0.09263157894736843,
+    "vlsu_rsp_q": 0.10105263157894737,
+    "vlsu_wb_q": 0.003157894736842105,
+    "wb_buffer": 0.05526315789473684
+   },
+   "queue_avg_depths_valid_mac": {
+    "gsau_from_systolic": 0.17006802721088435,
+    "gsau_rd_queue": 9.353741496598639,
+    "gsau_to_systolic": 0.0,
+    "gsau_writebacks": 0.08843537414965986,
+    "scheduler_build_datapath": 0.0,
+    "scheduler_build_gsau": 0.0,
+    "scheduler_build_vlsu": 0.0,
+    "scheduler_packet_datapath": 0.0,
+    "scheduler_packet_gsau": 0.0,
+    "scheduler_packet_vlsu": 0.0,
+    "scheduler_packets": 0.0,
+    "vlsu_dst_fifo": 4.476190476190476,
+    "vlsu_issue_q": 0.0,
+    "vlsu_req_q": 0.40816326530612246,
+    "vlsu_rsp_q": 0.24489795918367346,
+    "vlsu_wb_q": 0.034013605442176874,
+    "wb_buffer": 0.46258503401360546
+   },
+   "queue_max_depths": {
+    "gsau_from_systolic": 1,
+    "gsau_rd_queue": 15,
+    "gsau_to_systolic": 0,
+    "gsau_writebacks": 1,
+    "scheduler_build_datapath": 0,
+    "scheduler_build_gsau": 0,
+    "scheduler_build_vlsu": 0,
+    "scheduler_packet_datapath": 0,
+    "scheduler_packet_gsau": 0,
+    "scheduler_packet_vlsu": 0,
+    "scheduler_packets": 0,
+    "vlsu_dst_fifo": 8,
+    "vlsu_issue_q": 3,
+    "vlsu_req_q": 4,
+    "vlsu_rsp_q": 2,
+    "vlsu_wb_q": 1,
+    "wb_buffer": 3
+   },
+   "queue_valid_mac_samples": 588,
+   "reuse_act_internal_over_external": 31.875,
+   "reuse_psum_internal_over_external": 35.00390625,
+   "reuse_weight_internal_over_external": 16.5,
+   "sa_stats_not_applicable": [],
+   "sdma_load_cycles_summary": {
+    "avg": 900.0,
+    "count": 16,
+    "max": 903,
+    "min": 897,
+    "total": 14400
+   },
+   "spad_bank_size": 16384,
+   "spad_frontend_queue_size": 4,
+   "spad_pads": 2,
+   "spad_total_bytes": 2097152,
+   "systolic_array": "tpu",
+   "systolic_array_active_work_cycles": 588,
+   "systolic_array_compute_cycles_summary": {
+    "avg": 76.0,
+    "count": 8,
+    "max": 76,
+    "min": 76,
+    "total": 608
+   },
+   "systolic_array_valid_mac_cycles_summary": {
+    "avg": 73.5,
+    "count": 8,
+    "max": 75,
+    "min": 72,
+    "total": 588
+   },
+   "throughput_float_operations_per_cycle": 381.70947368421054,
+   "tile_size": 32,
+   "total_output_tiles": 4,
+   "total_tile_pairs": 8,
+   "vec_op_counts": {
+    "add": 8192,
+    "and": 0,
+    "div": 0,
+    "eq": 0,
+    "exp": 0,
+    "gt": 0,
+    "lt": 0,
+    "max": 0,
+    "min": 0,
+    "mul": 0,
+    "ne": 0,
+    "or": 0,
+    "shl": 0,
+    "shr": 0,
+    "sqrt": 0,
+    "sub": 0,
+    "xor": 0
+   },
+   "vec_reduce_ops": 0,
+   "vec_total_ops": 8192,
+   "vls_count": 2
+  }
+ },
+ "tpu_experiment_bf16_lat6": {
+  "arithmetic_intensity_algo": 10.666666666666666,
+  "arithmetic_intensity_internal": 2.7820400537163543,
+  "avg_active_pes_during_compute_window": 430.3157894736842,
+  "avg_active_pes_when_active": 436.05333333333334,
+  "backend_count": 4,
+  "backend_delay_cycles": 1,
+  "backend_dram_burst_bytes": 8,
+  "backend_dram_latency": 6,
+  "backend_dram_q_depth": 16,
+  "backend_shared_dram": true,
+  "backend_slots_attached": 4,
+  "bytes_algo": 6144,
+  "bytes_internal": 137016,
+  "bytes_transmitted": 6144,
+  "compute_window_cycles": 76,
+  "config": {
+   "backend_delay_cycles": 1,
+   "backend_dram_burst_bytes": 8,
+   "backend_dram_latency": 6,
+   "backend_dram_q_depth": 16,
+   "dram_block_bytes": 256,
+   "dtype": "bf16",
+   "lane_count": 4,
+   "max_cycles": 20000,
+   "name": "snapshot",
+   "param_name": "none",
+   "param_value": "none",
+   "spad_bank_size": 128,
+   "spad_frontend_queue_size": 4,
+   "spad_num_banks": 32,
+   "spad_read_latency": 2,
+   "spad_write_latency": 2,
+   "sweep": "manual",
+   "tile": 32,
+   "vls_count": 1
+  },
+  "cycles": 957,
+  "dram_block_bytes": 256,
+  "dtype": "bf16",
+  "external_bandwidth_active_bytes_per_cycle": 69.03370786516854,
+  "external_bandwidth_avg_bytes_per_cycle": 6.420062695924765,
+  "flops_algo": 65536,
+  "flops_micro": 381184,
+  "fp16_overflow_count": 0,
+  "fp16_saturation_count": 0,
+  "internal_bandwidth_bytes_per_cycle": 143.17241379310346,
+  "lane_count": 4,
+  "mac_utilization": 0.42583333333333334,
+  "max_abs_error": 1023.9999389648438,
+  "max_active_pes_in_any_cycle": 928,
+  "mean_abs_error": 359.9999785423279,
+  "name": "snapshot",
+  "param_name": "none",
+  "param_value": "none",
+  "pe_add_ops": 303360,
+  "pe_mac_ops": 77824,
+  "pe_mul_ops": 77824,
+  "pe_psum_adds": 244992,
+  "phase_activation_stream": 120,
+  "phase_compute_ramp": 0,
+  "phase_drain": 165,
+  "phase_idle": 0,
+  "phase_steady_compute": 46,
+  "phase_store_tail": 5,
+  "phase_weight_preload": 621,
+  "preload_done_cycle_count": 621,
+  "queue_avg_gsau_from_systolic": 0.03343782654127482,
+  "queue_avg_gsau_rd_queue": 1.5047021943573669,
+  "queue_avg_gsau_to_systolic": 0.0,
+  "queue_avg_gsau_writebacks": 0.0,
+  "queue_avg_scheduler_build_datapath": 0.0,
+  "queue_avg_scheduler_build_gsau": 0.06687565308254964,
+  "queue_avg_scheduler_build_vlsu": 0.10031347962382445,
+  "queue_avg_scheduler_packet_datapath": 0.0,
+  "queue_avg_scheduler_packet_gsau": 0.0,
+  "queue_avg_scheduler_packet_vlsu": 0.0,
+  "queue_avg_scheduler_packets": 0.1013584117032393,
+  "queue_avg_vlsu_dst_fifo": 0.8014629049111808,
+  "queue_avg_vlsu_issue_q": 0.012539184952978056,
+  "queue_avg_vlsu_req_q": 0.047021943573667714,
+  "queue_avg_vlsu_rsp_q": 0.06687565308254964,
+  "queue_avg_vlsu_wb_q": 0.0,
+  "queue_avg_wb_buffer": 0.0,
+  "queue_max_gsau_from_systolic": 1,
+  "queue_max_gsau_rd_queue": 15,
+  "queue_max_gsau_to_systolic": 0,
+  "queue_max_gsau_writebacks": 0,
+  "queue_max_scheduler_build_datapath": 0,
+  "queue_max_scheduler_build_gsau": 1,
+  "queue_max_scheduler_build_vlsu": 4,
+  "queue_max_scheduler_packet_datapath": 0,
+  "queue_max_scheduler_packet_gsau": 0,
+  "queue_max_scheduler_packet_vlsu": 0,
+  "queue_max_scheduler_packets": 1,
+  "queue_max_vlsu_dst_fifo": 4,
+  "queue_max_vlsu_issue_q": 3,
+  "queue_max_vlsu_req_q": 1,
+  "queue_max_vlsu_rsp_q": 1,
+  "queue_max_vlsu_wb_q": 0,
+  "queue_max_wb_buffer": 0,
+  "reuse_act_internal_over_external": 31.96875,
+  "reuse_psum_internal_over_external": 17.43359375,
+  "reuse_weight_internal_over_external": 16.5,
+  "spad_bank_size": 128,
+  "spad_frontend_queue_size": 4,
+  "spad_num_banks": 32,
+  "spad_read_latency": 2,
+  "spad_write_latency": 2,
+  "sweep": "manual",
+  "throughput_float_operations_per_cycle": 398.31138975966564,
+  "tile": 32,
+  "valid_mac_cycles": 75,
+  "vec_op_counts": {
+   "add": 0,
+   "and": 0,
+   "div": 0,
+   "eq": 0,
+   "exp": 0,
+   "gt": 0,
+   "lt": 0,
+   "max": 0,
+   "min": 0,
+   "mul": 0,
+   "ne": 0,
+   "or": 0,
+   "shl": 0,
+   "shr": 0,
+   "sqrt": 0,
+   "sub": 0,
+   "xor": 0
+  },
+  "vec_reduce_ops": 0,
+  "vec_total_ops": 0,
+  "vls_active_cycles": 89,
+  "vls_count": 1
+ },
+ "tpu_experiment_default": {
+  "arithmetic_intensity_algo": 10.666666666666666,
+  "arithmetic_intensity_internal": 3.802656437028598,
+  "avg_active_pes_during_compute_window": 430.3157894736842,
+  "avg_active_pes_when_active": 436.05333333333334,
+  "backend_count": 4,
+  "backend_delay_cycles": 1,
+  "backend_dram_burst_bytes": 8,
+  "backend_dram_latency": 24,
+  "backend_dram_q_depth": 16,
+  "backend_shared_dram": true,
+  "backend_slots_attached": 4,
+  "bytes_algo": 6144,
+  "bytes_internal": 138682,
+  "bytes_transmitted": 6144,
+  "compute_window_cycles": 76,
+  "config": {
+   "backend_delay_cycles": 1,
+   "backend_dram_burst_bytes": 8,
+   "backend_dram_latency": 24,
+   "backend_dram_q_depth": 16,
+   "dram_block_bytes": 256,
+   "dtype": "fp16",
+   "lane_count": 4,
+   "max_cycles": 20000,
+   "name": "snapshot",
+   "param_name": "none",
+   "param_value": "none",
+   "spad_bank_size": 128,
+   "spad_frontend_queue_size": 4,
+   "spad_num_banks": 32,
+   "spad_read_latency": 2,
+   "spad_write_latency": 2,
+   "sweep": "manual",
+   "tile": 32,
+   "vls_count": 1
+  },
+  "cycles": 1528,
+  "dram_block_bytes": 256,
+  "dtype": "fp16",
+  "external_bandwidth_active_bytes_per_cycle": 69.03370786516854,
+  "external_bandwidth_avg_bytes_per_cycle": 4.020942408376963,
+  "flops_algo": 65536,
+  "flops_micro": 527360,
+  "fp16_overflow_count": 0,
+  "fp16_saturation_count": 0,
+  "internal_bandwidth_bytes_per_cycle": 90.76047120418848,
+  "lane_count": 4,
+  "mac_utilization": 0.42583333333333334,
+  "max_abs_error": 1023.9999389648438,
+  "max_active_pes_in_any_cycle": 928,
+  "mean_abs_error": 359.9999785423279,
+  "name": "snapshot",
+  "param_name": "none",
+  "param_value": "none",
+  "pe_add_ops": 449536,
+  "pe_mac_ops": 77824,
+  "pe_mul_ops": 77824,
+  "pe_psum_adds": 391168,
+  "phase_activation_stream": 120,
+  "phase_compute_ramp": 0,
+  "phase_drain": 284,
+  "phase_idle": 0,
+  "phase_steady_compute": 46,
+  "phase_store_tail": 5,
+  "phase_weight_preload": 1073,
+  "preload_done_cycle_count": 1073,
+  "queue_avg_gsau_from_systolic": 0.020942408376963352,
+  "queue_avg_gsau_rd_queue": 0.9424083769633508,
+  "queue_avg_gsau_to_systolic": 0.0,
+  "queue_avg_gsau_writebacks": 0.0,
+  "queue_avg_scheduler_build_datapath": 0.0,
+  "queue_avg_scheduler_build_gsau": 0.041884816753926704,
+  "queue_avg_scheduler_build_vlsu": 0.06282722513089005,
+  "queue_avg_scheduler_packet_datapath": 0.0,
+  "queue_avg_scheduler_packet_gsau": 0.0,
+  "queue_avg_scheduler_packet_vlsu": 0.0,
+  "queue_avg_scheduler_packets": 0.06348167539267016,
+  "queue_avg_vlsu_dst_fifo": 0.5019633507853403,
+  "queue_avg_vlsu_issue_q": 0.007853403141361256,
+  "queue_avg_vlsu_req_q": 0.029450261780104712,
+  "queue_avg_vlsu_rsp_q": 0.041884816753926704,
+  "queue_avg_vlsu_wb_q": 0.0,
+  "queue_avg_wb_buffer": 0.0,
+  "queue_max_gsau_from_systolic": 1,
+  "queue_max_gsau_rd_queue": 15,
+  "queue_max_gsau_to_systolic": 0,
+  "queue_max_gsau_writebacks": 0,
+  "queue_max_scheduler_build_datapath": 0,
+  "queue_max_scheduler_build_gsau": 1,
+  "queue_max_scheduler_build_vlsu": 4,
+  "queue_max_scheduler_packet_datapath": 0,
+  "queue_max_scheduler_packet_gsau": 0,
+  "queue_max_scheduler_packet_vlsu": 0,
+  "queue_max_scheduler_packets": 1,
+  "queue_max_vlsu_dst_fifo": 4,
+  "queue_max_vlsu_issue_q": 3,
+  "queue_max_vlsu_req_q": 1,
+  "queue_max_vlsu_rsp_q": 1,
+  "queue_max_vlsu_wb_q": 0,
+  "queue_max_wb_buffer": 0,
+  "reuse_act_internal_over_external": 31.96875,
+  "reuse_psum_internal_over_external": 18.2470703125,
+  "reuse_weight_internal_over_external": 16.5,
+  "spad_bank_size": 128,
+  "spad_frontend_queue_size": 4,
+  "spad_num_banks": 32,
+  "spad_read_latency": 2,
+  "spad_write_latency": 2,
+  "sweep": "manual",
+  "throughput_float_operations_per_cycle": 345.130890052356,
+  "tile": 32,
+  "valid_mac_cycles": 75,
+  "vec_op_counts": {
+   "add": 0,
+   "and": 0,
+   "div": 0,
+   "eq": 0,
+   "exp": 0,
+   "gt": 0,
+   "lt": 0,
+   "max": 0,
+   "min": 0,
+   "mul": 0,
+   "ne": 0,
+   "or": 0,
+   "shl": 0,
+   "shr": 0,
+   "sqrt": 0,
+   "sub": 0,
+   "xor": 0
+  },
+  "vec_reduce_ops": 0,
+  "vec_total_ops": 0,
+  "vls_active_cycles": 89,
+  "vls_count": 1
+ },
+ "tpu_experiment_tile16": {
+  "arithmetic_intensity_algo": 5.333333333333333,
+  "arithmetic_intensity_internal": 3.6422120499814423,
+  "avg_active_pes_during_compute_window": 101.2,
+  "avg_active_pes_when_active": 103.7948717948718,
+  "backend_count": 4,
+  "backend_delay_cycles": 1,
+  "backend_dram_burst_bytes": 8,
+  "backend_dram_latency": 24,
+  "backend_dram_q_depth": 16,
+  "backend_shared_dram": true,
+  "backend_slots_attached": 4,
+  "bytes_algo": 1536,
+  "bytes_internal": 16166,
+  "bytes_transmitted": 1536,
+  "compute_window_cycles": 40,
+  "config": {
+   "backend_delay_cycles": 1,
+   "backend_dram_burst_bytes": 8,
+   "backend_dram_latency": 24,
+   "backend_dram_q_depth": 16,
+   "dram_block_bytes": 256,
+   "dtype": "fp16",
+   "lane_count": 4,
+   "max_cycles": 20000,
+   "name": "snapshot",
+   "param_name": "none",
+   "param_value": "none",
+   "spad_bank_size": 128,
+   "spad_frontend_queue_size": 4,
+   "spad_num_banks": 16,
+   "spad_read_latency": 2,
+   "spad_write_latency": 2,
+   "sweep": "manual",
+   "tile": 16,
+   "vls_count": 1
+  },
+  "cycles": 640,
+  "dram_block_bytes": 256,
+  "dtype": "fp16",
+  "external_bandwidth_active_bytes_per_cycle": 32.0,
+  "external_bandwidth_avg_bytes_per_cycle": 2.4,
+  "flops_algo": 8192,
+  "flops_micro": 58880,
+  "fp16_overflow_count": 0,
+  "fp16_saturation_count": 0,
+  "internal_bandwidth_bytes_per_cycle": 25.259375,
+  "lane_count": 4,
+  "mac_utilization": 0.40544871794871795,
+  "max_abs_error": 511.9999694824219,
+  "max_active_pes_in_any_cycle": 208,
+  "mean_abs_error": 179.99998927116394,
+  "name": "snapshot",
+  "param_name": "none",
+  "param_value": "none",
+  "pe_add_ops": 48640,
+  "pe_mac_ops": 10240,
+  "pe_mul_ops": 10240,
+  "pe_psum_adds": 40960,
+  "phase_activation_stream": 57,
+  "phase_compute_ramp": 23,
+  "phase_drain": 76,
+  "phase_idle": 0,
+  "phase_steady_compute": 3,
+  "phase_store_tail": 4,
+  "phase_weight_preload": 477,
+  "preload_done_cycle_count": 477,
+  "queue_avg_gsau_from_systolic": 0.025,
+  "queue_avg_gsau_rd_queue": 0.625,
+  "queue_avg_gsau_to_systolic": 0.0,
+  "queue_avg_gsau_writebacks": 0.0,
+  "queue_avg_scheduler_build_datapath": 0.0,
+  "queue_avg_scheduler_build_gsau": 0.05,
+  "queue_avg_scheduler_build_vlsu": 0.075,
+  "queue_avg_scheduler_packet_datapath": 0.0,
+  "queue_avg_scheduler_packet_gsau": 0.0,
+  "queue_avg_scheduler_packet_vlsu": 0.0,
+  "queue_avg_scheduler_packets": 0.0765625,
+  "queue_avg_vlsu_dst_fifo": 0.5546875,
+  "queue_avg_vlsu_issue_q": 0.01875,
+  "queue_avg_vlsu_req_q": 0.0203125,
+  "queue_avg_vlsu_rsp_q": 0.05,
+  "queue_avg_vlsu_wb_q": 0.0,
+  "queue_avg_wb_buffer": 0.0,
+  "queue_max_gsau_from_systolic": 1,
+  "queue_max_gsau_rd_queue": 9,
+  "queue_max_gsau_to_systolic": 0,
+  "queue_max_gsau_writebacks": 0,
+  "queue_max_scheduler_build_datapath": 0,
+  "queue_max_scheduler_build_gsau": 1,
+  "queue_max_scheduler_build_vlsu": 4,
+  "queue_max_scheduler_packet_datapath": 0,
+  "queue_max_scheduler_packet_gsau": 0,
+  "queue_max_scheduler_packet_vlsu": 0,
+  "queue_max_scheduler_packets": 1,
+  "queue_max_vlsu_dst_fifo": 4,
+  "queue_max_vlsu_issue_q": 3,
+  "queue_max_vlsu_req_q": 1,
+  "queue_max_vlsu_rsp_q": 1,
+  "queue_max_vlsu_wb_q": 0,
+  "queue_max_wb_buffer": 0,
+  "reuse_act_internal_over_external": 15.875,
+  "reuse_psum_internal_over_external": 6.19921875,
+  "reuse_weight_internal_over_external": 8.5,
+  "spad_bank_size": 128,
+  "spad_frontend_queue_size": 4,
+  "spad_num_banks": 16,
+  "spad_read_latency": 2,
+  "spad_write_latency": 2,
+  "sweep": "manual",
+  "throughput_float_operations_per_cycle": 92.0,
+  "tile": 16,
+  "valid_mac_cycles": 39,
+  "vec_op_counts": {
+   "add": 0,
+   "and": 0,
+   "div": 0,
+   "eq": 0,
+   "exp": 0,
+   "gt": 0,
+   "lt": 0,
+   "max": 0,
+   "min": 0,
+   "mul": 0,
+   "ne": 0,
+   "or": 0,
+   "shl": 0,
+   "shr": 0,
+   "sqrt": 0,
+   "sub": 0,
+   "xor": 0
+  },
+  "vec_reduce_ops": 0,
+  "vec_total_ops": 0,
+  "vls_active_cycles": 48,
+  "vls_count": 1
+ },
+ "tpu_system_16_meissa": {
+  "bytes_moved": 1536,
+  "cycles": 133,
+  "flops": 8192,
+  "mirror": "4c5e1ddc8279cbf2a12b8ec6f53baa4312b6153b2c19a6349cc407a2b87d9911",
+  "output": "4c5e1ddc8279cbf2a12b8ec6f53baa4312b6153b2c19a6349cc407a2b87d9911"
+ },
+ "tpu_system_32_tpu": {
+  "bytes_moved": 6144,
+  "cycles": 253,
+  "flops": 65536,
+  "mirror": "f5b934c33736facdcedce731e29740ce979bc5dce35de9dbb7985c8bcaadd1eb",
+  "output": "f5b934c33736facdcedce731e29740ce979bc5dce35de9dbb7985c8bcaadd1eb"
+ },
+ "transpose_bench_spad": {
+  "bench": "spad",
+  "cols": 32,
+  "config": {
+   "load_pad": 0,
+   "load_window": null,
+   "overlap": true,
+   "rows": 32,
+   "store_pad": 0
+  },
+  "cycles": 556,
+  "events": {
+   "col_wb": [
+    304,
+    312,
+    320,
+    328,
+    336,
+    344,
+    352,
+    360,
+    368,
+    376,
+    384,
+    392,
+    400,
+    408,
+    416,
+    424,
+    432,
+    440,
+    448,
+    456,
+    464,
+    472,
+    480,
+    488,
+    496,
+    504,
+    512,
+    520,
+    528,
+    536,
+    544,
+    552
+   ],
+   "load_issue": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "load_wb": [
+    8,
+    11,
+    14,
+    17,
+    20,
+    23,
+    26,
+    29,
+    32,
+    35,
+    38,
+    41,
+    44,
+    47,
+    50,
+    53,
+    56,
+    59,
+    62,
+    65,
+    68,
+    71,
+    74,
+    77,
+    80,
+    83,
+    86,
+    89,
+    92,
+    95,
+    98,
+    101
+   ],
+   "pop_issue": [
+    102
+   ],
+   "push_issue": [
+    9,
+    12,
+    15,
+    18,
+    21,
+    24,
+    27,
+    30,
+    33,
+    36,
+    39,
+    42,
+    45,
+    48,
+    51,
+    54,
+    57,
+    60,
+    63,
+    66,
+    69,
+    72,
+    75,
+    78,
+    81,
+    84,
+    87,
+    90,
+    93,
+    96,
+    99,
+    102
+   ],
+   "store_commit": [
+    307,
+    315,
+    323,
+    331,
+    339,
+    347,
+    355,
+    363,
+    371,
+    379,
+    387,
+    395,
+    403,
+    411,
+    419,
+    427,
+    435,
+    443,
+    451,
+    459,
+    467,
+    475,
+    483,
+    491,
+    499,
+    507,
+    515,
+    523,
+    531,
+    539,
+    547,
+    555
+   ],
+   "store_issue": [
+    305,
+    313,
+    321,
+    329,
+    337,
+    345,
+    353,
+    361,
+    369,
+    377,
+    385,
+    393,
+    401,
+    409,
+    417,
+    425,
+    433,
+    441,
+    449,
+    457,
+    465,
+    473,
+    481,
+    489,
+    497,
+    505,
+    513,
+    521,
+    529,
+    537,
+    545,
+    553
+   ],
+   "unit_pop_start": [
+    297
+   ],
+   "unit_push": [
+    9,
+    18,
+    27,
+    36,
+    45,
+    54,
+    63,
+    72,
+    81,
+    90,
+    99,
+    108,
+    117,
+    126,
+    135,
+    144,
+    153,
+    162,
+    171,
+    180,
+    189,
+    198,
+    207,
+    216,
+    225,
+    234,
+    243,
+    252,
+    261,
+    270,
+    279,
+    288
+   ],
+   "unit_row_stored": [
+    17,
+    26,
+    35,
+    44,
+    53,
+    62,
+    71,
+    80,
+    89,
+    98,
+    107,
+    116,
+    125,
+    134,
+    143,
+    152,
+    161,
+    170,
+    179,
+    188,
+    197,
+    206,
+    215,
+    224,
+    233,
+    242,
+    251,
+    260,
+    269,
+    278,
+    287,
+    296
+   ]
+  },
+  "phases": {
+   "drain": [
+    297,
+    552
+   ],
+   "load": [
+    0,
+    101
+   ],
+   "push": [
+    9,
+    296
+   ],
+   "store": [
+    305,
+    555
+   ]
+  },
+  "rows": 32
+ },
+ "transpose_bench_vrf": {
+  "bench": "vrf",
+  "cols": 32,
+  "config": {
+   "rows": 32
+  },
+  "cycles": 544,
+  "events": {
+   "col_wb": [
+    295,
+    303,
+    311,
+    319,
+    327,
+    335,
+    343,
+    351,
+    359,
+    367,
+    375,
+    383,
+    391,
+    399,
+    407,
+    415,
+    423,
+    431,
+    439,
+    447,
+    455,
+    463,
+    471,
+    479,
+    487,
+    495,
+    503,
+    511,
+    519,
+    527,
+    535,
+    543
+   ],
+   "pop_issue": [
+    0
+   ],
+   "push_issue": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "unit_pop_start": [
+    288
+   ],
+   "unit_push": [
+    0,
+    9,
+    18,
+    27,
+    36,
+    45,
+    54,
+    63,
+    72,
+    81,
+    90,
+    99,
+    108,
+    117,
+    126,
+    135,
+    144,
+    153,
+    162,
+    171,
+    180,
+    189,
+    198,
+    207,
+    216,
+    225,
+    234,
+    243,
+    252,
+    261,
+    270,
+    279
+   ],
+   "unit_row_stored": [
+    8,
+    17,
+    26,
+    35,
+    44,
+    53,
+    62,
+    71,
+    80,
+    89,
+    98,
+    107,
+    116,
+    125,
+    134,
+    143,
+    152,
+    161,
+    170,
+    179,
+    188,
+    197,
+    206,
+    215,
+    224,
+    233,
+    242,
+    251,
+    260,
+    269,
+    278,
+    287
+   ]
+  },
+  "phases": {
+   "drain": [
+    288,
+    543
+   ],
+   "push": [
+    0,
+    287
+   ]
+  },
+  "rows": 32
+ },
+ "vector_program_0": {
+  "cycles": 727,
+  "dcache": {
+   "evictions": 0,
+   "fill_wait_cycles": 0,
+   "fills": 0,
+   "flush_writebacks": 0,
+   "hits": 0,
+   "max_mshrs": 0,
+   "mem_wait_cycles": 0,
+   "misses": 0,
+   "present_fills": 0,
+   "requests": 0,
+   "retries": 0,
+   "secondary": 0,
+   "writebacks": 0
+  },
+  "dram": "79d77d0a9c16798fef5e7c27e38272761a48e4d455fc81c67a35fa37a8aa70f3",
+  "flushes": 0,
+  "issue_trace": "8a8ed903f72d1196075d86e2559a572a3ba53538032b7d152a394c9979f9b0e9",
+  "lsu": {
+   "full_cycles": 0,
+   "hits": 0,
+   "loads": 0,
+   "max_waiting": 0,
+   "misses": 0,
+   "retries": 0,
+   "stores": 0
+  },
+  "mask_regs": "e696edfab04e10e015ce3ba0173f414e0526c98f31cd07750be078e9076cdbc9",
+  "packets_fetched": 89,
+  "perf": {
+   "cycle_breakdown": {
+    "frontend:refill": 2,
+    "halt:drain": 208,
+    "issue": 88,
+    "stall:alu": 54,
+    "stall:hazard:scalar_alu": 46,
+    "stall:hazard:sdma": 98,
+    "stall:hazard:vector_lane": 91,
+    "stall:hazard:vector_reduce": 84,
+    "stall:mul": 9,
+    "stall:reduction": 25,
+    "stall:regfile": 22
+   },
+   "cycles": 727,
+   "instruction_mix": {
+    "halt": 1,
+    "scalar_alu": 30,
+    "sdma_load": 1,
+    "sdma_store": 1,
+    "vector_lane": 46,
+    "vector_reduce": 9,
+    "vreg_load": 8,
+    "vreg_store": 8
+   },
+   "issue": {
+    "flushes": 0,
+    "ops": 104,
+    "ops_per_cycle": 0.14305364511691884,
+    "packets": 88,
+    "packets_fetched": 89,
+    "packets_per_cycle": 0.12104539202200826,
+    "slot_utilization": 0.29545454545454547
+   },
+   "memory": {
+    "dcache": {
+     "evictions": 0,
+     "fill_wait_cycles": 0,
+     "fills": 0,
+     "flush_writebacks": 0,
+     "hits": 0,
+     "max_mshrs": 0,
+     "mem_wait_cycles": 0,
+     "misses": 0,
+     "present_fills": 0,
+     "requests": 0,
+     "retries": 0,
+     "secondary": 0,
+     "writebacks": 0
+    },
+    "dram_bursts": 136,
+    "dram_bytes": 1088,
+    "dram_bytes_per_cycle": 1.4965612104539203,
+    "dram_channel_busy": 0.18707015130674004,
+    "dram_peak_bytes_per_cycle": 8,
+    "icache": {
+     "fills": 1,
+     "iwait_cycles": 0
+    },
+    "masters": {
+     "dcache": {
+      "bursts": 0,
+      "bytes": 0,
+      "read_bytes": 0,
+      "wait_cycles": 0,
+      "write_bytes": 0
+     },
+     "icache": {
+      "bursts": 8,
+      "bytes": 64,
+      "read_bytes": 64,
+      "wait_cycles": 1,
+      "write_bytes": 0
+     },
+     "scpad0": {
+      "bursts": 64,
+      "bytes": 512,
+      "wait_cycles": 24
+     },
+     "scpad1": {
+      "bursts": 64,
+      "bytes": 512,
+      "wait_cycles": 65
+     },
+     "scpad2": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     },
+     "scpad3": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     }
+    },
+    "scratchpad": [
+     {
+      "read_queue": 0,
+      "reads": 8,
+      "stalls": 0,
+      "tile": 0,
+      "write_queue": 0,
+      "writes": 8
+     },
+     {
+      "read_queue": 0,
+      "reads": 8,
+      "stalls": 0,
+      "tile": 1,
+      "write_queue": 0,
+      "writes": 8
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 2,
+      "write_queue": 0,
+      "writes": 0
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 3,
+      "write_queue": 0,
+      "writes": 0
+     }
+    ]
+   },
+   "unit_busy": {
+    "dcache": {
+     "cycles": 128,
+     "fraction": 0.17606602475928473
+    },
+    "dram_channel": {
+     "cycles": 136,
+     "fraction": 0.18707015130674004
+    },
+    "lanes": {
+     "cycles": 294,
+     "fraction": 0.40440165061898214
+    },
+    "sdma0": {
+     "cycles": 96,
+     "fraction": 0.13204951856946354
+    },
+    "sdma1": {
+     "cycles": 76,
+     "fraction": 0.10453920220082531
+    },
+    "vlsu0": {
+     "cycles": 37,
+     "fraction": 0.05089408528198074
+    }
+   },
+   "work": {
+    "arithmetic_intensity": 1.6176470588235294,
+    "array_flops": 0,
+    "array_mac_utilization": 0.0,
+    "flops": 1760,
+    "flops_per_cycle": 2.420907840440165,
+    "lane_flops": 1760
+   }
+  },
+  "scalar_regs": "0947c131e9fc73a99f8de847d06165bdf8cffb7bf37be70c471b996c6680e5eb",
+  "vector_regs": "15a56ae30af60c8596a2209fbd0fe8f0e9e7a98937e9b174a59197cee9f69654",
+  "vector_side": {
+   "gsau_ops": 0,
+   "lane_ops": 55,
+   "mask_writes": 6,
+   "sdma_loads": 1,
+   "sdma_stores": 1,
+   "transpose_pops": 0,
+   "transpose_pushes": 0,
+   "vector_writes": 57,
+   "vlsu_loads": 8,
+   "vlsu_stores": 8,
+   "wb_conflict_cycles": 0
+  }
+ },
+ "vector_program_1": {
+  "cycles": 695,
+  "dcache": {
+   "evictions": 0,
+   "fill_wait_cycles": 0,
+   "fills": 0,
+   "flush_writebacks": 0,
+   "hits": 0,
+   "max_mshrs": 0,
+   "mem_wait_cycles": 0,
+   "misses": 0,
+   "present_fills": 0,
+   "requests": 0,
+   "retries": 0,
+   "secondary": 0,
+   "writebacks": 0
+  },
+  "dram": "889ea810c7d3662e01279621eadfc2ca9a1da51b3940504241c50197430e917b",
+  "flushes": 0,
+  "issue_trace": "d153826259ddb6513034260d89ba6829d1118c32261167cc645adac3b5fb54c8",
+  "lsu": {
+   "full_cycles": 0,
+   "hits": 0,
+   "loads": 0,
+   "max_waiting": 0,
+   "misses": 0,
+   "retries": 0,
+   "stores": 0
+  },
+  "mask_regs": "706b41b6355441104388d90347930f633d032006aa643d163fcf48338f19cfbf",
+  "packets_fetched": 89,
+  "perf": {
+   "cycle_breakdown": {
+    "frontend:refill": 2,
+    "halt:drain": 208,
+    "issue": 88,
+    "stall:alu": 23,
+    "stall:hazard:scalar_alu": 46,
+    "stall:hazard:sdma": 98,
+    "stall:hazard:vector_lane": 89,
+    "stall:hazard:vector_reduce": 107,
+    "stall:mul": 1,
+    "stall:reduction": 10,
+    "stall:regfile": 23
+   },
+   "cycles": 695,
+   "instruction_mix": {
+    "halt": 1,
+    "scalar_alu": 30,
+    "sdma_load": 1,
+    "sdma_store": 1,
+    "vector_lane": 50,
+    "vector_reduce": 8,
+    "vreg_load": 8,
+    "vreg_store": 8
+   },
+   "issue": {
+    "flushes": 0,
+    "ops": 107,
+    "ops_per_cycle": 0.1539568345323741,
+    "packets": 88,
+    "packets_fetched": 89,
+    "packets_per_cycle": 0.12661870503597122,
+    "slot_utilization": 0.3039772727272727
+   },
+   "memory": {
+    "dcache": {
+     "evictions": 0,
+     "fill_wait_cycles": 0,
+     "fills": 0,
+     "flush_writebacks": 0,
+     "hits": 0,
+     "max_mshrs": 0,
+     "mem_wait_cycles": 0,
+     "misses": 0,
+     "present_fills": 0,
+     "requests": 0,
+     "retries": 0,
+     "secondary": 0,
+     "writebacks": 0
+    },
+    "dram_bursts": 136,
+    "dram_bytes": 1088,
+    "dram_bytes_per_cycle": 1.5654676258992806,
+    "dram_channel_busy": 0.19568345323741007,
+    "dram_peak_bytes_per_cycle": 8,
+    "icache": {
+     "fills": 1,
+     "iwait_cycles": 0
+    },
+    "masters": {
+     "dcache": {
+      "bursts": 0,
+      "bytes": 0,
+      "read_bytes": 0,
+      "wait_cycles": 0,
+      "write_bytes": 0
+     },
+     "icache": {
+      "bursts": 8,
+      "bytes": 64,
+      "read_bytes": 64,
+      "wait_cycles": 3,
+      "write_bytes": 0
+     },
+     "scpad0": {
+      "bursts": 64,
+      "bytes": 512,
+      "wait_cycles": 24
+     },
+     "scpad1": {
+      "bursts": 64,
+      "bytes": 512,
+      "wait_cycles": 73
+     },
+     "scpad2": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     },
+     "scpad3": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     }
+    },
+    "scratchpad": [
+     {
+      "read_queue": 0,
+      "reads": 8,
+      "stalls": 0,
+      "tile": 0,
+      "write_queue": 0,
+      "writes": 8
+     },
+     {
+      "read_queue": 0,
+      "reads": 8,
+      "stalls": 0,
+      "tile": 1,
+      "write_queue": 0,
+      "writes": 8
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 2,
+      "write_queue": 0,
+      "writes": 0
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 3,
+      "write_queue": 0,
+      "writes": 0
+     }
+    ]
+   },
+   "unit_busy": {
+    "dcache": {
+     "cycles": 128,
+     "fraction": 0.1841726618705036
+    },
+    "dram_channel": {
+     "cycles": 136,
+     "fraction": 0.19568345323741007
+    },
+    "lanes": {
+     "cycles": 273,
+     "fraction": 0.39280575539568346
+    },
+    "sdma0": {
+     "cycles": 96,
+     "fraction": 0.1381294964028777
+    },
+    "sdma1": {
+     "cycles": 76,
+     "fraction": 0.1093525179856115
+    },
+    "vlsu0": {
+     "cycles": 37,
+     "fraction": 0.053237410071942444
+    }
+   },
+   "work": {
+    "arithmetic_intensity": 1.7058823529411764,
+    "array_flops": 0,
+    "array_mac_utilization": 0.0,
+    "flops": 1856,
+    "flops_per_cycle": 2.6705035971223023,
+    "lane_flops": 1856
+   }
+  },
+  "scalar_regs": "08a92a98ae094e29a1b726c78713e529a00e12209208be5fd53f583e5969a81a",
+  "vector_regs": "2c533055edd1605de8aec60c5672db31af48a3645f278838666750aca94f0681",
+  "vector_side": {
+   "gsau_ops": 0,
+   "lane_ops": 58,
+   "mask_writes": 9,
+   "sdma_loads": 1,
+   "sdma_stores": 1,
+   "transpose_pops": 0,
+   "transpose_pushes": 0,
+   "vector_writes": 57,
+   "vlsu_loads": 8,
+   "vlsu_stores": 8,
+   "wb_conflict_cycles": 0
+  }
+ },
+ "vector_program_2": {
+  "cycles": 781,
+  "dcache": {
+   "evictions": 0,
+   "fill_wait_cycles": 0,
+   "fills": 0,
+   "flush_writebacks": 0,
+   "hits": 0,
+   "max_mshrs": 0,
+   "mem_wait_cycles": 0,
+   "misses": 0,
+   "present_fills": 0,
+   "requests": 0,
+   "retries": 0,
+   "secondary": 0,
+   "writebacks": 0
+  },
+  "dram": "b01d68eac1f15d2b42308704d10fa4f22cb278c6d7fa081bed4efb5834956ab0",
+  "flushes": 0,
+  "issue_trace": "d48cbf3b4863a421ce2df23d57b5fbc0b055d851f1e4ebac3e9d822a1795079d",
+  "lsu": {
+   "full_cycles": 0,
+   "hits": 0,
+   "loads": 0,
+   "max_waiting": 0,
+   "misses": 0,
+   "retries": 0,
+   "stores": 0
+  },
+  "mask_regs": "1ffbaf4d6ac978dfdda2366576ef83f4e516f039de32cd24698f2274bc5b7214",
+  "packets_fetched": 89,
+  "perf": {
+   "cycle_breakdown": {
+    "frontend:refill": 2,
+    "halt:drain": 207,
+    "issue": 89,
+    "stall:alu": 17,
+    "stall:hazard:scalar_alu": 46,
+    "stall:hazard:sdma": 98,
+    "stall:hazard:vector_lane": 100,
+    "stall:hazard:vector_reduce": 197,
+    "stall:reduction": 2,
+    "stall:regfile": 23
+   },
+   "cycles": 781,
+   "instruction_mix": {
+    "halt": 1,
+    "scalar_alu": 30,
+    "sdma_load": 1,
+    "sdma_store": 1,
+    "vector_lane": 40,
+    "vector_reduce": 12,
+    "vreg_load": 8,
+    "vreg_store": 8
+   },
+   "issue": {
+    "flushes": 0,
+    "ops": 101,
+    "ops_per_cycle": 0.1293213828425096,
+    "packets": 89,
+    "packets_fetched": 89,
+    "packets_per_cycle": 0.11395646606914213,
+    "slot_utilization": 0.28370786516853935
+   },
+   "memory": {
+    "dcache": {
+     "evictions": 0,
+     "fill_wait_cycles": 0,
+     "fills": 0,
+     "flush_writebacks": 0,
+     "hits": 0,
+     "max_mshrs": 0,
+     "mem_wait_cycles": 0,
+     "misses": 0,
+     "present_fills": 0,
+     "requests": 0,
+     "retries": 0,
+     "secondary": 0,
+     "writebacks": 0
+    },
+    "dram_bursts": 136,
+    "dram_bytes": 1088,
+    "dram_bytes_per_cycle": 1.3930857874519846,
+    "dram_channel_busy": 0.17413572343149808,
+    "dram_peak_bytes_per_cycle": 8,
+    "icache": {
+     "fills": 1,
+     "iwait_cycles": 1
+    },
+    "masters": {
+     "dcache": {
+      "bursts": 0,
+      "bytes": 0,
+      "read_bytes": 0,
+      "wait_cycles": 0,
+      "write_bytes": 0
+     },
+     "icache": {
+      "bursts": 8,
+      "bytes": 64,
+      "read_bytes": 64,
+      "wait_cycles": 0,
+      "write_bytes": 0
+     },
+     "scpad0": {
+      "bursts": 64,
+      "bytes": 512,
+      "wait_cycles": 24
+     },
+     "scpad1": {
+      "bursts": 64,
+      "bytes": 512,
+      "wait_cycles": 64
+     },
+     "scpad2": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     },
+     "scpad3": {
+      "bursts": 0,
+      "bytes": 0,
+      "wait_cycles": 0
+     }
+    },
+    "scratchpad": [
+     {
+      "read_queue": 0,
+      "reads": 8,
+      "stalls": 0,
+      "tile": 0,
+      "write_queue": 0,
+      "writes": 8
+     },
+     {
+      "read_queue": 0,
+      "reads": 8,
+      "stalls": 0,
+      "tile": 1,
+      "write_queue": 0,
+      "writes": 8
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 2,
+      "write_queue": 0,
+      "writes": 0
+     },
+     {
+      "read_queue": 0,
+      "reads": 0,
+      "stalls": 0,
+      "tile": 3,
+      "write_queue": 0,
+      "writes": 0
+     }
+    ]
+   },
+   "unit_busy": {
+    "dcache": {
+     "cycles": 128,
+     "fraction": 0.16389244558258642
+    },
+    "dram_channel": {
+     "cycles": 136,
+     "fraction": 0.17413572343149808
+    },
+    "lanes": {
+     "cycles": 355,
+     "fraction": 0.45454545454545453
+    },
+    "sdma0": {
+     "cycles": 96,
+     "fraction": 0.12291933418693982
+    },
+    "sdma1": {
+     "cycles": 75,
+     "fraction": 0.09603072983354674
+    },
+    "vlsu0": {
+     "cycles": 37,
+     "fraction": 0.04737516005121639
+    }
+   },
+   "work": {
+    "arithmetic_intensity": 1.5294117647058822,
+    "array_flops": 0,
+    "array_mac_utilization": 0.0,
+    "flops": 1664,
+    "flops_per_cycle": 2.1306017925736236,
+    "lane_flops": 1664
+   }
+  },
+  "scalar_regs": "08a92a98ae094e29a1b726c78713e529a00e12209208be5fd53f583e5969a81a",
+  "vector_regs": "3635a8cf7b920899629849f84cca0179d961dc6f536fa8fbd1f4713303931caa",
+  "vector_side": {
+   "gsau_ops": 0,
+   "lane_ops": 52,
+   "mask_writes": 9,
+   "sdma_loads": 1,
+   "sdma_stores": 1,
+   "transpose_pops": 0,
+   "transpose_pushes": 0,
+   "vector_writes": 51,
+   "vlsu_loads": 8,
+   "vlsu_stores": 8,
+   "wb_conflict_cycles": 0
+  }
+ }
+}

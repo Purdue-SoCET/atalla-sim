@@ -266,11 +266,11 @@ def test_the_program_loader_reads_the_functional_sim_format():
     assert data == {0x100: 0xDEADBEEF}
 
 
+@pytest.mark.golden
 def test_branching_smoke_streams_through_the_front_end():
     """The one live program in the functional sim's corpus that exercises
     control flow. Without decode2 or execute, branches never resolve, so this
     checks fetch walks the image in order and every word classifies."""
-    golden.require(pytest)
     path = golden.SUBMODULE_PATH / "tests" / "unit" / "branching_smoke.txt"
     instr, _ = load_program_text(path.read_text())
     core = SchedulerCore(instr)

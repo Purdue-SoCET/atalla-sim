@@ -8,8 +8,7 @@ import random
 
 import pytest
 
-from scheduler.control import (
-    ALU, CONTROL, LD, S_DIV, SQRT, V_GSAU, decode_scalar, decode_sdma, decode_vector)
+from scheduler.control import decode_scalar, decode_sdma, decode_vector
 from scheduler.core import SchedulerCore
 from scheduler.decode1 import SCALAR, SCPAD, VECTOR, classify
 from scheduler.decode2 import (
@@ -290,7 +289,7 @@ def test_a_flushed_packet_reserves_nothing():
 def test_halt_ready_flags_say_something_is_outstanding():
     core, _ = run({0: packet(i("addi.s", 5, 0, 7))}, 4)
     d2 = core.decode2
-    assert d2.scalar_halt_ready and not d2.vector_halt_ready
+    assert d2.scalar_halt_ready and not d2.scoreboard.vector
     core.writeback_at(4, scalar=[(5, 7)])
     core.run(1, start=4)
     assert not d2.scalar_halt_ready

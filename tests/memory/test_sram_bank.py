@@ -6,7 +6,7 @@ these pin the rules directly.
 """
 import pytest
 
-from memory.sram_bank import SramBank, SramChannel, done_delay
+from memory.sram_bank import SramChannel, done_delay
 
 
 @pytest.mark.parametrize("latency,delay", [(0, 1), (1, 1), (2, 3), (4, 5)])
@@ -47,22 +47,3 @@ def test_back_to_back_accesses_go_every_done_delay_cycles():
         "the deadline form gives the same cadence"
 
 
-def test_reads_and_writes_are_independent():
-    bank = SramBank(height=4, read_latency=2, write_latency=2, init=0)
-    bank.edge(ren=True, raddr=0, wen=True, waddr=1, wdata=7)
-    assert bank.read.busy and bank.write.busy
-    bank.edge()
-    bank.edge()
-    assert bank.rdone and bank.wdone
-
-
-def test_the_array_is_read_and_written_on_the_enable_edge():
-    """Latency times only done: the data moves on the first edge, and a read
-    and a write of one address on that edge read the old value."""
-    bank = SramBank(height=4, read_latency=4, write_latency=4, init=0)
-    bank.edge(wen=True, waddr=2, wdata=11)
-    assert bank.mem[2] == 11, "written on the enable's edge, long before done"
-    bank = SramBank(height=4, read_latency=2, write_latency=2, init=0)
-    bank.mem[3] = 5
-    bank.edge(ren=True, raddr=3, wen=True, waddr=3, wdata=9)
-    assert bank.rdata == 5 and bank.mem[3] == 9

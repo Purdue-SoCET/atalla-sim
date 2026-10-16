@@ -341,8 +341,8 @@ def test_halt_waits_for_stores_and_writes_dirty_lines_back():
 # -- against the functional sim ----------------------------------------------------------
 
 def run_both(prog, data=None):
-    golden.require(pytest)
-    regs, mem = golden.run_golden(prog, data)
+    g = golden.run_golden_state(prog, data)
+    regs, mem = g["sregs"], g["mem"]
     c = SchedulerCore(prog, data=data)
     c.run_until_done(limit=200_000)
     assert in_program_order(c)
@@ -353,6 +353,7 @@ def run_both(prog, data=None):
     return c
 
 
+@pytest.mark.golden
 def test_golden_loop_with_memory():
     """Sum a 16-word array into x20 and store running sums back."""
     prog = program(
@@ -419,18 +420,20 @@ def random_program(seed, n=60):
     return program(*pkts)
 
 
+@pytest.mark.golden
 @pytest.mark.parametrize("seed", range(8))
 def test_golden_random_programs(seed):
     run_both(random_program(seed), DATA)
 
 
+@pytest.mark.golden
 @pytest.mark.parametrize("seed", range(4))
 def test_golden_random_programs_small_cache(seed):
     """A 512 B, 2-way cache with 2 MSHRs: evictions, retries and write-backs
     in the middle of a program."""
-    golden.require(pytest)
     prog = random_program(100 + seed, n=80)
-    regs, mem = golden.run_golden(prog, DATA)
+    g = golden.run_golden_state(prog, DATA)
+    regs, mem = g["sregs"], g["mem"]
     c = SchedulerCore(prog, data=DATA, dcache_config=DCacheConfig(
         size_bytes=512, ways=2, line_bytes=32, mshrs=2, targets_per_mshr=2))
     c.run_until_done(limit=200_000)

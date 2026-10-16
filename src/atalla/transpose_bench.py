@@ -44,6 +44,9 @@ DEFAULT_LIMIT = 100_000
 
 @dataclass
 class TransposeBenchResult:
+    """One bench run: the cycle count, when each phase ran, and when each
+    row's or column's events happened. summary() formats it.
+    """
     bench: str
     rows: int
     cols: int

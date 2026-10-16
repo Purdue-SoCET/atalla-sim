@@ -1,3 +1,9 @@
+"""SimQueue: a fixed-capacity FIFO, the model of a hardware queue.
+
+enqueue() returns False instead of growing when the queue is full, so a
+producer sees backpressure the way the hardware would.
+"""
+
 from collections import deque
 from typing import Deque, Generic, List, Optional, TypeVar
 

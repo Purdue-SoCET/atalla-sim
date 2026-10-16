@@ -69,6 +69,11 @@ def _vector_class(o) -> str:
 
 
 class PerfMonitor(Clocked):
+    """Watches an AtallaPlatform each cycle and tallies the metrics above.
+
+    To add a metric: count it in tick() (read the platform, never change it)
+    and add it to report(); summary() prints from report().
+    """
     def __init__(self, platform, *, timeline: bool = False):
         super().__init__()
         self.p = platform
@@ -195,6 +200,9 @@ class PerfMonitor(Clocked):
 
     # -- the report ---------------------------------------------------------------------
     def report(self) -> Dict:
+        """Every metric, as a nested dict (the keys are the sections of the
+        module docstring). To add a metric, add its key here.
+        """
         p, core = self.p, self.p.core
         cyc = max(1, self.cycles)
         n = p.vc.vector_len
@@ -259,6 +267,7 @@ class PerfMonitor(Clocked):
         }
 
     def summary(self) -> str:
+        """report() as a readable text table."""
         r = self.report()
         cyc = max(1, r["cycles"])
         lines = ["%d cycles" % r["cycles"], "", "where the cycles went:"]

@@ -1,3 +1,14 @@
+"""The number formats of the machine (BF16, FP16, INT8) and rounding to them.
+
+DType names a format; normalize_dtype accepts a DType or a name ("bf16",
+"bfloat16", ...). cast_vector / cast_scalar round values to a format the way
+the hardware does: BF16 goes through FP32 and rounds to nearest-even, as the
+functional sim does (bf16_round). Long vectors take the native SIMD kernel
+(src/native), short ones numpy or struct; both give the same bits.
+To add a format: add it to DType and _DTYPE_ALIASES, give it a numpy storage
+type in _resolve_numpy_dtype, and a rounding path in cast_vector/cast_scalar.
+"""
+
 from array import array as _array
 from enum import Enum
 from struct import pack as _pack, unpack as _unpack
@@ -9,6 +20,7 @@ from native import kernels as _native
 
 
 class DType(Enum):
+    """A number format of the machine."""
     BF16 = "bf16"
     FP16 = "fp16"
     INT8 = "int8"
@@ -105,6 +117,7 @@ _NATIVE_MODE = {DType.FP16: _native.CAST_HALF, DType.BF16: _native.CAST_BF16}
 
 
 def cast_vector(values: Iterable[float], dtype: DType) -> List[float]:
+    """Round every value to `dtype`, as the hardware stores it."""
     # The length test comes first so a one-shot iterable is never partly
     # consumed before falling through to the numpy path below.
     mode = _NATIVE_MODE.get(dtype)
@@ -131,6 +144,7 @@ def cast_vector(values: Iterable[float], dtype: DType) -> List[float]:
 
 
 def cast_scalar(value: float, dtype: DType) -> float:
+    """Round one value to `dtype`; the same result as cast_vector."""
     if dtype == DType.FP16:
         # struct's 'e' format is roughly twice as fast as a numpy scalar
         # round-trip and rounds identically (round-to-nearest-even).

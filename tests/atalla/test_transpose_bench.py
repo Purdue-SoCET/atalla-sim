@@ -12,10 +12,13 @@ too.
 import pytest
 
 from atalla.transpose_bench import run_spad_bench, run_vrf_bench
-from vector_core.transpose import TransposeUnit
+from vector_core.transpose import (
+    CLOS_LATENCY, SRAM_READ_LATENCY, SRAM_WRITE_LATENCY, bank_done_delay)
 
-PUSH = TransposeUnit().push_cycles                  # 9
-DRAIN = 32 * TransposeUnit().column_cycles          # 256
+#: A row's cost in the transpose unit (9), and a full tile's 32 columns (256);
+#: see push_cycles / column_cycles in tests/vector_core/test_transpose_unit.py.
+PUSH = 1 + CLOS_LATENCY + bank_done_delay(SRAM_WRITE_LATENCY)
+DRAIN = 32 * (1 + bank_done_delay(SRAM_READ_LATENCY) + CLOS_LATENCY + 1)
 #: Spad bench, overlapped. Lead: the first load's 7-cycle scratchpad read,
 #: a cycle for the VLSU to write the row back, a cycle to issue the push.
 #: Tail: the last column's store is issued the cycle after its writeback and

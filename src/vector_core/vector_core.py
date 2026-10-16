@@ -1,3 +1,22 @@
+"""The vector core: the vector units and the register file they share.
+
+VectorCore owns the units -- the lane datapath (vector_lanes.py), four VLSUs
+(vector_load_store.py), the GSAU (the systolic array's port, below) and the
+transpose unit (transpose.py) -- and the vector register file (Veggie,
+veggie_file.py). It can be driven two ways:
+
+  tick()        the harnesses' way: instructions queued with
+                enqueue_scheduler_instruction() are packed into VLIW packets,
+                their operands read out of the register file, issued, and
+                one result a cycle written back through WBBuffer.
+  tick_units()  the scheduler's way (scheduler/vector.py): the scheduler
+                hands each unit its data itself and arbitrates writeback, so
+                only the units are advanced.
+
+To add a unit: construct it in __init__, tick it in both tick() and
+tick_units(), and, for the harness path, add an _issue_<unit> and a _wb_<unit>.
+"""
+
 from base.clocked_object import Clocked
 from base.queue import SimQueue
 from typing import Dict, List, Optional, Sequence, Tuple, Union
@@ -40,6 +59,9 @@ class WBBuffer(Clocked):
         self._reserved_banks.clear()
 
     def can_accept_entry(self, entry: Dict) -> bool:
+        """Room for `entry`, and no other entry this cycle or queued writes
+        its register-file bank?
+        """
         if self.entries.is_full():
             return False
         bank = entry.get("bank")
@@ -74,6 +96,7 @@ class WBBuffer(Clocked):
 
 
 class SchedulerBacklogView:
+    """len() is how many instructions wait to issue (for queue-depth reports)."""
     def __init__(self, owner: "VectorCore"):
         self.owner = owner
 
@@ -82,6 +105,7 @@ class SchedulerBacklogView:
 
 
 class SchedulerPacketView:
+    """len() is how many packets wait to issue (for queue-depth reports)."""
     def __init__(self, owner: "VectorCore"):
         self.owner = owner
 
@@ -121,6 +145,11 @@ class GSAU(Clocked):
         self.writebacks = SimQueue(max(1, int(rsp_depth)))
 
     def issue(self, cmd: Dict) -> bool:
+        """Send a row to the systolic array: {"vdata", "dtype", "is_weight",
+        "dst" (for rows that produce an output), "meta"}. The output, when it
+        comes back, is written to `dst`; outputs come back in issue order. False
+        if the queues are full (try again next cycle).
+        """
         entry = dict(cmd)
         dtype = normalize_dtype(entry.get("dtype"), default=None)
         if dtype is None:
@@ -145,6 +174,7 @@ class GSAU(Clocked):
                 return False
 
         vdata = entry["vdata"] if isinstance(entry["vdata"], list) else list(entry["vdata"])
+        self.wake()
         return self.to_systolic.enqueue(
             {
                 "vdata": vdata,
@@ -159,6 +189,7 @@ class GSAU(Clocked):
         return self.to_systolic.dequeue()
 
     def push_systolic_response(self, rsp: Dict) -> bool:
+        """Accept an output row from the systolic array (its "vdata")."""
         packet = rsp
         if "vdata" not in packet and "data" in packet:
             packet = dict(rsp)
@@ -168,6 +199,7 @@ class GSAU(Clocked):
         if not isinstance(packet["vdata"], list):
             packet = dict(packet)
             packet["vdata"] = list(packet["vdata"])
+        self.wake()
         return self.from_systolic.enqueue(packet)
 
     def can_pop_writeback(self) -> bool:
@@ -178,6 +210,11 @@ class GSAU(Clocked):
 
     def has_pending(self) -> bool:
         return (not self.to_systolic.is_empty()) or (not self.from_systolic.is_empty())
+
+    def next_wake(self, now: int) -> Optional[int]:
+        """Its tick only pairs results with destinations: asleep with no
+        result waiting. push_systolic_response wakes it."""
+        return None if self.from_systolic.is_empty() else now + 1
 
     def tick(self, time: Optional[Time] = None) -> None:
         cycle = self._consume_tick(time, attr_name="_tick")
@@ -291,6 +328,11 @@ class VectorCore(Clocked):
             # Each VLSU is wired to one scratchpad frontend.
             self.vls_units.append(VLSU(scratchpad_count=1, read_vreg_cb=self.read_vreg))
 
+        # The units, ticked in this order by tick_children; each sleeps
+        # while it has nothing to do (base/sched.py).
+        for unit in (self.datapath, *self.vls_units, self.gsau, self.transpose):
+            self.add_child(unit)
+
         self.last_wb = None
         self.wb_valid = False
         self.last_datapath_inst_id = None
@@ -315,6 +357,7 @@ class VectorCore(Clocked):
         return vec
 
     def read_vreg(self, reg: int) -> List[float]:
+        """Register `reg`'s value, untimed (no port or bank is used)."""
         bank, addr = self._reg_to_bank_addr(reg)
         raw = self.veggie.data_banks[bank][addr]
         if isinstance(raw, list):
@@ -339,6 +382,7 @@ class VectorCore(Clocked):
         return vec, dtype
 
     def write_vreg(self, reg: int, data: Sequence[float], dtype: Optional[object] = None) -> None:
+        """Set register `reg`, untimed, rounded to `dtype`."""
         bank, addr = self._reg_to_bank_addr(reg)
         dtype_norm = normalize_dtype(dtype, default=self.dtype_default)
         if dtype_norm is None:
@@ -351,12 +395,6 @@ class VectorCore(Clocked):
             )
         self.veggie.data_banks[bank][addr] = vec
         self.veggie.dtype_banks[bank][addr] = dtype_norm
-
-    def load_vreg(self, reg: int, data: Sequence[float], dtype: Optional[object] = None) -> None:
-        self.write_vreg(reg, data, dtype=dtype)
-
-    def dump_vreg(self, reg: int) -> List[float]:
-        return self.read_vreg(reg)
 
     def enqueue_scheduler_instruction(self, inst: Dict) -> bool:
         """
@@ -406,46 +444,6 @@ class VectorCore(Clocked):
             self._build_packet = packet
             return False
         return True
-
-    def enqueue_vliw_packet(self, packet: Dict) -> bool:
-        if not self._flush_build_packet():
-            return False
-        norm = self._empty_packet()
-        for unit in PACKET_UNITS:
-            items = packet.get(unit, [])
-            if isinstance(items, dict):
-                items = [items]
-            for inst in items:
-                if not self._packet_append_inst(norm, dict(inst)):
-                    return False
-        if not self._packet_has_entries(norm):
-            return True
-        return self.vliw_q.enqueue(norm)
-
-    def enqueue_compute(
-        self,
-        op: str,
-        dst: int,
-        src0: Union[Sequence[float], int],
-        src1: Optional[Union[Sequence[float], int]] = None,
-        mask: Optional[Union[Sequence[bool], int]] = None,
-        reduce: bool = False,
-        reduce_op: str = "sum",
-        reduce_out_mode: str = "partial_zero",
-    ) -> bool:
-        return self.enqueue_scheduler_instruction(
-            {
-                "unit": "datapath",
-                "op": op,
-                "dst": dst,
-                "src0": src0,
-                "src1": src1,
-                "mask": mask,
-                "reduce": reduce,
-                "reduce_op": reduce_op,
-                "reduce_out_mode": reduce_out_mode,
-            }
-        )
 
     def enqueue_memory(self, op: Dict) -> bool:
         inst = dict(op)
@@ -701,8 +699,35 @@ class VectorCore(Clocked):
             _ = self.vliw_q.dequeue()
 
     def _collect_results_to_wb(self) -> None:
-        candidates = []
+        """Move this cycle's finished results into the writeback buffer, by
+        priority: VLSU 0, the other VLSUs, the GSAU and transpose unit,
+        reductions, then the lane datapath. A result the buffer can't take
+        stays where it is for next cycle. Each source's _wb_* method below
+        builds its candidate entries; (priority, key, entry, raw) each."""
+        pkt, candidates = self._wb_datapath()
+        candidates += self._wb_vlsus() + self._wb_gsau() + self._wb_transpose()
 
+        accepted_datapath = False
+        for _prio, src_key, entry, raw in sorted(candidates, key=lambda x: x[0]):
+            if not self.wb_buffer.enqueue(entry):
+                continue
+            if src_key == "datapath":
+                accepted_datapath = True
+                self._datapath_wb_hold = None
+            elif src_key == "gsau":
+                _ = self.gsau.pop_writeback()
+            elif src_key == "transpose":
+                _ = self.transpose.pop_writeback()
+            else:
+                _ = self.vls_units[src_key[1]].pop_writeback()
+
+        if pkt is not None and not accepted_datapath:
+            self._datapath_wb_hold = pkt
+
+    def _wb_datapath(self):
+        """The lane datapath's finished vector (or the one held from last
+        cycle), as (packet, candidates)."""
+        candidates = []
         pkt = self._datapath_wb_hold
         if pkt is None and self.datapath.result_valid:
             pkt = self.datapath.last_result
@@ -730,7 +755,11 @@ class VectorCore(Clocked):
                     pkt,
                 )
             )
+        return pkt, candidates
 
+    def _wb_vlsus(self):
+        """Each VLSU's next load result."""
+        candidates = []
         for vls_id, vls in enumerate(self.vls_units):
             wb = vls.wb_q.peek()
             if wb is None:
@@ -757,7 +786,11 @@ class VectorCore(Clocked):
                     wb,
                 )
             )
+        return candidates
 
+    def _wb_gsau(self):
+        """The GSAU's next systolic-array result."""
+        candidates = []
         wb = self.gsau.writebacks.peek()
         if wb is not None:
             bank, _ = self._reg_to_bank_addr(int(wb["dst"]))
@@ -780,7 +813,11 @@ class VectorCore(Clocked):
                     wb,
                 )
             )
+        return candidates
 
+    def _wb_transpose(self):
+        """The transpose unit's next column."""
+        candidates = []
         wb = self.transpose.peek_writeback()
         if wb is not None:
             if "dst" not in wb:
@@ -801,23 +838,7 @@ class VectorCore(Clocked):
                     wb,
                 )
             )
-
-        accepted_datapath = False
-        for _prio, src_key, entry, raw in sorted(candidates, key=lambda x: x[0]):
-            if not self.wb_buffer.enqueue(entry):
-                continue
-            if src_key == "datapath":
-                accepted_datapath = True
-                self._datapath_wb_hold = None
-            elif src_key == "gsau":
-                _ = self.gsau.pop_writeback()
-            elif src_key == "transpose":
-                _ = self.transpose.pop_writeback()
-            else:
-                _ = self.vls_units[src_key[1]].pop_writeback()
-
-        if pkt is not None and not accepted_datapath:
-            self._datapath_wb_hold = pkt
+        return candidates
 
     def _commit_one_writeback(self) -> None:
         self.wb_valid = False
@@ -862,11 +883,7 @@ class VectorCore(Clocked):
         self._operand_cycle(cycle)
 
         # 3) Advance compute and memory units.
-        self.datapath.tick(cycle)
-        for vls in self.vls_units:
-            vls.tick(cycle)
-        self.gsau.tick(cycle)
-        self.transpose.tick(cycle)
+        self.tick_children(cycle)
 
         # 3) Funnel unit outputs into shared writeback buffer.
         self.wb_buffer.start_cycle()
@@ -888,11 +905,7 @@ class VectorCore(Clocked):
         cycle = self._consume_tick(time, attr_name="_tick")
         if cycle is None:
             return
-        self.datapath.tick(cycle)
-        for vls in self.vls_units:
-            vls.tick(cycle)
-        self.gsau.tick(cycle)
-        self.transpose.tick(cycle)
+        self.tick_children(cycle)
 
     def pop_scratchpad_request(self, vls_id: int) -> Optional[Dict]:
         if vls_id < 0 or vls_id >= len(self.vls_units):
@@ -923,5 +936,3 @@ class VectorCore(Clocked):
     def push_systolic_response(self, rsp: Dict) -> bool:
         return self.gsau.push_systolic_response(rsp)
 
-
-VC = VectorCore

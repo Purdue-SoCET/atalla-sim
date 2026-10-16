@@ -25,7 +25,7 @@ from atalla.atalla_platform import build_atalla_platform
 from scheduler.semantics import u32
 from scheduler.vector import bf16_round
 
-from test_execute import HALT, OP, base, i, mi, program, r
+from test_execute import HALT, OP, base, i, program, r
 
 
 # -- encoders --------------------------------------------------------------------
@@ -125,7 +125,6 @@ def run_platform(prog, data, warm_icache=True):
 
 
 def compare_to_golden(prog, data):
-    golden.require(pytest)
     g = golden.run_golden_state(prog, data, reductions="lanes")
     plat = run_platform(prog, data)
     c = plat.core
@@ -212,6 +211,7 @@ def test_halt_waits_for_the_vector_side():
 
 # -- against the functional sim --------------------------------------------------------------
 
+@pytest.mark.golden
 def test_golden_arithmetic_masks_and_moves():
     data = tile_data(DRAM_IN, LOAD_ROWS, values)
     pk = prologue() + [
@@ -287,6 +287,7 @@ def random_vector_program(seed, n=40):
     return program(*pk)
 
 
+@pytest.mark.golden
 @pytest.mark.parametrize("seed", range(6))
 def test_golden_random_vector_programs(seed):
     def vals(rr, col, _r=random.Random(seed)):

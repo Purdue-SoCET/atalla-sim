@@ -26,8 +26,8 @@ does not reproduce the bug:
     into a busy EX2. Here it needs EX2 like the other EX2 operations.
 """
 
-from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from dataclasses import dataclass
+from typing import List, Optional
 
 from scheduler.isa import OP_W, OPCODES, get_bits, sign_extend
 
@@ -63,6 +63,7 @@ VECTOR_ALU_FUS = frozenset(range(V_ALU_ADD, V_ALU_MNEQ + 1))
 
 @dataclass
 class ScalarOp:
+    """A decoded scalar instruction: its fields, and what it reads and writes."""
     slot: int
     word: int
     op: int
@@ -107,6 +108,9 @@ class ScalarOp:
 
 @dataclass
 class VectorOp:
+    """A decoded vector instruction: its fields, its functional unit (fu,
+    a V_* value), and the scalar, vector and mask registers it reads and writes.
+    """
     slot: int
     word: int
     op: int
@@ -165,6 +169,7 @@ class VectorOp:
 
 @dataclass
 class SdmaOp:
+    """A decoded scratchpad DMA instruction (scpad.ld / scpad.st)."""
     slot: int
     word: int
     op: int
@@ -214,6 +219,10 @@ _BRANCHES = {"beq.s", "bne.s", "blt.s", "bge.s", "bgt.s", "ble.s"}
 
 
 def decode_scalar(word: int, slot: int = 0) -> ScalarOp:
+    """Decode a 40-bit scalar instruction word in `slot` of its packet:
+    which execute unit it uses, the registers it reads and writes, its
+    immediate. An unknown opcode gives valid=False.
+    """
     op = get_bits(word, OP_W - 1, 0)
     d = ScalarOp(slot=slot, word=word, op=op, rs1=get_bits(word, 22, 15),
                  rs2=get_bits(word, 30, 23), rd=get_bits(word, 14, 7))
@@ -268,6 +277,11 @@ _MVS = {"mgt.mvs": V_ALU_MGT, "mlt.mvs": V_ALU_MLT, "meq.mvs": V_ALU_MEQ,
 
 
 def decode_vector(word: int, slot: int = 0) -> VectorOp:
+    """Decode a 40-bit vector instruction word in `slot` of its packet:
+    its functional unit (fu) and the registers it reads and writes. To
+    support a new vector instruction, add its mnemonic to the opcode table
+    and to the group here that has its operand format.
+    """
     op = get_bits(word, OP_W - 1, 0)
     d = VectorOp(slot=slot, word=word, op=op)
     m = OPCODES.get(op, ("", ""))[0]

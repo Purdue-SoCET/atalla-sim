@@ -9,6 +9,7 @@ from typing import Callable, List, Optional
 
 
 class Frontend:
+    """The VLSU-facing port of scratchpad pad `tile_id`."""
     def __init__(self, tile_id: int, spad: "Scratchpad"):
         self.tile_id = int(tile_id)
         self.spad = spad

@@ -2,8 +2,6 @@ import pytest
 
 from base.testing import build_sim
 from base.eventq import EventQueue
-from base.clock_domain import ClockDomain
-from base.core import Core
 from base.sim import Sim
 
 from vector_core.vector_lanes import VectorDatapath

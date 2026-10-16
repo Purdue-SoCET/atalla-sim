@@ -197,6 +197,9 @@ class SystolicArrayMEISSA(Clocked):
             self._state = self._build_native_state()
         # Per-cycle scratch for the batched kernel entry point, grown on demand.
         self._batch = None
+        #: True once the grid, the trees and the output buffer hold nothing:
+        #: an idle cycle then changes only the cycle counter (_idle_tick).
+        self._drained = False
 
     def _build_native_state(self):
         """Point the kernel at the arrays this object already owns.
@@ -280,6 +283,7 @@ class SystolicArrayMEISSA(Clocked):
         if not self.can_accept():
             return False
         self._pending_act = self._cast(activations, dtype)
+        self._drained = False
         self._pending_count_algo = bool(count_algo)
         if count_algo:
             self.algo_counts["act_rows"] += 1
@@ -315,6 +319,7 @@ class SystolicArrayMEISSA(Clocked):
     def set_control(self, *, weight_en: Optional[bool] = None,
                     mac_shift: Optional[bool] = None, start: Optional[bool] = None,
                     stall: Optional[bool] = None) -> None:
+        """Set the control signals for the next tick; None leaves one as it is."""
         if weight_en is not None:
             self.weight_en = bool(weight_en)
         if mac_shift is not None:
@@ -434,54 +439,6 @@ class SystolicArrayMEISSA(Clocked):
         self.value_ready = produced > 0
         return produced
 
-    def run_cycles(self, cycles: int, activations: Optional[Sequence] = None,
-                   weights: Optional[Sequence] = None) -> int:
-        """Advance `cycles` cycles in one go, returning the rows produced.
-
-        `activations[c]` / `weights[c]` are what to inject on cycle c, or None
-        for a bubble. Use this wherever the array can run unattended -- a tile
-        streamed in one burst, or the drain after the last vector. The
-        per-cycle tick() contract still works and is bit-identical; this just
-        stops paying Python for every cycle.
-        """
-        cycles = int(cycles)
-        if cycles <= 0:
-            return 0
-        self._ensure_batch(cycles)
-        b = self._batch
-        b["inject_valid"][:cycles] = 0
-        b["wgt_en"][:cycles] = 0
-        if activations:
-            for c, row in enumerate(activations[:cycles]):
-                if row is not None:
-                    b["inject"][c] = np.asarray(self._cast(row, None), dtype=np.float32)
-                    b["inject_valid"][c] = 1
-                    self.algo_counts["act_rows"] += 1
-        if weights:
-            for c, row in enumerate(weights[:cycles]):
-                if row is not None:
-                    b["wgt_push"][c] = np.asarray(self._cast(row, None), dtype=np.float32)
-                    b["wgt_en"][c] = 1
-                    self.algo_counts["wgt_cols"] += 1
-        if not self.use_native:
-            return self._run_reference(cycles, b)
-        self._tick = (self._tick if self._tick >= 0 else 0) + cycles
-        return self._run_native(cycles)
-
-    def _run_reference(self, cycles: int, b) -> int:
-        """The numpy path driving the same batch, for equivalence testing."""
-        before = len(self.output_rows)
-        for c in range(cycles):
-            if b["wgt_en"][c]:
-                self._pending_wgt = list(b["wgt_push"][c])
-                self.weight_en = True
-            else:
-                self.weight_en = False
-            if b["inject_valid"][c]:
-                self._pending_act = list(b["inject"][c])
-            self._cycle_reference()
-        return len(self.output_rows) - before
-
     def _cycle_reference(self) -> None:
         self._shift_weights()
         self._shift_activations()
@@ -495,6 +452,34 @@ class SystolicArrayMEISSA(Clocked):
         if cycle is None or self.stall:
             return
 
+        if self._drained and self._pending_act is None and not (
+                self.weight_en and self._pending_wgt is not None):
+            self._idle_tick()
+            return
+        injected = self._pending_act is not None
+        self._step()
+        if not injected:
+            self._drained = self._is_drained()
+
+    def _is_drained(self) -> bool:
+        """Nothing anywhere: no vector in the grid or the trees, none in the
+        output buffer. Checked after a cycle with nothing injected."""
+        return not (self._bank_count.any() or (self._col_seq >= 0).any()
+                    or (self._tree_seq >= 0).any() or self._act.any()
+                    or self._tree_vals.any())
+
+    def _idle_tick(self) -> None:
+        """A cycle of a drained array with nothing coming in. Exactly what
+        _step would do then -- zeros shift through, the tree ring turns, the
+        cycle is counted -- without running the datapath. Keep it in step
+        with _step: anything _step counts on such a cycle must be counted here."""
+        self._pending_wgt = None
+        self._tree_head = (self._tree_head + 1) % self.pipeline_depth
+        self.compute_window_cycles += 1
+        self.value_ready = False
+
+    def _step(self) -> None:
+        """One full cycle of the datapath."""
         if self.use_native:
             self._ensure_batch(1)
             b = self._batch
@@ -650,10 +635,6 @@ class SystolicArrayMEISSA(Clocked):
 
     def active_lane_count(self) -> int:
         return int(np.count_nonzero((self._act != 0.0) & (self._wgt != 0.0)))
-
-    def active_cell_count(self) -> int:
-        both = (self._act != 0.0) & (self._wgt != 0.0)
-        return int(np.count_nonzero(both.any(axis=0)))
 
     # -- egress ------------------------------------------------------------
     def get_buffer(self) -> List[List[float]]:

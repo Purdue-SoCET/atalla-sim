@@ -11,7 +11,7 @@ import os
 
 import numpy as np
 
-# Cast modes understood by atalla_cast_array / atalla_cast_scalar.
+# Cast modes understood by atalla_cast_array.
 CAST_HALF = 0   # FP16
 CAST_INT8 = 1
 CAST_BF16 = 2
@@ -84,10 +84,6 @@ def _bind(lib):
     lib.atalla_cast_array.argtypes = [
         _c_dbl_p, _c_dbl_p, ctypes.c_int64, ctypes.c_int, ctypes.c_int, _c_i64_p]
 
-    lib.atalla_cast_scalar.restype = ctypes.c_double
-    lib.atalla_cast_scalar.argtypes = [
-        ctypes.c_double, ctypes.c_int, ctypes.POINTER(ctypes.c_int32)]
-
     lib.atalla_sa_tick.restype = None
     lib.atalla_sa_tick.argtypes = [
         ctypes.POINTER(SaState),
@@ -138,23 +134,6 @@ def _ptr(arr):
     return arr.ctypes.data_as(_c_dbl_p)
 
 
-def cast_array(values, mode=CAST_HALF, track=False, stats=None):
-    """Cast a float64 array through the SIMD kernel, returning a new array.
-
-    ``stats`` may be a length-3 c_int64 array, which accumulates
-    (saturations, overflows, int8-out-of-range). Saturation and overflow are
-    only counted when ``track`` is set.
-    """
-    src = np.ascontiguousarray(values, dtype=np.float64)
-    out = np.empty_like(src)
-    if stats is None:
-        stats = (ctypes.c_int64 * 3)()
-    lib.atalla_cast_array(_ptr(src), _ptr(out), src.size, mode,
-                          1 if track else 0,
-                          ctypes.cast(stats, _c_i64_p))
-    return out
-
-
 def cast_buffer_inplace(buf, mode=CAST_HALF):
     """Cast an array('d') in place through the SIMD kernel.
 
@@ -165,13 +144,6 @@ def cast_buffer_inplace(buf, mode=CAST_HALF):
     n = len(buf)
     p = ctypes.cast((ctypes.c_double * n).from_buffer(buf), _c_dbl_p)
     lib.atalla_cast_array(p, p, n, mode, 0, None)
-
-
-def cast_scalar_native(value, mode=CAST_HALF):
-    """Cast one value. Returns (result, out_of_range_flag)."""
-    flag = ctypes.c_int32(0)
-    out = lib.atalla_cast_scalar(float(value), mode, ctypes.byref(flag))
-    return out, bool(flag.value)
 
 
 class SaArrays:

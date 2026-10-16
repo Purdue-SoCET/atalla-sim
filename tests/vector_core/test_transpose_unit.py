@@ -17,6 +17,18 @@ from vector_core.transpose import (
 N = TRANSPOSE_VEC_LEN
 
 
+def push_cycles(unit) -> int:
+    """The RTL's cost of one row: accept it, cross the network, wait for the
+    bank's write done (sram_bank's done delay)."""
+    return 1 + unit.clos_latency + bank_done_delay(unit.sram_write_latency)
+
+
+def column_cycles(unit) -> int:
+    """The RTL's cost of one column: POPPING, the bank's read done, the
+    network, then DONE (with a consumer that takes it at once)."""
+    return 1 + bank_done_delay(unit.sram_read_latency) + unit.clos_latency + 1
+
+
 def tile(rows, cols=N):
     return [[float(r * cols + c) for c in range(cols)] for r in range(rows)]
 
@@ -84,8 +96,8 @@ def test_a_row_costs_9_cycles_and_a_column_8():
     last one over 32 * 8 cycles after the pop is taken."""
     unit = TransposeUnit()
     assert (SRAM_READ_LATENCY, SRAM_WRITE_LATENCY, CLOS_LATENCY) == (2, 4, 3)
-    assert unit.push_cycles == 1 + 3 + 5 == 9
-    assert unit.column_cycles == 1 + 3 + 3 + 1 == 8
+    assert push_cycles(unit) == 1 + 3 + 5 == 9
+    assert column_cycles(unit) == 1 + 3 + 3 + 1 == 8
     drv = Driver(unit)
 
     for row in tile(N):
@@ -97,8 +109,8 @@ def test_a_row_costs_9_cycles_and_a_column_8():
 def test_latencies_are_parameters():
     unit = TransposeUnit(vec_len=4, clos_latency=4, sram_read_latency=1,
                          sram_write_latency=6)
-    assert unit.push_cycles == 1 + 4 + 7
-    assert unit.column_cycles == 1 + 1 + 4 + 1
+    assert push_cycles(unit) == 1 + 4 + 7
+    assert column_cycles(unit) == 1 + 1 + 4 + 1
     drv = Driver(unit)
     assert drv.push([1.0, 2.0, 3.0, 4.0]) == 12
     for row in tile(3, 4):
@@ -214,7 +226,7 @@ def test_output_backpressure_parks_the_fsm_in_done():
     while len(drv.columns) < 3:
         drv.step()
     assert [e["col"] for e in drv.columns] == [1, 2, 3]
-    assert drv.cycle - start == 3 * unit.column_cycles
+    assert drv.cycle - start == 3 * column_cycles(unit)
 
 
 def test_pop_destinations_ride_along():

@@ -1,3 +1,11 @@
+"""VLSU: moves vectors between the vector register file and a scratchpad pad.
+
+enqueue_issue() accepts a load or store; requests go out through req_q (the platform's
+VLSFrontendBridge carries them to the pad) and load data comes back through
+push_response(), matched to its destination register in FIFO order. See the
+class docstring for the queues.
+"""
+
 from base.clocked_object import Clocked
 from base.queue import SimQueue
 from typing import Callable, Dict, List, Optional
@@ -91,16 +99,11 @@ class VectorLoadStoreUnit(Clocked):
 
         entry = dict(op)
         entry["scratchpad"] = spad
+        self.wake()
         return self.issue_q.enqueue(entry)
-
-    def can_pop_request(self) -> bool:
-        return not self.req_q.is_empty()
 
     def pop_request(self) -> Optional[Dict]:
         return self.req_q.dequeue()
-
-    def can_accept_response(self) -> bool:
-        return not self.rsp_q.is_full()
 
     def push_response(self, rsp: Dict) -> bool:
         """
@@ -117,6 +120,7 @@ class VectorLoadStoreUnit(Clocked):
             raise ValueError("scratchpad response requires data")
         entry = dict(rsp)
         entry["scratchpad"] = spad
+        self.wake()
         return self.rsp_q.enqueue(entry)
 
     def can_pop_writeback(self) -> bool:
@@ -254,8 +258,14 @@ class VectorLoadStoreUnit(Clocked):
         self._apply_one_writeback()
         self._update_debug_signals()
 
-    def fifo_occupancy(self) -> List[int]:
-        return [len(fifo) for fifo in self.load_dst_fifos]
+    def next_wake(self, now: int) -> Optional[int]:
+        """Asleep once every queue is empty and the debug signals say so.
+        enqueue_issue and push_response wake it."""
+        if (self.issue_q.is_empty() and self.req_q.is_empty() and self.rsp_q.is_empty()
+                and self.wb_q.is_empty() and not (self.req_valid or self.rsp_valid
+                                                  or self.wb_valid)):
+            return None
+        return now + 1
 
     def outstanding_loads(self, scratchpad: Optional[int] = None) -> int:
         if scratchpad is None:

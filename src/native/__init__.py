@@ -13,9 +13,7 @@ from .kernels import (  # noqa: F401
     CAST_INT8,
     CAST_BF16,
     SaArrays,
-    cast_array,
     cast_buffer_inplace,
-    cast_scalar_native,
     lib,
     load_error,
 )

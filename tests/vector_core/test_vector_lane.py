@@ -29,6 +29,16 @@ def _run_lane(lane, collector, cycles=12):
         lane.tick(float(t), collector)
 
 
+def slice_to_lane(elem: int, slice_w: int) -> tuple:
+    """Element -> (lane, position within that lane's slice).
+
+    Contiguous: lane L owns elements [L*slice_w, (L+1)*slice_w). The whole
+    vector is cut into lane_count adjacent pieces rather than dealt out
+    round-robin, so neighbouring elements share a lane.
+    """
+    return elem // slice_w, elem % slice_w
+
+
 def test_vector_lane_unit_dispatch_and_result_order():
     lane = VectorLane(lane_id=1, lane_count=4, fu_latencies={"alu": 2})
     collector = RecordingCollector()
@@ -90,7 +100,7 @@ def test_vector_lane_unit_mask_and_reduction_callbacks():
 def test_slicer_cuts_the_vector_into_contiguous_lane_slices():
     """Each lane owns an adjacent run of elements, not a stride."""
     from vector_core.vector_lanes import (
-        lane_slice_indices, slice_to_lane, slice_width)
+        lane_slice_indices, slice_width)
 
     assert slice_width(32, 16) == 2
     assert slice_width(32, 4) == 8

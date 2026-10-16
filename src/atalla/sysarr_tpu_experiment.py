@@ -1,5 +1,16 @@
+"""A single-tile GEMM experiment on the TPU platform, with detailed metrics.
+
+run_sysarr_tpu_experiment(config) moves weights and activations from DRAM
+through one scratchpad pad and VLSU into the systolic array, stores the
+outputs back, checks them against a reference, and returns cycle counts per
+phase (PHASE_ORDER), queue occupancies and traffic. The sweep scripts in
+tools/ call it with different SysArrTPUExperimentConfig settings.
+Run one from the command line with `python -m atalla.sysarr_tpu_experiment`.
+"""
+
 import argparse
 import json
+from dataclasses import asdict, dataclass, replace
 import os
 import sys
 from typing import Dict, List, Optional
@@ -9,18 +20,15 @@ import numpy as np
 if __package__ is None or __package__ == "":
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from base.clock_domain import ClockDomain
 from base.clocked_object import Clocked
-from base.core import Core
-from base.eventq import EventQueue
-from base.sim import Sim
-from memory.backend import Backend
-from memory.dram import DRAM
+from memory.dram import DRAM, DRAM_BURST_BYTES
 from memory.scratchpad import Scratchpad
 from systolic_array.systolic_array_tpu import SystolicArrayTPU
 from vector_core.vector_core import VectorCore
 
-from atalla.sysarr_tpu_system import GSAUTPUBridge, RoundRobinBackendTicker, TPUReference, build_tpu_platform
+from atalla.sysarr_tpu_system import (
+    RoundRobinBackendTicker, VLSFrontendBridge, build_tpu_platform, _act_u16,
+    _decode_row_u16, _encode_row_u16, _weights_u16)
 
 
 PHASE_ORDER = [
@@ -55,46 +63,6 @@ QUEUE_NAMES = [
 ]
 
 
-def build_sim():
-    eq = EventQueue()
-    clk = ClockDomain(eq, period=1.0)
-    core = Core(eq)
-    core.add_clock_domain(clk)
-    sim = Sim()
-    sim.init(eq, core)
-    return eq, clk, sim
-
-
-def _encode_vector_u16(vec):
-    return b"".join(int(v).to_bytes(2, "little", signed=False) for v in vec)
-
-
-def _decode_lanes_u16(lanes, vector_len: int):
-    out = []
-    for lane in list(lanes)[:vector_len]:
-        if lane is False:
-            lane = b"\x00\x00"
-        blob = bytes(lane) if lane is not None else b"\x00\x00"
-        if len(blob) < 2:
-            blob = blob + (b"\x00" * (2 - len(blob)))
-        out.append(int.from_bytes(blob[:2], "little", signed=False))
-    while len(out) < vector_len:
-        out.append(0)
-    return out
-
-
-def _encode_row_u16(row):
-    return b"".join(int(v).to_bytes(2, "little", signed=False) for v in row)
-
-
-def _decode_row_u16(blob: bytes, cols: int):
-    out = []
-    for i in range(int(cols)):
-        start = i * 2
-        out.append(int.from_bytes(blob[start : start + 2], "little", signed=False))
-    return out
-
-
 def _read_dram_row_u16(dram: DRAM, addr: int, cols: int):
     row_bytes = int(cols) * 2
     blob = dram.read(int(addr), row_bytes)
@@ -120,8 +88,8 @@ def _read_dram_tile_u16(dram: DRAM, base_addr: int, rows: int, cols: int) -> Lis
     return out
 
 
-def _read_slot_vector_u16(spad: Scratchpad, addr: int, vector_len: int):
-    tile = 0
+def _read_slot_vector_u16(spad: Scratchpad, addr: int, vector_len: int, tile_id: int = 0):
+    tile = int(tile_id)
     slot = int(addr) % spad.bank_size
     out = []
     for lane in range(vector_len):
@@ -134,20 +102,8 @@ def _read_slot_vector_u16(spad: Scratchpad, addr: int, vector_len: int):
     return out
 
 
-def _fp16_bits(value: float) -> int:
-    return int(np.asarray(value, dtype=np.float16).view(np.uint16).item())
-
-
 def _fp16_from_u16(value: int) -> float:
     return float(np.frombuffer(np.uint16(int(value)).tobytes(), dtype=np.float16)[0])
-
-
-def _act_u16(size: int) -> List[List[int]]:
-    return [[((j * size + i) % 4) + 1 for j in range(size)] for i in range(size)]
-
-
-def _weights_u16(size: int) -> List[List[int]]:
-    return [[((i * size + j) % 8) + 1 for j in range(size)] for i in range(size)]
 
 
 def _tpu_reference_output(
@@ -219,550 +175,83 @@ def _phase_snapshot(state: Dict, sa: SystolicArrayTPU, tile: int) -> str:
     return "idle"
 
 
-class MetricsVLSFrontendBridge(Clocked):
-    def __init__(self, vc: VectorCore, spad: Scratchpad, vls_id: int = 0, frontend_id: int = 0):
-        super().__init__()
-        self.vc = vc
-        self.spad = spad
-        self.vls_id = int(vls_id)
-        self.frontend_id = int(frontend_id)
-        self._next_load_id = 0
-        self._completed_load_ids = set()
-        self.bytes_load = 0
-        self.bytes_store = 0
-        self.activity_this_cycle = False
-        self.now = 0
-        self.trace_hook = None
-
-    def start_cycle(self) -> None:
-        self.activity_this_cycle = False
-
-    def _on_frontend_read(self, load_id: int, addr: int, lanes, meta: Optional[Dict] = None) -> None:
-        if load_id in self._completed_load_ids:
-            return
-        self._completed_load_ids.add(load_id)
-        data = _decode_lanes_u16(lanes, self.vc.vector_len)
-        self.bytes_load += len(data) * 2
-        self.activity_this_cycle = True
-        meta_dict = dict(meta or {})
-        if self.trace_hook is not None:
-            self.trace_hook(
-                {
-                    "kind": "load_rsp",
-                    "cycle": int(self.now),
-                    "vls": self.vls_id,
-                    "frontend": self.frontend_id,
-                    "addr": addr,
-                    "meta": meta_dict,
-                }
-            )
-        assert self.vc.push_scratchpad_response(self.vls_id, {"addr": addr, "data": data, "meta": meta_dict})
-
-    def tick(self, time: Optional[float] = None) -> None:
-        self.activity_this_cycle = False
-        if time is not None:
-            self.now = time
-
-        vls = self.vc.vls_units[self.vls_id]
-        req = vls.req_q.peek()
-        if req is None:
-            return
-
-        addr = int(req.get("addr", 0))
-        if req["kind"] == "store":
-            if not self.spad.frontends[self.frontend_id].can_accept(int(self.now)):
-                return
-            req = self.vc.pop_scratchpad_request(self.vls_id)
-            if req is None:
-                return
-            meta = dict(req.get("meta", {}) or {})
-            self.bytes_store += len(req.get("data", [])) * 2
-            self.activity_this_cycle = True
-            if self.trace_hook is not None:
-                self.trace_hook(
-                    {
-                        "kind": "store_req",
-                        "cycle": int(self.now),
-                        "vls": self.vls_id,
-                        "frontend": self.frontend_id,
-                        "addr": addr,
-                        "meta": meta,
-                    }
-                )
-            assert self.spad.frontend_write(
-                addr,
-                _encode_vector_u16(req["data"]),
-                row_idx=0,
-                tile_id=self.frontend_id,
-                now=int(self.now),
-            )
-            return
-
-        if req["kind"] == "load":
-            if not self.spad.frontends[self.frontend_id].can_accept(int(self.now)):
-                return
-            req = self.vc.pop_scratchpad_request(self.vls_id)
-            if req is None:
-                return
-            meta = dict(req.get("meta", {}) or {})
-            if self.trace_hook is not None:
-                self.trace_hook(
-                    {
-                        "kind": "load_req",
-                        "cycle": int(self.now),
-                        "vls": self.vls_id,
-                        "frontend": self.frontend_id,
-                        "addr": addr,
-                        "meta": meta,
-                    }
-                )
-            load_id = self._next_load_id
-            self._next_load_id += 1
-            assert self.spad.frontends[self.frontend_id].read(
-                addr,
-                0,
-                lambda lanes, _lid=load_id, _addr=addr, _meta=meta: self._on_frontend_read(
-                    _lid, _addr, lanes, _meta
-                ),
-                now=int(self.now),
-            )
-            return
-
-        raise ValueError("unsupported request kind: %s" % req["kind"])
-
-
+@dataclass
 class SysArrTPUExperimentConfig:
-    def __init__(
-        self,
-        name,
-        sweep,
-        param_name,
-        param_value,
-        tile=32,
-        dtype="fp16",
-        lane_count=4,
-        # This experiment drives a single bridge by hand (see clk.objects
-        # below), so it uses one VLSU / one pad. Raising this would build
-        # bridges that never get ticked.
-        vls_count=1,
-        spad_num_banks=None,
-        spad_bank_size=None,
-        spad_read_latency=2,
-        spad_write_latency=2,
-        spad_frontend_queue_size=4,
-        backend_dram_latency=24,
-        backend_dram_q_depth=16,
-        backend_dram_burst_bytes=32,
-        backend_delay_cycles=1,
-        dram_block_bytes=256,
-        max_cycles=20000,
-    ):
-        self.name = name
-        self.sweep = sweep
-        self.param_name = param_name
-        self.param_value = param_value
-        self.tile = tile
-        self.dtype = dtype
-        self.lane_count = lane_count
-        self.vls_count = vls_count
-        self.spad_num_banks = spad_num_banks
-        self.spad_bank_size = spad_bank_size
-        self.spad_read_latency = spad_read_latency
-        self.spad_write_latency = spad_write_latency
-        self.spad_frontend_queue_size = spad_frontend_queue_size
-        self.backend_dram_latency = backend_dram_latency
-        self.backend_dram_q_depth = backend_dram_q_depth
-        self.backend_dram_burst_bytes = backend_dram_burst_bytes
-        self.backend_delay_cycles = backend_delay_cycles
-        self.dram_block_bytes = dram_block_bytes
-        self.max_cycles = max_cycles
+    """One experiment's settings. The first four fields label the run in
+    sweep output; the rest configure the platform (see build_tpu_platform).
+    To add a setting: add a field with a default here, and use it in
+    run_sysarr_tpu_experiment; to_dict() picks it up by itself."""
+    name: str
+    sweep: str
+    param_name: str
+    param_value: object
+    tile: int = 32
+    dtype: str = "fp16"
+    lane_count: int = 4
+    # This experiment drives a single bridge by hand (see clk.objects
+    # below), so it uses one VLSU / one pad. Raising this would build
+    # bridges that never get ticked.
+    vls_count: int = 1
+    spad_num_banks: Optional[int] = None      # None: one bank per lane of the tile
+    spad_bank_size: Optional[int] = None      # None: max(128, 4 * tile)
+    spad_read_latency: int = 2
+    spad_write_latency: int = 2
+    spad_frontend_queue_size: int = 4
+    backend_dram_latency: int = 24
+    backend_dram_q_depth: int = 16
+    backend_dram_burst_bytes: int = DRAM_BURST_BYTES
+    backend_delay_cycles: int = 1
+    dram_block_bytes: int = 256
+    max_cycles: int = 20000
 
     def to_dict(self):
-        return {
-            "name": self.name,
-            "sweep": self.sweep,
-            "param_name": self.param_name,
-            "param_value": self.param_value,
-            "tile": self.tile,
-            "dtype": self.dtype,
-            "lane_count": self.lane_count,
-            "vls_count": self.vls_count,
-            "spad_num_banks": self.spad_num_banks,
-            "spad_bank_size": self.spad_bank_size,
-            "spad_read_latency": self.spad_read_latency,
-            "spad_write_latency": self.spad_write_latency,
-            "spad_frontend_queue_size": self.spad_frontend_queue_size,
-            "backend_dram_latency": self.backend_dram_latency,
-            "backend_dram_q_depth": self.backend_dram_q_depth,
-            "backend_dram_burst_bytes": self.backend_dram_burst_bytes,
-            "backend_delay_cycles": self.backend_delay_cycles,
-            "dram_block_bytes": self.dram_block_bytes,
-            "max_cycles": self.max_cycles,
-        }
+        return asdict(self)
 
     def normalize(self) -> "SysArrTPUExperimentConfig":
+        """A copy with the scratchpad defaults filled in, checked."""
         spad_num_banks = self.spad_num_banks if self.spad_num_banks is not None else self.tile
         spad_bank_size = self.spad_bank_size if self.spad_bank_size is not None else max(128, self.tile * 4)
         if spad_num_banks < self.tile:
             raise ValueError("spad_num_banks must be >= tile")
         if spad_bank_size < (self.tile * 3):
             raise ValueError("spad_bank_size must be >= 3 * tile for the chosen address map")
-        return SysArrTPUExperimentConfig(
-            name=self.name,
-            sweep=self.sweep,
-            param_name=self.param_name,
-            param_value=self.param_value,
-            tile=self.tile,
-            dtype=self.dtype,
-            lane_count=self.lane_count,
-            vls_count=self.vls_count,
-            spad_num_banks=spad_num_banks,
-            spad_bank_size=spad_bank_size,
-            spad_read_latency=self.spad_read_latency,
-            spad_write_latency=self.spad_write_latency,
-            spad_frontend_queue_size=self.spad_frontend_queue_size,
-            backend_dram_latency=self.backend_dram_latency,
-            backend_dram_q_depth=self.backend_dram_q_depth,
-            backend_dram_burst_bytes=self.backend_dram_burst_bytes,
-            backend_delay_cycles=self.backend_delay_cycles,
-            dram_block_bytes=self.dram_block_bytes,
-            max_cycles=self.max_cycles,
-        )
+        return replace(self, spad_num_banks=spad_num_banks, spad_bank_size=spad_bank_size)
 
 
-def run_sysarr_tpu_experiment(config: SysArrTPUExperimentConfig) -> Dict[str, object]:
-    cfg = config.normalize()
-
-    tile = cfg.tile
-    row_bytes = tile * 2
-
-    platform = build_tpu_platform(
-        size=tile,
-        dtype=cfg.dtype,
-        lane_count=cfg.lane_count,
-        vls_count=cfg.vls_count,
-        spad_num_banks=cfg.spad_num_banks,
-        spad_bank_size=cfg.spad_bank_size,
-        spad_read_latency=cfg.spad_read_latency,
-        spad_write_latency=cfg.spad_write_latency,
-        spad_frontend_queue_size=cfg.spad_frontend_queue_size,
-        dram_block_bytes=cfg.dram_block_bytes,
-        backend_dram_latency=cfg.backend_dram_latency,
-        backend_dram_q_depth=cfg.backend_dram_q_depth,
-        backend_dram_burst_bytes=cfg.backend_dram_burst_bytes,
-        backend_delay_cycles=cfg.backend_delay_cycles,
-        mirror=True,
-        vls_bridge_cls=MetricsVLSFrontendBridge,
-    )
-    eq = platform.eq
-    clk = platform.clk
-    sim = platform.sim
-    vc = platform.vc
-    spad = platform.spad
-    sa = platform.sa
-    dram = platform.dram
-    backend = platform.backend
-    backends = platform.backends
-    vls_bridge = platform.vls_bridge
-    sysarr_bridge = platform.sysarr_bridge
-    mirror = platform.mirror
-    if backend is None:
-        raise ValueError("run_sysarr_tpu_experiment requires an attached backend")
-
-    DRAM_ACT = 0x1000
-    DRAM_WGT = 0x2000
-    DRAM_OUT = 0x3000
-    SPAD_ACT_BASE = 0
-    SPAD_WGT_BASE = tile
-    SPAD_OUT_BASE = tile * 2
-
-    act = _act_u16(tile)
-    wgt = _weights_u16(tile)
-    wgt_stream = [[wgt[r][c] for r in range(tile)] for c in range(tile - 1, -1, -1)]
-    expected_ref = _tpu_reference_output(act, wgt_stream, size=tile, dtype=cfg.dtype)
-
-    _write_dram_tile_u16(dram, DRAM_ACT, act)
-    _write_dram_tile_u16(dram, DRAM_WGT, wgt_stream)
-
-    W_REG = 1
-    A_REG = 2
-    OUT_REG = 3
-
-    store_commit_timeout = max(1000, cfg.max_cycles)
-
-    state = {
-        "cycles": 0,
-        "weight_row": 0,
-        "weight_issue_row": 0,
-        "act_row": 0,
-        "act_issue_row": 0,
-        "next_out_row": 0,
-        "weight_loads_inflight": 0,
-        "act_loads_inflight": 0,
-        "pending_output_rows": [],
-        "store_inflight": {},
-        "completed_rows": set(),
-        "weights_done": False,
-        "bytes_load_wgt": 0,
-        "bytes_load_act": 0,
-        "bytes_store_out": 0,
-        "vls_active_cycles": 0,
-        "preload_done": False,
-        "preload_wait_drain": False,
-        "preload_tx_done": set(),
-        "backend_store_rows": set(),
-        "backend_store_tx_done": set(),
-        "backend_store_txs": {},
-        "load_issue_window": spad.tiles[0].depth,
-        "store_issue_window": spad.tiles[0].depth,
+def _queue_depths(vc: VectorCore) -> Dict[str, int]:
+    """How full each queue of the vector core (and its VLSU 0) is right now;
+    sampled every cycle for the queue_max_* / queue_avg_* results. To track
+    another queue, add it here and to QUEUE_NAMES."""
+    vlsu0 = vc.vls_units[0]
+    return {
+        "gsau_to_systolic": len(vc.gsau.to_systolic),
+        "gsau_from_systolic": len(vc.gsau.from_systolic),
+        "gsau_rd_queue": len(vc.gsau.rd_queue),
+        "gsau_writebacks": len(vc.gsau.writebacks),
+        "scheduler_packets": len(vc.scheduler_packets),
+        "scheduler_build_gsau": len(vc._build_packet["gsau"]),
+        "scheduler_build_vlsu": len(vc._build_packet["vlsu"]),
+        "scheduler_build_datapath": len(vc._build_packet["datapath"]),
+        "scheduler_packet_gsau": sum(len(pkt["gsau"]) for pkt in vc.vliw_q.items),
+        "scheduler_packet_vlsu": sum(len(pkt["vlsu"]) for pkt in vc.vliw_q.items),
+        "scheduler_packet_datapath": sum(len(pkt["datapath"]) for pkt in vc.vliw_q.items),
+        "wb_buffer": len(vc.wb_buffer.entries),
+        "vlsu_issue_q": len(vlsu0.issue_q),
+        "vlsu_req_q": len(vlsu0.req_q),
+        "vlsu_rsp_q": len(vlsu0.rsp_q),
+        "vlsu_wb_q": len(vlsu0.wb_q),
+        "vlsu_dst_fifo": len(vlsu0.load_dst_fifos[0]),
     }
-    q_stats = {"samples": 0, "max": {}, "sum": {}}
-    phase_counts = {name: 0 for name in PHASE_ORDER}
-    observed_rows = [None for _ in range(tile)]
 
-    def _on_preload_done(name: str):
-        state["preload_tx_done"].add(name)
-        if len(state["preload_tx_done"]) == 2:
-            state["preload_wait_drain"] = True
 
-    def _spad_write_path_idle() -> bool:
-        return spad.write_path_idle()
-
-    def _on_backend_store_done(row_idx: int, tx_id: int) -> None:
-        del tx_id
-        state["backend_store_tx_done"].add(row_idx)
-        state["backend_store_txs"].pop(row_idx, None)
-
-    assert (
-        backend.driver_to_backend_start_load(
-            base_sp_addr=SPAD_ACT_BASE,
-            base_dram_addr=DRAM_ACT,
-            rows=tile,
-            cols=tile,
-            callback=lambda _tx: _on_preload_done("act"),
-        )
-        > 0
-    )
-    assert (
-        backend.driver_to_backend_start_load(
-            base_sp_addr=SPAD_WGT_BASE,
-            base_dram_addr=DRAM_WGT,
-            rows=tile,
-            cols=tile,
-            callback=lambda _tx: _on_preload_done("wgt"),
-        )
-        > 0
-    )
-
-    def _issue_weight_load():
-        if state["weight_issue_row"] >= tile:
-            return False
-        assert vc.enqueue_memory(
-            {
-                "kind": "load",
-                "vls": 0,
-                "dst": W_REG,
-                "addr": SPAD_WGT_BASE + state["weight_issue_row"],
-                "dtype": cfg.dtype,
-            }
-        )
-        state["weight_issue_row"] += 1
-        state["weight_loads_inflight"] += 1
-        return True
-
-    def _issue_act_load():
-        if state["act_issue_row"] >= tile:
-            return False
-        assert vc.enqueue_memory(
-            {
-                "kind": "load",
-                "vls": 0,
-                "dst": A_REG,
-                "addr": SPAD_ACT_BASE + state["act_issue_row"],
-                "dtype": cfg.dtype,
-            }
-        )
-        state["act_issue_row"] += 1
-        state["act_loads_inflight"] += 1
-        if state["act_issue_row"] >= tile:
-            sysarr_bridge.finish_inputs()
-        return True
-
-    class ExperimentHarness(Clocked):
-        def __init__(self):
-            super().__init__()
-            self.done = False
-
-        def _finish(self) -> None:
-            self.done = True
-            clk.stop()
-
-        def tick(self, time: float) -> None:
-            if self.done:
-                return
-
-            if not state["preload_done"] and state["preload_wait_drain"] and len(state["preload_tx_done"]) == 2:
-                bstats = backend.get_stats()
-                if (
-                    bstats["queued_txs"] == 0
-                    and bstats["outstanding_txs"] == 0
-                    and bstats["dram_pending"] == 0
-                    and _spad_write_path_idle()
-                ):
-                    state["preload_done"] = True
-
-            phase_counts[_phase_snapshot(state, sa, tile)] += 1
-            if vls_bridge.activity_this_cycle:
-                state["vls_active_cycles"] += 1
-
-            if vc.wb_valid and vc.last_wb is not None:
-                wb = vc.last_wb
-                src = wb.get("source")
-                dst = wb.get("dst")
-
-                if src == "vlsu" and dst == W_REG and state["weight_loads_inflight"] > 0:
-                    state["weight_loads_inflight"] -= 1
-                    wdata = list(wb.get("data", []))
-                    state["bytes_load_wgt"] += len(wdata) * 2
-                    assert vc.enqueue_scheduler_instruction(
-                        {
-                            "unit": "gsau",
-                            "vdata": wdata,
-                            "is_weight": True,
-                            "expect_output": False,
-                            "dtype": cfg.dtype,
-                        }
-                    )
-                    state["weight_row"] += 1
-                    if state["weight_row"] >= tile:
-                        state["weights_done"] = True
-
-                elif src == "vlsu" and dst == A_REG and state["act_loads_inflight"] > 0:
-                    state["act_loads_inflight"] -= 1
-                    adata = list(wb.get("data", []))
-                    state["bytes_load_act"] += len(adata) * 2
-                    assert vc.enqueue_scheduler_instruction(
-                        {
-                            "unit": "gsau",
-                            "vdata": adata,
-                            "dst": OUT_REG,
-                            "is_weight": False,
-                            "expect_output": True,
-                            "dtype": cfg.dtype,
-                        }
-                    )
-                    state["act_row"] += 1
-
-                elif src == "gsau" and dst == OUT_REG:
-                    row_idx = state["next_out_row"]
-                    if row_idx < tile:
-                        if observed_rows[row_idx] is None:
-                            observed_rows[row_idx] = [int(x) for x in list(wb.get("data", []))[:tile]]
-                        state["pending_output_rows"].append({"row": row_idx, "data": list(wb.get("data", []))})
-                        state["next_out_row"] += 1
-
-            if state["preload_done"]:
-                while state["weight_issue_row"] < tile and state["weight_loads_inflight"] < state["load_issue_window"]:
-                    if not _issue_weight_load():
-                        break
-
-            if state["preload_done"] and state["weights_done"]:
-                while state["act_issue_row"] < tile and state["act_loads_inflight"] < state["load_issue_window"]:
-                    if not _issue_act_load():
-                        break
-
-            while state["pending_output_rows"] and len(state["store_inflight"]) < state["store_issue_window"]:
-                next_item = state["pending_output_rows"].pop(0)
-                row_idx = next_item["row"]
-                row_data = next_item["data"]
-                assert vc.enqueue_memory(
-                    {
-                        "kind": "store",
-                        "vls": 0,
-                        "data": row_data,
-                        "addr": SPAD_OUT_BASE + row_idx,
-                        "dtype": cfg.dtype,
-                    }
-                )
-                state["store_inflight"][row_idx] = {"data": row_data, "age": 0}
-
-            completed_store_rows = []
-            for row_idx, store_meta in list(state["store_inflight"].items()):
-                spad_vec = _read_slot_vector_u16(spad, SPAD_OUT_BASE + row_idx, vc.vector_len)
-                store_meta["age"] += 1
-                if spad_vec == (store_meta["data"] or []):
-                    if row_idx not in state["backend_store_rows"]:
-                        tx_id = backend.driver_to_backend_start_store(
-                            base_sp_addr=SPAD_OUT_BASE + row_idx,
-                            base_dram_addr=DRAM_OUT + row_idx * row_bytes,
-                            rows=1,
-                            cols=tile,
-                            callback=lambda _tx, row=row_idx: _on_backend_store_done(row, _tx),
-                        )
-                        assert tx_id > 0
-                        state["backend_store_rows"].add(row_idx)
-                        state["backend_store_txs"][row_idx] = tx_id
-                    completed_store_rows.append(row_idx)
-                elif store_meta["age"] > store_commit_timeout:
-                    raise AssertionError("store did not commit to scratchpad")
-            for row_idx in completed_store_rows:
-                state["store_inflight"].pop(row_idx, None)
-
-            for row_idx in sorted(state["backend_store_tx_done"] - state["completed_rows"]):
-                dram_row = _read_dram_row_u16(dram, DRAM_OUT + row_idx * row_bytes, tile)
-                expected_row = observed_rows[row_idx] if row_idx < len(observed_rows) else None
-                if expected_row is not None and dram_row == expected_row[:tile]:
-                    state["bytes_store_out"] += len(dram_row) * 2
-                    state["completed_rows"].add(row_idx)
-
-            vlsu0 = vc.vls_units[0]
-            q_depths = {
-                "gsau_to_systolic": len(vc.gsau.to_systolic),
-                "gsau_from_systolic": len(vc.gsau.from_systolic),
-                "gsau_rd_queue": len(vc.gsau.rd_queue),
-                "gsau_writebacks": len(vc.gsau.writebacks),
-                "scheduler_packets": len(vc.scheduler_packets),
-                "scheduler_build_gsau": len(vc._build_packet["gsau"]),
-                "scheduler_build_vlsu": len(vc._build_packet["vlsu"]),
-                "scheduler_build_datapath": len(vc._build_packet["datapath"]),
-                "scheduler_packet_gsau": sum(len(pkt["gsau"]) for pkt in vc.vliw_q.items),
-                "scheduler_packet_vlsu": sum(len(pkt["vlsu"]) for pkt in vc.vliw_q.items),
-                "scheduler_packet_datapath": sum(len(pkt["datapath"]) for pkt in vc.vliw_q.items),
-                "wb_buffer": len(vc.wb_buffer.entries),
-                "vlsu_issue_q": len(vlsu0.issue_q),
-                "vlsu_req_q": len(vlsu0.req_q),
-                "vlsu_rsp_q": len(vlsu0.rsp_q),
-                "vlsu_wb_q": len(vlsu0.wb_q),
-                "vlsu_dst_fifo": len(vlsu0.load_dst_fifos[0]),
-            }
-            q_stats["samples"] += 1
-            for name, depth in q_depths.items():
-                q_stats["sum"][name] = q_stats["sum"].get(name, 0) + depth
-                q_stats["max"][name] = max(q_stats["max"].get(name, 0), depth)
-
-            state["cycles"] += 1
-            if len(state["completed_rows"]) >= tile:
-                self._finish()
-                return
-            if state["cycles"] >= cfg.max_cycles:
-                self._finish()
-
-    harness = ExperimentHarness()
-    backend_ticker = RoundRobinBackendTicker(backends)
-    clk.objects = [vc, vls_bridge, sysarr_bridge, backend_ticker, spad, harness]
-    clk.schedule_next(0.0)
-    sim.run()
-
-    if len(state["completed_rows"]) < tile:
-        raise AssertionError("timed out waiting for DRAM->SPAD->VRF->GSAU->TPU->VRF->SPAD->DRAM")
-
-    got = _read_dram_tile_u16(dram, DRAM_OUT, tile, tile)
-    expected_cycle = mirror.outputs
-    if len(expected_cycle) != tile:
-        raise AssertionError("mirror did not produce the expected number of rows")
-    if got != expected_cycle:
-        raise AssertionError("TPU output mismatch against mirror reference")
-
+def _experiment_result(cfg, state, phase_counts, q_stats, platform, got,
+                       expected_ref, expected_cycle) -> Dict[str, object]:
+    """Everything one run measured, as a flat dict (a row of the sweep CSVs,
+    whose columns follow this order). To report something new, add a key
+    here; tools/run_sysarr_tpu_sweeps.py writes whatever keys it finds."""
+    tile = cfg.tile
+    sa, vc, spad = platform.sa, platform.vc, platform.spad
+    backends, vls_bridge = platform.backends, platform.vls_bridge
     bytes_tx = vls_bridge.bytes_load + vls_bridge.bytes_store
     pe_mul = sum(pe.mul_ops for row in sa.array for pe in row)
     pe_add = sum(pe.add_ops for row in sa.array for pe in row)
@@ -888,9 +377,335 @@ def run_sysarr_tpu_experiment(config: SysArrTPUExperimentConfig) -> Dict[str, ob
     return result
 
 
-# Compatibility aliases during the TPU naming transition.
-SysArrTPUExperimentConfig = SysArrTPUExperimentConfig
-run_sysarr_tpu_experiment = run_sysarr_tpu_experiment
+def run_sysarr_tpu_experiment(config: SysArrTPUExperimentConfig) -> Dict[str, object]:
+    """Run one experiment and return its results as a dict (see
+    _experiment_result for the keys). Raises if the outputs are wrong or the
+    run takes more than config.max_cycles.
+    """
+    cfg = config.normalize()
+
+    tile = cfg.tile
+    row_bytes = tile * 2
+
+    platform = build_tpu_platform(
+        size=tile,
+        dtype=cfg.dtype,
+        lane_count=cfg.lane_count,
+        vls_count=cfg.vls_count,
+        spad_num_banks=cfg.spad_num_banks,
+        spad_bank_size=cfg.spad_bank_size,
+        spad_read_latency=cfg.spad_read_latency,
+        spad_write_latency=cfg.spad_write_latency,
+        spad_frontend_queue_size=cfg.spad_frontend_queue_size,
+        dram_block_bytes=cfg.dram_block_bytes,
+        backend_dram_latency=cfg.backend_dram_latency,
+        backend_dram_q_depth=cfg.backend_dram_q_depth,
+        backend_dram_burst_bytes=cfg.backend_dram_burst_bytes,
+        backend_delay_cycles=cfg.backend_delay_cycles,
+        mirror=True,
+        vls_bridge_cls=VLSFrontendBridge,
+    )
+    clk = platform.clk
+    sim = platform.sim
+    vc = platform.vc
+    spad = platform.spad
+    sa = platform.sa
+    dram = platform.dram
+    backend = platform.backend
+    backends = platform.backends
+    vls_bridge = platform.vls_bridge
+    sysarr_bridge = platform.sysarr_bridge
+    mirror = platform.mirror
+    if backend is None:
+        raise ValueError("run_sysarr_tpu_experiment requires an attached backend")
+
+    DRAM_ACT = 0x1000
+    DRAM_WGT = 0x2000
+    DRAM_OUT = 0x3000
+    SPAD_ACT_BASE = 0
+    SPAD_WGT_BASE = tile
+    SPAD_OUT_BASE = tile * 2
+
+    act = _act_u16(tile)
+    wgt = _weights_u16(tile)
+    wgt_stream = [[wgt[r][c] for r in range(tile)] for c in range(tile - 1, -1, -1)]
+    expected_ref = _tpu_reference_output(act, wgt_stream, size=tile, dtype=cfg.dtype)
+
+    _write_dram_tile_u16(dram, DRAM_ACT, act)
+    _write_dram_tile_u16(dram, DRAM_WGT, wgt_stream)
+
+    W_REG = 1
+    A_REG = 2
+    OUT_REG = 3
+
+    store_commit_timeout = max(1000, cfg.max_cycles)
+
+    state = {
+        "cycles": 0,
+        "weight_row": 0,
+        "weight_issue_row": 0,
+        "act_row": 0,
+        "act_issue_row": 0,
+        "next_out_row": 0,
+        "weight_loads_inflight": 0,
+        "act_loads_inflight": 0,
+        "pending_output_rows": [],
+        "store_inflight": {},
+        "completed_rows": set(),
+        "weights_done": False,
+        "bytes_load_wgt": 0,
+        "bytes_load_act": 0,
+        "bytes_store_out": 0,
+        "vls_active_cycles": 0,
+        "preload_done": False,
+        "preload_wait_drain": False,
+        "preload_tx_done": set(),
+        "backend_store_rows": set(),
+        "backend_store_tx_done": set(),
+        "backend_store_txs": {},
+        "load_issue_window": spad.tiles[0].depth,
+        "store_issue_window": spad.tiles[0].depth,
+    }
+    q_stats = {"samples": 0, "max": {}, "sum": {}}
+    phase_counts = {name: 0 for name in PHASE_ORDER}
+    observed_rows = [None for _ in range(tile)]
+
+    def _on_preload_done(name: str):
+        state["preload_tx_done"].add(name)
+        if len(state["preload_tx_done"]) == 2:
+            state["preload_wait_drain"] = True
+
+    def _spad_write_path_idle() -> bool:
+        return spad.write_path_idle()
+
+    def _on_backend_store_done(row_idx: int, tx_id: int) -> None:
+        del tx_id
+        state["backend_store_tx_done"].add(row_idx)
+        state["backend_store_txs"].pop(row_idx, None)
+
+    assert (
+        backend.driver_to_backend_start_load(
+            base_sp_addr=SPAD_ACT_BASE,
+            base_dram_addr=DRAM_ACT,
+            rows=tile,
+            cols=tile,
+            callback=lambda _tx: _on_preload_done("act"),
+        )
+        > 0
+    )
+    assert (
+        backend.driver_to_backend_start_load(
+            base_sp_addr=SPAD_WGT_BASE,
+            base_dram_addr=DRAM_WGT,
+            rows=tile,
+            cols=tile,
+            callback=lambda _tx: _on_preload_done("wgt"),
+        )
+        > 0
+    )
+
+    def _issue_load(kind: str) -> bool:
+        """Ask VLSU 0 for the next "weight" or "act" (activation) row of the
+        tile; False once every row has been asked for."""
+        if state[kind + "_issue_row"] >= tile:
+            return False
+        reg, base = (W_REG, SPAD_WGT_BASE) if kind == "weight" else (A_REG, SPAD_ACT_BASE)
+        assert vc.enqueue_memory(
+            {
+                "kind": "load",
+                "vls": 0,
+                "dst": reg,
+                "addr": base + state[kind + "_issue_row"],
+                "dtype": cfg.dtype,
+            }
+        )
+        state[kind + "_issue_row"] += 1
+        state[kind + "_loads_inflight"] += 1
+        if kind == "act" and state["act_issue_row"] >= tile:
+            sysarr_bridge.finish_inputs()
+        return True
+
+    def _check_preload_drained():
+        """Mark the preload done once both DMA loads finished and drained."""
+        if not state["preload_done"] and state["preload_wait_drain"] and len(state["preload_tx_done"]) == 2:
+            bstats = backend.get_stats()
+            if (
+                bstats["queued_txs"] == 0
+                and bstats["outstanding_txs"] == 0
+                and bstats["dram_pending"] == 0
+                and _spad_write_path_idle()
+            ):
+                state["preload_done"] = True
+
+    def _handle_writeback():
+        """Route this cycle's vector-core writeback: a weight row goes to the
+        array as weights, an activation row as an input, a GSAU result is
+        queued to be stored."""
+        if vc.wb_valid and vc.last_wb is not None:
+            wb = vc.last_wb
+            src = wb.get("source")
+            dst = wb.get("dst")
+
+            if src == "vlsu" and dst == W_REG and state["weight_loads_inflight"] > 0:
+                state["weight_loads_inflight"] -= 1
+                wdata = list(wb.get("data", []))
+                state["bytes_load_wgt"] += len(wdata) * 2
+                assert vc.enqueue_scheduler_instruction(
+                    {
+                        "unit": "gsau",
+                        "vdata": wdata,
+                        "is_weight": True,
+                        "expect_output": False,
+                        "dtype": cfg.dtype,
+                    }
+                )
+                state["weight_row"] += 1
+                if state["weight_row"] >= tile:
+                    state["weights_done"] = True
+
+            elif src == "vlsu" and dst == A_REG and state["act_loads_inflight"] > 0:
+                state["act_loads_inflight"] -= 1
+                adata = list(wb.get("data", []))
+                state["bytes_load_act"] += len(adata) * 2
+                assert vc.enqueue_scheduler_instruction(
+                    {
+                        "unit": "gsau",
+                        "vdata": adata,
+                        "dst": OUT_REG,
+                        "is_weight": False,
+                        "expect_output": True,
+                        "dtype": cfg.dtype,
+                    }
+                )
+                state["act_row"] += 1
+
+            elif src == "gsau" and dst == OUT_REG:
+                row_idx = state["next_out_row"]
+                if row_idx < tile:
+                    if observed_rows[row_idx] is None:
+                        observed_rows[row_idx] = [int(x) for x in list(wb.get("data", []))[:tile]]
+                    state["pending_output_rows"].append({"row": row_idx, "data": list(wb.get("data", []))})
+                    state["next_out_row"] += 1
+
+    def _issue_loads():
+        """Ask for more weight rows, then (once all weights are in) activation
+        rows, up to the scratchpad's issue window."""
+        if state["preload_done"]:
+            while state["weight_issue_row"] < tile and state["weight_loads_inflight"] < state["load_issue_window"]:
+                if not _issue_load("weight"):
+                    break
+
+        if state["preload_done"] and state["weights_done"]:
+            while state["act_issue_row"] < tile and state["act_loads_inflight"] < state["load_issue_window"]:
+                if not _issue_load("act"):
+                    break
+
+    def _queue_stores():
+        """Send finished output rows to the scratchpad, up to its window."""
+        while state["pending_output_rows"] and len(state["store_inflight"]) < state["store_issue_window"]:
+            next_item = state["pending_output_rows"].pop(0)
+            row_idx = next_item["row"]
+            row_data = next_item["data"]
+            assert vc.enqueue_memory(
+                {
+                    "kind": "store",
+                    "vls": 0,
+                    "data": row_data,
+                    "addr": SPAD_OUT_BASE + row_idx,
+                    "dtype": cfg.dtype,
+                }
+            )
+            state["store_inflight"][row_idx] = {"data": row_data, "age": 0}
+
+    def _commit_stores():
+        """Once a row is in the scratchpad, start its DMA store to DRAM."""
+        completed_store_rows = []
+        for row_idx, store_meta in list(state["store_inflight"].items()):
+            spad_vec = _read_slot_vector_u16(spad, SPAD_OUT_BASE + row_idx, vc.vector_len)
+            store_meta["age"] += 1
+            if spad_vec == (store_meta["data"] or []):
+                if row_idx not in state["backend_store_rows"]:
+                    tx_id = backend.driver_to_backend_start_store(
+                        base_sp_addr=SPAD_OUT_BASE + row_idx,
+                        base_dram_addr=DRAM_OUT + row_idx * row_bytes,
+                        rows=1,
+                        cols=tile,
+                        callback=lambda _tx, row=row_idx: _on_backend_store_done(row, _tx),
+                    )
+                    assert tx_id > 0
+                    state["backend_store_rows"].add(row_idx)
+                    state["backend_store_txs"][row_idx] = tx_id
+                completed_store_rows.append(row_idx)
+            elif store_meta["age"] > store_commit_timeout:
+                raise AssertionError("store did not commit to scratchpad")
+        for row_idx in completed_store_rows:
+            state["store_inflight"].pop(row_idx, None)
+
+    def _verify_dram_rows():
+        """Count the rows whose DMA store reached DRAM with the right data."""
+        for row_idx in sorted(state["backend_store_tx_done"] - state["completed_rows"]):
+            dram_row = _read_dram_row_u16(dram, DRAM_OUT + row_idx * row_bytes, tile)
+            expected_row = observed_rows[row_idx] if row_idx < len(observed_rows) else None
+            if expected_row is not None and dram_row == expected_row[:tile]:
+                state["bytes_store_out"] += len(dram_row) * 2
+                state["completed_rows"].add(row_idx)
+
+    def _sample_queues():
+        """Record how full every queue is this cycle."""
+        q_depths = _queue_depths(vc)
+        q_stats["samples"] += 1
+        for name, depth in q_depths.items():
+            q_stats["sum"][name] = q_stats["sum"].get(name, 0) + depth
+            q_stats["max"][name] = max(q_stats["max"].get(name, 0), depth)
+
+    class ExperimentHarness(Clocked):
+        def __init__(self):
+            super().__init__()
+            self.done = False
+
+        def _finish(self) -> None:
+            self.done = True
+            clk.stop()
+
+        def tick(self, time: float) -> None:
+            if self.done:
+                return
+
+            _check_preload_drained()
+            phase_counts[_phase_snapshot(state, sa, tile)] += 1
+            if vls_bridge.activity_this_cycle:
+                state["vls_active_cycles"] += 1
+            _handle_writeback()
+            _issue_loads()
+            _queue_stores()
+            _commit_stores()
+            _verify_dram_rows()
+            _sample_queues()
+            state["cycles"] += 1
+            if len(state["completed_rows"]) >= tile:
+                self._finish()
+                return
+            if state["cycles"] >= cfg.max_cycles:
+                self._finish()
+
+    harness = ExperimentHarness()
+    backend_ticker = RoundRobinBackendTicker(backends)
+    clk.objects = [vc, vls_bridge, sysarr_bridge, backend_ticker, spad, harness]
+    clk.schedule_next(0.0)
+    sim.run()
+
+    if len(state["completed_rows"]) < tile:
+        raise AssertionError("timed out waiting for DRAM->SPAD->VRF->GSAU->TPU->VRF->SPAD->DRAM")
+
+    got = _read_dram_tile_u16(dram, DRAM_OUT, tile, tile)
+    expected_cycle = mirror.outputs
+    if len(expected_cycle) != tile:
+        raise AssertionError("mirror did not produce the expected number of rows")
+    if got != expected_cycle:
+        raise AssertionError("TPU output mismatch against mirror reference")
+
+    return _experiment_result(cfg, state, phase_counts, q_stats, platform, got,
+                              expected_ref, expected_cycle)
 
 
 def _build_default_cli_config() -> SysArrTPUExperimentConfig:

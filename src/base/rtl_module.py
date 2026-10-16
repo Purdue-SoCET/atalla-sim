@@ -45,6 +45,11 @@ def _fresh(value):
 
 
 class RTLModule:
+    """A pipeline stage driven in three phases; see the module docstring.
+
+    Subclass it, declare REGS / INS / OUTS, and override eval_ready and
+    eval_data (commit rarely needs overriding).
+    """
     REGS = {}
     INS = {}
     OUTS = {}

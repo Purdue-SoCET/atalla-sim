@@ -2,15 +2,7 @@ import pytest
 
 from atalla.sysarr_tpu_system import (
     PAD_ACT, PAD_OUT, PAD_PSUM, PAD_WGT, SPAD_NUM_PADS, SysArrTPUSystem,
-    build_tpu_platform)
-
-
-def _act_u16(size: int):
-    return [[((j * size + i) % 4) + 1 for j in range(size)] for i in range(size)]
-
-
-def _weights_u16(size: int):
-    return [[((i * size + j) % 8) + 1 for j in range(size)] for i in range(size)]
+    build_tpu_platform, _act_u16, _weights_u16)
 
 
 def test_build_tpu_platform_gives_every_vlsu_its_own_pad():
@@ -90,7 +82,7 @@ def test_the_scratchpad_is_two_megabytes_in_four_pads():
     platform = build_tpu_platform(size=32, dtype="fp16", backend_dram_latency=24)
     spad = platform.spad
 
-    assert spad.total_bytes == 2 * 1024 * 1024
+    assert spad.tile_bytes * spad.num_tiles == 2 * 1024 * 1024     # the whole scratchpad
     assert spad.tile_bytes == 512 * 1024
     assert spad.num_tiles == SPAD_NUM_PADS
     assert [PAD_ACT, PAD_WGT, PAD_PSUM, PAD_OUT] == [0, 1, 2, 3]

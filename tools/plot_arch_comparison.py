@@ -18,7 +18,7 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Sequence
 
 import matplotlib
 matplotlib.use("Agg")
@@ -27,9 +27,9 @@ import matplotlib.pyplot as plt
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tools.plot_tiled_sysarr_tpu_gantt import (  # noqa: E402
-    ENVELOPE_PATHS, PATH_COLORS, PATH_LABELS, PATH_ORDER, _filter_rows,
-    _read_rows, plot_gantt, read_stats_log)
+from tools.plot_tiled_sysarr_tpu_gantt import (
+    ENVELOPE_PATHS, PATH_LABELS, PATH_ORDER, _filter_rows, _read_rows, plot_gantt,
+    read_stats_log)
 
 BASE_COLOR = "#4c78a8"
 NEW_COLOR = "#f58518"

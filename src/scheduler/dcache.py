@@ -3,8 +3,8 @@
 This is the cache the RTL's `rtl/modules/scheduler/dcache/` sets out to be:
 write-back, write-allocate, set-associative, with miss status holding
 registers so that hits are served while misses are outstanding. It is not a
-transcription of that RTL: the RTL's bugs (docs/scheduler-rtl-bugs.md, 8-10
-and 15-19) are left out, and the geometry is configurable. The RTL's
+transcription of that RTL: the RTL's known bugs are left out, and the
+geometry is configurable. The RTL's
 structure and latencies are the defaults, and with one request at a time the
 model takes the RTL's cycles:
 
@@ -85,6 +85,9 @@ WORD_BYTES = 4
 
 @dataclass(frozen=True)
 class DCacheConfig:
+    """The data cache's size and timing. Defaults are the RTL's.
+    Checked on construction: ways, sets and beats must divide evenly.
+    """
     size_bytes: int = 4096        # rtl: CACHE_SIZE 1024 words
     ways: int = 4                 # NUM_WAYS
     line_bytes: int = 64          # BLOCK_SIZE 16 words
@@ -151,6 +154,10 @@ HIT, MISS, FILL, STORE_ACK, RETRY = "hit", "miss", "fill", "store_ack", "retry"
 
 @dataclass(frozen=True)
 class DCacheResp:
+    """The cache's answer to a DCacheReq: a hit, a miss (the data
+    follows later as a FILL), a store's acknowledgement, or RETRY (no MSHR free:
+    send it again).
+    """
     id: object
     addr: int
     store: bool
@@ -169,6 +176,7 @@ class Frame:
 
 @dataclass
 class MshrEntry:
+    """A miss being served: the line it fetches and the requests waiting for it."""
     uid: int
     block: int
     targets: List[DCacheReq] = field(default_factory=list)
@@ -486,219 +494,228 @@ class DCache(RTLModule):
         return not self._sram_claimed and not self.sram_busy
 
     def _eval_fill(self, new_entry: Optional[MshrEntry]) -> None:
-        c = self.cfg
+        """One cycle of the fill FSM: run the step for its current state.
+        Each _fill_<state> method below is one state of the RTL's fill FSM;
+        to add a state, write its method and add it to FILL_STEPS."""
+        self.FILL_STEPS[self.f_state](self, self.cfg, new_entry)
+
+    def _fill_idle_or_done(self, c, new_entry) -> None:
         st = self.f_state
+        if st == F_DONE:
+            self.out_resp.extend(self.f_loads)
+            self._touch(self.f_set, self.f_way)
+        nxt = self._next_entry(new_entry)
+        if nxt is not None:
+            self._later(lambda: self._set(f_state=F_READ, f_entry=nxt,
+                                          f_set=nxt.block % c.sets, f_loads=[]))
+        elif (self.in_halt and not self.mshrs and new_entry is None
+              and self.l_state == L_IDLE
+              and not (self.in_req_valid and self.out_req_ready)):
+            self._later(lambda: self._set(f_state=F_FL_READ, f_set=0,
+                                          f_entry=None, f_loads=[]))
+        else:
+            self._later(lambda: self._set(f_state=F_IDLE, f_entry=None, f_loads=[]))
 
-        if st in (F_IDLE, F_DONE):
-            if st == F_DONE:
-                self.out_resp.extend(self.f_loads)
-                self._touch(self.f_set, self.f_way)
-            nxt = self._next_entry(new_entry)
-            if nxt is not None:
-                self._later(lambda: self._set(f_state=F_READ, f_entry=nxt,
-                                              f_set=nxt.block % c.sets, f_loads=[]))
-            elif (self.in_halt and not self.mshrs and new_entry is None
-                  and self.l_state == L_IDLE
-                  and not (self.in_req_valid and self.out_req_ready)):
-                self._later(lambda: self._set(f_state=F_FL_READ, f_set=0,
-                                              f_entry=None, f_loads=[]))
-            else:
-                self._later(lambda: self._set(f_state=F_IDLE, f_entry=None, f_loads=[]))
+    def _fill_read(self, c, new_entry) -> None:
+        if self._can_use_sram():
+            self._issue_read(FILLER, self.f_set)
+            self._later(lambda: self._set(f_state=F_READ_WAIT))
+        else:
+            self.stats["fill_wait_cycles"] += 1
+
+    def _fill_read_wait(self, c, new_entry) -> None:
+        if self._read_done(FILLER):
+            row = self.rdata
+            self._later(lambda: self._set(f_state=F_CALC, f_row=row))
+
+    def _fill_calc(self, c, new_entry) -> None:
+        tag = self.f_entry.block // c.sets
+        present = [w for w, f in enumerate(self.f_row) if f.valid and f.tag == tag]
+        way = present[0] if present else None
+        self._later(lambda: self._set(f_state=F_LRU, f_present=way is not None,
+                                      f_way=way if way is not None else 0))
+
+    def _fill_lru(self, c, new_entry) -> None:
+        if not self.f_present:
+            invalid = [w for w, f in enumerate(self.f_row) if not f.valid]
+            way = invalid[0] if invalid else plru_victim(self.lru[self.f_set], c.ways)
+            self._later(lambda: self._set(f_way=way))
+        self._later(lambda: self._set(f_state=F_BUFFER))
+
+    def _fill_buffer(self, c, new_entry) -> None:
+        if self.f_present:
+            words = list(self.f_row[self.f_way].words)
+            self._later(lambda: self._set(f_state=F_WRITE, f_words=words))
+        else:
+            self._later(lambda: self._set(f_state=F_INVAL))
+
+    def _fill_inval(self, c, new_entry) -> None:
+        if not self._can_use_sram():
+            self.stats["fill_wait_cycles"] += 1
             return
+        set_idx, way = self.f_set, self.f_way
 
-        if st == F_READ:
-            if self._can_use_sram():
-                self._issue_read(FILLER, self.f_set)
-                self._later(lambda: self._set(f_state=F_READ_WAIT))
-            else:
-                self.stats["fill_wait_cycles"] += 1
-            return
+        def capture():
+            victim = self.array[set_idx][way]
+            self.f_victim = victim
+            self.f_evicting = (set_idx, way, victim.tag) if victim.valid else None
+        self._issue_write(set_idx, way,
+                          lambda: replace(self.array[set_idx][way], valid=False),
+                          on_edge=capture)
+        self._later(lambda: self._set(f_state=F_INVAL_WAIT))
 
-        if st == F_READ_WAIT:
-            if self._read_done(FILLER):
-                row = self.rdata
-                self._later(lambda: self._set(f_state=F_CALC, f_row=row))
-            return
-
-        if st == F_CALC:
-            tag = self.f_entry.block // c.sets
-            present = [w for w, f in enumerate(self.f_row) if f.valid and f.tag == tag]
-            way = present[0] if present else None
-            self._later(lambda: self._set(f_state=F_LRU, f_present=way is not None,
-                                          f_way=way if way is not None else 0))
-            return
-
-        if st == F_LRU:
-            if not self.f_present:
-                invalid = [w for w, f in enumerate(self.f_row) if not f.valid]
-                way = invalid[0] if invalid else plru_victim(self.lru[self.f_set], c.ways)
-                self._later(lambda: self._set(f_way=way))
-            self._later(lambda: self._set(f_state=F_BUFFER))
-            return
-
-        if st == F_BUFFER:
-            if self.f_present:
-                words = list(self.f_row[self.f_way].words)
-                self._later(lambda: self._set(f_state=F_WRITE, f_words=words))
-            else:
-                self._later(lambda: self._set(f_state=F_INVAL))
-            return
-
-        if st == F_INVAL:
-            if not self._can_use_sram():
-                self.stats["fill_wait_cycles"] += 1
-                return
-            set_idx, way = self.f_set, self.f_way
-
-            def capture():
-                victim = self.array[set_idx][way]
-                self.f_victim = victim
-                self.f_evicting = (set_idx, way, victim.tag) if victim.valid else None
-            self._issue_write(set_idx, way,
-                              lambda: replace(self.array[set_idx][way], valid=False),
-                              on_edge=capture)
-            self._later(lambda: self._set(f_state=F_INVAL_WAIT))
-            return
-
-        if st == F_INVAL_WAIT:
-            if self.write.done:
-                self._later(lambda: self._set(f_state=F_PULL, f_beat=0,
-                                              f_wait=c.first_beat_wait,
-                                              f_words=[0] * c.line_words))
-                if self.port is not None:
-                    base = self.f_entry.block * c.line_bytes
-                    self._later(lambda: self.port.read(base, c.line_bytes))
-            return
-
-        if st == F_PULL:
-            base = self.f_entry.block * c.line_bytes
-            beat = self.f_beat
+    def _fill_inval_wait(self, c, new_entry) -> None:
+        if self.write.done:
+            self._later(lambda: self._set(f_state=F_PULL, f_beat=0,
+                                          f_wait=c.first_beat_wait,
+                                          f_words=[0] * c.line_words))
             if self.port is not None:
-                if not self.port.beat_ready(beat):
-                    self.stats["mem_wait_cycles"] += 1
-                    self.out_mem = ("read", base, None)
-                    return
-                self.out_mem = ("read", base, beat)
-                if beat + 1 == c.beats:
-                    self._later(self.port.finish_read)
-            else:
-                self.out_mem = ("read", base, beat if self.f_wait == 0 else None)
-                if self.f_wait > 0:
-                    self._later(lambda: self._set(f_wait=self.f_wait - 1))
-                    return
-            words = list(self.f_words)
-            for k in range(c.beat_words):
-                i = beat * c.beat_words + k
-                words[i] = self.memory.read(base + i * WORD_BYTES)
-            if beat + 1 < c.beats:
-                self._later(lambda: self._set(f_words=words, f_beat=beat + 1))
-            else:
-                dirty = self.f_victim is not None and self.f_victim.valid and self.f_victim.dirty
-                self._later(lambda: self._set(
-                    f_words=words, f_beat=0, f_wait=c.write_wait,
-                    f_state=F_EJECT if dirty else F_WRITE))
-            return
+                base = self.f_entry.block * c.line_bytes
+                self._later(lambda: self.port.read(base, c.line_bytes))
 
-        if st == F_EJECT:
-            self._eval_writeback(self.f_victim, self.f_set, F_WRITE, "writebacks")
-            return
-
-        if st == F_WRITE:
-            if not self._can_use_sram():
-                self.stats["fill_wait_cycles"] += 1
+    def _fill_pull(self, c, new_entry) -> None:
+        base = self.f_entry.block * c.line_bytes
+        beat = self.f_beat
+        if self.port is not None:
+            if not self.port.beat_ready(beat):
+                self.stats["mem_wait_cycles"] += 1
+                self.out_mem = ("read", base, None)
                 return
-            entry, set_idx, way = self.f_entry, self.f_set, self.f_way
-            tag = entry.block // c.sets
-            present = self.f_present
+            self.out_mem = ("read", base, beat)
+            if beat + 1 == c.beats:
+                self._later(self.port.finish_read)
+        else:
+            self.out_mem = ("read", base, beat if self.f_wait == 0 else None)
+            if self.f_wait > 0:
+                self._later(lambda: self._set(f_wait=self.f_wait - 1))
+                return
+        words = list(self.f_words)
+        for k in range(c.beat_words):
+            i = beat * c.beat_words + k
+            words[i] = self.memory.read(base + i * WORD_BYTES)
+        if beat + 1 < c.beats:
+            self._later(lambda: self._set(f_words=words, f_beat=beat + 1))
+        else:
+            dirty = self.f_victim is not None and self.f_victim.valid and self.f_victim.dirty
+            self._later(lambda: self._set(
+                f_words=words, f_beat=0, f_wait=c.write_wait,
+                f_state=F_EJECT if dirty else F_WRITE))
 
-            def build():
-                # Targets in order; loads see every store before them.
-                words = list(self.f_words)
-                dirty = present and self.array[set_idx][way].dirty
-                loads = []
-                for t in entry.targets:
-                    w = c.word_of(t.addr)
-                    if t.store:
-                        words[w] = t.data & 0xFFFFFFFF
-                        dirty = True
-                    else:
-                        loads.append(DCacheResp(t.id, t.addr, False, FILL, words[w]))
-                self.f_loads = loads
-                entry.open = False
-                return Frame(True, dirty, tag, tuple(words))
-            self._issue_write(set_idx, way, build)
-            self.stats["fills"] += 1
-            if present:
-                self.stats["present_fills"] += 1
-            elif self.f_victim is not None and self.f_victim.valid:
-                self.stats["evictions"] += 1
-            self._later(lambda: self._set(f_state=F_WRITE_WAIT))
+    def _fill_eject(self, c, new_entry) -> None:
+        self._eval_writeback(self.f_victim, self.f_set, F_WRITE, "writebacks")
+
+    def _fill_write(self, c, new_entry) -> None:
+        if not self._can_use_sram():
+            self.stats["fill_wait_cycles"] += 1
             return
+        entry, set_idx, way = self.f_entry, self.f_set, self.f_way
+        tag = entry.block // c.sets
+        present = self.f_present
 
-        if st == F_WRITE_WAIT:
-            if self.write.done:
-                entry = self.f_entry
+        def build():
+            # Targets in order; loads see every store before them.
+            words = list(self.f_words)
+            dirty = present and self.array[set_idx][way].dirty
+            loads = []
+            for t in entry.targets:
+                w = c.word_of(t.addr)
+                if t.store:
+                    words[w] = t.data & 0xFFFFFFFF
+                    dirty = True
+                else:
+                    loads.append(DCacheResp(t.id, t.addr, False, FILL, words[w]))
+            self.f_loads = loads
+            entry.open = False
+            return Frame(True, dirty, tag, tuple(words))
+        self._issue_write(set_idx, way, build)
+        self.stats["fills"] += 1
+        if present:
+            self.stats["present_fills"] += 1
+        elif self.f_victim is not None and self.f_victim.valid:
+            self.stats["evictions"] += 1
+        self._later(lambda: self._set(f_state=F_WRITE_WAIT))
 
-                def finish():
-                    self.mshrs.remove(entry)
-                    self.f_state = F_DONE
-                    self.f_evicting = None
-                    self.f_victim = None
-                self._later(finish)
-            return
+    def _fill_write_wait(self, c, new_entry) -> None:
+        if self.write.done:
+            entry = self.f_entry
 
-        # -- halt: write back every dirty line ------------------------------
-        if st == F_FL_READ:
-            if self._can_use_sram():
-                self._issue_read(FILLER, self.f_set)
-                self._later(lambda: self._set(f_state=F_FL_WAIT))
-            return
+            def finish():
+                self.mshrs.remove(entry)
+                self.f_state = F_DONE
+                self.f_evicting = None
+                self.f_victim = None
+            self._later(finish)
 
-        if st == F_FL_WAIT:
-            if self._read_done(FILLER):
-                row = self.rdata
-                self._later(lambda: self._set(f_state=F_FL_WAY, f_row=row, f_flush_way=0))
-            return
+    # -- halt: write back every dirty line ------------------------------
 
-        if st == F_FL_WAY:
-            way = self.f_flush_way
-            frame = self.f_row[way]
-            if frame.valid and frame.dirty:
-                self._later(lambda: self._set(f_state=F_FL_WB, f_way=way,
-                                              f_victim=frame, f_beat=0,
-                                              f_wait=c.write_wait))
-            elif way + 1 < c.ways:
-                self._later(lambda: self._set(f_flush_way=way + 1))
-            elif self.f_set + 1 < c.sets:
-                self._later(lambda: self._set(f_state=F_FL_READ, f_set=self.f_set + 1))
-            else:
-                self._later(lambda: self._set(f_state=F_HALTED))
-            return
+    def _fill_fl_read(self, c, new_entry) -> None:
+        if self._can_use_sram():
+            self._issue_read(FILLER, self.f_set)
+            self._later(lambda: self._set(f_state=F_FL_WAIT))
 
-        if st == F_FL_WB:
-            self._eval_writeback(self.f_victim, self.f_set, F_FL_WRITE, "flush_writebacks")
-            return
+    def _fill_fl_wait(self, c, new_entry) -> None:
+        if self._read_done(FILLER):
+            row = self.rdata
+            self._later(lambda: self._set(f_state=F_FL_WAY, f_row=row, f_flush_way=0))
 
-        if st == F_FL_WRITE:
-            if self._can_use_sram():
-                set_idx, way = self.f_set, self.f_way
-                self._issue_write(set_idx, way,
-                                  lambda: replace(self.array[set_idx][way], dirty=False))
-                row = list(self.f_row)
-                row[way] = replace(row[way], dirty=False)
-                self._later(lambda: self._set(f_state=F_FL_WRITE_WAIT, f_row=row))
-            return
+    def _fill_fl_way(self, c, new_entry) -> None:
+        way = self.f_flush_way
+        frame = self.f_row[way]
+        if frame.valid and frame.dirty:
+            self._later(lambda: self._set(f_state=F_FL_WB, f_way=way,
+                                          f_victim=frame, f_beat=0,
+                                          f_wait=c.write_wait))
+        elif way + 1 < c.ways:
+            self._later(lambda: self._set(f_flush_way=way + 1))
+        elif self.f_set + 1 < c.sets:
+            self._later(lambda: self._set(f_state=F_FL_READ, f_set=self.f_set + 1))
+        else:
+            self._later(lambda: self._set(f_state=F_HALTED))
 
-        if st == F_FL_WRITE_WAIT:
-            if self.write.done:
-                self._later(lambda: self._set(f_state=F_FL_WAY))
-            return
+    def _fill_fl_wb(self, c, new_entry) -> None:
+        self._eval_writeback(self.f_victim, self.f_set, F_FL_WRITE, "flush_writebacks")
 
-        if st == F_HALTED:
-            self.out_flushed = bool(self.in_halt)
-            if not self.in_halt:
-                self._later(lambda: self._set(f_state=F_IDLE))
-            return
+    def _fill_fl_write(self, c, new_entry) -> None:
+        if self._can_use_sram():
+            set_idx, way = self.f_set, self.f_way
+            self._issue_write(set_idx, way,
+                              lambda: replace(self.array[set_idx][way], dirty=False))
+            row = list(self.f_row)
+            row[way] = replace(row[way], dirty=False)
+            self._later(lambda: self._set(f_state=F_FL_WRITE_WAIT, f_row=row))
+
+    def _fill_fl_write_wait(self, c, new_entry) -> None:
+        if self.write.done:
+            self._later(lambda: self._set(f_state=F_FL_WAY))
+
+    def _fill_halted(self, c, new_entry) -> None:
+        self.out_flushed = bool(self.in_halt)
+        if not self.in_halt:
+            self._later(lambda: self._set(f_state=F_IDLE))
+
+    #: f_state -> the method that runs one cycle of that state.
+    FILL_STEPS = {
+        F_IDLE: _fill_idle_or_done,
+        F_DONE: _fill_idle_or_done,
+        F_READ: _fill_read,
+        F_READ_WAIT: _fill_read_wait,
+        F_CALC: _fill_calc,
+        F_LRU: _fill_lru,
+        F_BUFFER: _fill_buffer,
+        F_INVAL: _fill_inval,
+        F_INVAL_WAIT: _fill_inval_wait,
+        F_PULL: _fill_pull,
+        F_EJECT: _fill_eject,
+        F_WRITE: _fill_write,
+        F_WRITE_WAIT: _fill_write_wait,
+        F_FL_READ: _fill_fl_read,
+        F_FL_WAIT: _fill_fl_wait,
+        F_FL_WAY: _fill_fl_way,
+        F_FL_WB: _fill_fl_wb,
+        F_FL_WRITE: _fill_fl_write,
+        F_FL_WRITE_WAIT: _fill_fl_write_wait,
+        F_HALTED: _fill_halted,
+    }
 
     def _eval_writeback(self, frame: Frame, set_idx: int, then: str, stat: str) -> None:
         """One cycle of writing `frame` back, a beat at a time."""

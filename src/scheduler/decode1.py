@@ -54,6 +54,9 @@ def slot_word(packet: int, slot: int) -> int:
 
 
 def classify(word: int) -> str:
+    """Which kind of slot a 40-bit word belongs in: SCALAR, VECTOR, SCPAD,
+    or NONE (an empty slot or an unknown opcode).
+    """
     if word == 0:
         return NONE
     op = word & ((1 << OP_W) - 1)

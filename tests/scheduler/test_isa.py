@@ -91,8 +91,8 @@ def test_get_bits_is_inclusive():
 
 # --- agreement with the functional simulator -------------------------------
 
+@pytest.mark.golden
 def test_the_table_matches_the_functional_sim():
-    golden.require(pytest)
     assert set(OPCODES) - TRANSPOSE == set(golden.GOLDEN_OPCODES), "opcode sets differ"
     for op, (mnemonic, ty) in OPCODES.items():
         if op in TRANSPOSE:
@@ -102,10 +102,10 @@ def test_the_table_matches_the_functional_sim():
             "opcode %d: ours %r golden %r" % (op, (mnemonic, ty), (g_mn, g_ty))
 
 
+@pytest.mark.golden
 def test_random_packets_decode_identically():
     """Field for field, over random bit patterns -- the layouts are where a
     port goes wrong, and only a differential test finds it."""
-    golden.require(pytest)
     rng = random.Random(20260925)
     for _ in range(2000):
         opcode = rng.choice(sorted(set(OPCODES) - TRANSPOSE))

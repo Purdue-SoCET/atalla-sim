@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 
 import argparse
-import json
 import math
-import sys
 from pathlib import Path
 from typing import Any, Dict, List
+
+from sweep_common import format_cycles_in_millions, label_for_int, load_json_rows, ok_rows  # noqa: E402  (tools/sweep_common.py)
 
 
 try:
@@ -18,27 +18,6 @@ except ModuleNotFoundError as exc:
     raise SystemExit(
         "matplotlib is required for plotting. Install it with `/home/asicfab/a/socet149/sc_env_new/bin/python -m pip install matplotlib`."
     ) from exc
-
-
-def _load_json_rows(input_dir: Path) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
-    for path in sorted(input_dir.glob("*.json")):
-        if path.name in {"results.json", "manifest.json"}:
-            continue
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(payload, dict):
-            rows.append(payload)
-    return rows
-
-
-def _ok_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    filtered = [row for row in rows if str(row.get("status", "ok")) == "ok"]
-    filtered.sort(key=lambda row: int(row.get("spad_frontend_queue_size", 0) or 0))
-    return filtered
-
-
-def _label_for_int(value: int) -> str:
-    return str(int(value))
 
 
 def _queue_avg_over_valid_mac_cycles(row: Dict[str, Any], queue_name: str) -> float:
@@ -59,11 +38,6 @@ def _annotate_points(ax: Any, x: List[int], y: List[float], *, dy: float = 0.0) 
         ax.text(x_val, y_val + offset, f"{y_val:.2f}" if not float(y_val).is_integer() else str(int(y_val)), ha="center", va="bottom", fontsize=8)
 
 
-def _format_cycles_in_millions(ax: Any) -> None:
-    ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _: str(int(round(value / 1_000_000.0)))))
-    ax.set_ylabel("cycles (x 1M)")
-
-
 def plot_cycles(rows: List[Dict[str, Any]], output_path: Path) -> Path:
     x = [int(row["spad_frontend_queue_size"]) for row in rows]
     cycles = [float(row["cycles"]) for row in rows]
@@ -72,8 +46,8 @@ def plot_cycles(rows: List[Dict[str, Any]], output_path: Path) -> Path:
     ax.plot(x, cycles, marker="o", linewidth=2.4, color="#4e79a7")
     ax.set_title("Blocked M=8, N=32: Total Cycles vs Scratchpad Frontend Queue Size")
     ax.set_xlabel("scratchpad frontend queue size")
-    _format_cycles_in_millions(ax)
-    ax.set_xticks(x, [_label_for_int(value) for value in x])
+    format_cycles_in_millions(ax)
+    ax.set_xticks(x, [label_for_int(value) for value in x])
     ax.grid(True, alpha=0.28)
 
     fig.tight_layout()
@@ -102,7 +76,7 @@ def plot_gsau_rd_queue(rows: List[Dict[str, Any]], output_path: Path) -> Path:
     ax.set_title("Blocked M=8, N=32: GSAU RD Queue vs Scratchpad Frontend Queue Size")
     ax.set_xlabel("scratchpad frontend queue size")
     ax.set_ylabel("queue depth (entries)")
-    ax.set_xticks(x, [_label_for_int(value) for value in x])
+    ax.set_xticks(x, [label_for_int(value) for value in x])
     ax.grid(True, alpha=0.28)
     ax.legend(fontsize=9)
     _annotate_points(ax, x, max_depth)
@@ -126,8 +100,8 @@ def plot_summary(rows: List[Dict[str, Any]], output_path: Path) -> Path:
     axes[0].plot(x, cycles, marker="o", linewidth=2.4, color="#4e79a7")
     axes[0].set_title("Total Cycles")
     axes[0].set_xlabel("scratchpad frontend queue size")
-    _format_cycles_in_millions(axes[0])
-    axes[0].set_xticks(x, [_label_for_int(value) for value in x])
+    format_cycles_in_millions(axes[0])
+    axes[0].set_xticks(x, [label_for_int(value) for value in x])
     axes[0].grid(True, alpha=0.28)
 
     axes[1].plot(x, max_depth, marker="o", linewidth=2.4, color="#e15759", label="max")
@@ -135,7 +109,7 @@ def plot_summary(rows: List[Dict[str, Any]], output_path: Path) -> Path:
     axes[1].set_title("GSAU RD Queue")
     axes[1].set_xlabel("scratchpad frontend queue size")
     axes[1].set_ylabel("queue depth (entries)")
-    axes[1].set_xticks(x, [_label_for_int(value) for value in x])
+    axes[1].set_xticks(x, [label_for_int(value) for value in x])
     axes[1].grid(True, alpha=0.28)
     axes[1].legend(fontsize=9)
 
@@ -170,7 +144,7 @@ def main() -> int:
     )
     output_dir = Path(args.output_dir) if args.output_dir else input_dir / "plots"
 
-    rows = _ok_rows(_load_json_rows(input_dir))
+    rows = ok_rows(load_json_rows(input_dir), "spad_frontend_queue_size")
     if not rows:
         raise SystemExit(f"no successful run JSON files found in {input_dir}")
     if any("gsau_rd_queue" not in (row.get("queue_avg_depths_valid_mac") or {}) for row in rows):

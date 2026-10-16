@@ -1,11 +1,7 @@
 import pytest
 
 from base.testing import build_sim
-from base.clock_domain import ClockDomain
 from base.clocked_object import Clocked
-from base.core import Core
-from base.eventq import EventQueue
-from base.sim import Sim
 from systolic_array.systolic_array_tpu import SystolicArrayTPU
 
 

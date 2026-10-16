@@ -1,5 +1,19 @@
+"""DRAM: the machine's main memory, a sparse byte store.
+
+read(addr, n) / write(addr, data) at any byte address; untouched memory reads
+as zeros. Timing is not here: the backends and the bus (memory/backend.py,
+memory/bus.py) model latency and bandwidth.
+"""
+
 from typing import Dict, Iterable, Optional, Tuple, Union
 from base.debug import dprintf
+
+
+#: Bytes one DRAM request moves: the RTL's 64-bit DRAM interface (four BF16
+#: elements; rtl/modules/memory/scratchpad/backend.sv, sim_ram_rr.sv). The
+#: default burst of every DRAM master -- DMA backends and cache ports -- so
+#: the shared channel's peak is DRAM_BURST_BYTES per cycle.
+DRAM_BURST_BYTES = 8
 
 
 class DRAM:
@@ -57,6 +71,7 @@ class DRAM:
         return self._read_impl(addr, length, log=True)
 
     def write(self, addr: int, data: Union[bytes, bytearray, memoryview, Iterable[int]]) -> None:
+        """Store `data` at byte address `addr`; it may span blocks."""
         blob = bytes(data)
         if not blob:
             return
@@ -142,10 +157,3 @@ class DRAM:
     def clear(self) -> None:
         self._blocks.clear()
 
-    @property
-    def allocated_blocks(self) -> int:
-        return len(self._blocks)
-
-    @property
-    def allocated_bytes(self) -> int:
-        return len(self._blocks) * self.block_bytes

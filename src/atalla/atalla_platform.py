@@ -11,7 +11,7 @@ each packet's EX cycle calls into the units (scheduler/vector.py):
 
     lane ops        vc.datapath.enqueue(...)
     gemm.vv, lw.vi  vc.gsau.issue(...)
-    vreg.ld/st      vc.vls_units[sid].issue(...)
+    vreg.ld/st      vc.vls_units[sid].enqueue_issue(...)
     scpad.ld/st     backends[sid].driver_to_backend_start_load/store(...)
 
 and takes their results back through writeback. The units keep their own
@@ -37,8 +37,8 @@ from atalla.perf_monitor import PerfMonitor
 from base.sched import CompositeClocked
 from memory.backend import Backend
 from memory.bus import BusMaster
-from memory.dram import DRAM
-from scheduler.core import SchedulerCore, load_program_text
+from memory.dram import DRAM, DRAM_BURST_BYTES
+from scheduler.core import SchedulerCore
 
 MASK32 = 0xFFFFFFFF
 
@@ -82,6 +82,11 @@ class ArrayValueBridge(GSAUTPUBridge):
 
 @dataclass
 class AtallaPlatform:
+    """The built platform: its parts, and the clock that runs them.
+
+    tick() advances everything one cycle; run_until_done() ticks until the
+    program halts. Build one with build_atalla_platform().
+    """
     core: SchedulerCore
     vc: Any                          # VectorCore
     spad: Any                        # Scratchpad
@@ -110,7 +115,7 @@ class AtallaPlatform:
 
 def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]] = None, *,
                           systolic_array: str = "meissa", lane_count: int = 16,
-                          dram_latency: int = 6, burst_bytes: int = 32,
+                          dram_latency: int = 6, burst_bytes: int = DRAM_BURST_BYTES,
                           warm_icache: bool = False, perf: bool = True,
                           perf_timeline: bool = False,
                           init_sregs: Optional[Dict[int, int]] = None,
@@ -161,9 +166,3 @@ def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]
         root.add_child(plat.perf, phase=PHASE_HARNESS)
     return plat
 
-
-def build_kernel_platform(text: str, **kw) -> AtallaPlatform:
-    """A platform loaded with an assembled program in the functional sim's
-    `.in` format (what its kernels/build_*.py scripts write)."""
-    instr, data = load_program_text(text)
-    return build_atalla_platform(instr, data, **kw)

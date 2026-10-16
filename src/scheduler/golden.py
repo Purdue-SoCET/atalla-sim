@@ -3,9 +3,9 @@
 The functional sim is a git submodule. It is a *reference*, never a runtime
 dependency: the scheduler model decodes and executes on its own, and this
 module exists only so tests can check that model against it. When the submodule
-is absent -- a clone without the key, or CI -- HAVE_GOLDEN is False and those
-tests skip, the same way src/native/kernels.py degrades when the .so has not
-been built.
+is absent -- a clone without the key, or CI -- HAVE_GOLDEN is False and the
+tests marked @pytest.mark.golden skip (tests/conftest.py), the same way
+src/native/kernels.py degrades when the .so has not been built.
 
     ATALLA_NO_GOLDEN=1   force the fallback, to prove the skip path works
 """
@@ -41,12 +41,6 @@ else:
         HAVE_GOLDEN = True
     except Exception as exc:                      # pragma: no cover - env dependent
         load_error = "%s: %s" % (type(exc).__name__, exc)
-
-
-def require(pytest_module) -> None:
-    """Skip the calling test when the golden reference is unavailable."""
-    if not HAVE_GOLDEN:
-        pytest_module.skip("functional sim unavailable (%s)" % load_error)
 
 
 #: The lanes AtallaPlatform builds (one slice of 2 elements each).
@@ -135,7 +129,39 @@ def run_golden_state(instr, data=None, workdir=None, packet_length: int = 4,
             "mem": dict(mem.data_mem)}
 
 
-def run_golden(instr, data=None, workdir=None, packet_length: int = 4):
-    """Scalar registers and data memory at halt; see run_golden_state."""
-    st = run_golden_state(instr, data, workdir, packet_length)
-    return st["sregs"], st["mem"]
+# -- comparing a platform run with the functional sim -------------------------------------
+
+def dram_halfwords(plat, g) -> dict:
+    """Every BF16 halfword of the program's data, as {address: (model,
+    functional sim)}. The functional sim's memory is keyed by address with
+    overlapping 32-bit entries, so it is read through its own read_bf16_le."""
+    from src.misc.memory import Memory              # the functional sim's
+    gm = Memory()
+    gm.data_mem = dict(g["mem"])
+    halves = sorted({(a & ~3) + k for a in g["mem"] for k in (0, 2)})
+    return {b: (int.from_bytes(plat.dram.read(b, 2), "little"), gm.read_bf16_le(b))
+            for b in halves}
+
+
+def differences(plat, g) -> list:
+    """Where an AtallaPlatform's final state differs from the functional
+    sim's (`g`, from run_golden_state): scalar registers x1-x255, vector
+    registers (the functional sim's values rounded to BF16, as the 16-bit
+    register file holds them) and DRAM halfwords. Empty means identical.
+
+    To check more state (mask registers, say), add a loop here; every
+    kernel test and tools/run_kernel.py --golden use this function."""
+    from scheduler.semantics import u32
+    from scheduler.vector import bf16_round
+    out = []
+    for r in range(1, 256):
+        mine, theirs = plat.core.scalar_reg(r), u32(g["sregs"].get(r, 0))
+        if mine != theirs:
+            out.append("x%d: model %#010x, functional sim %#010x" % (r, mine, theirs))
+    for v in range(256):
+        if plat.vc.read_vreg(v) != [bf16_round(x) for x in g["vregs"][v]]:
+            out.append("v%d differs" % v)
+    for addr, (mine, theirs) in dram_halfwords(plat, g).items():
+        if mine != theirs:
+            out.append("DRAM %#x: model %#06x, functional sim %#06x" % (addr, mine, theirs))
+    return out

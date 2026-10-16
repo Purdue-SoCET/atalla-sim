@@ -4,10 +4,13 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+import pytest
 
 
-from atalla.sysarr_tpu_experiment import MetricsVLSFrontendBridge, QUEUE_NAMES
-from atalla.sysarr_tpu_system import build_tpu_compute_path, build_tpu_platform
+from atalla.sysarr_tpu_experiment import (
+    QUEUE_NAMES, _fp16_from_u16, _read_dram_row_u16,
+    _read_slot_vector_u16, _write_dram_tile_u16)
+from atalla.sysarr_tpu_system import VLSFrontendBridge, build_tpu_compute_path, build_tpu_platform, _fp16_bits
 from base.debug import close_debug, configure_debug, dprintf
 from memory.dram import DRAM
 from memory.scratchpad import Scratchpad
@@ -43,50 +46,6 @@ def _tile_weight_stream(tile: np.ndarray) -> List[List[int]]:
     return [[int(tile[r, c]) for r in range(size)] for c in range(size - 1, -1, -1)]
 
 
-def _encode_row_u16(row: List[int]) -> bytes:
-    return b"".join(int(v).to_bytes(2, "little", signed=False) for v in row)
-
-
-def _decode_row_u16(blob: bytes, cols: int) -> List[int]:
-    out = []
-    for i in range(int(cols)):
-        start = i * 2
-        out.append(int.from_bytes(blob[start : start + 2], "little", signed=False))
-    return out
-
-
-def _write_dram_tile_u16(dram: DRAM, base_addr: int, tile: List[List[int]]) -> None:
-    rows = len(tile)
-    cols = len(tile[0]) if rows else 0
-    row_bytes = cols * 2
-    for r in range(rows):
-        dram.write(int(base_addr) + r * row_bytes, _encode_row_u16(tile[r]))
-
-
-def _read_dram_row_u16(dram: DRAM, addr: int, cols: int) -> List[int]:
-    row_bytes = cols * 2
-    blob = dram.read(int(addr), row_bytes)
-    return _decode_row_u16(blob, cols)
-
-
-def _fp16_bits(value: float) -> int:
-    return int(np.asarray(value, dtype=np.float16).view(np.uint16).item())
-
-
-def _read_slot_vector_u16(spad: Scratchpad, addr: int, vector_len: int, tile_id: int = 0) -> List[int]:
-    tile = int(tile_id)
-    slot = int(addr) % spad.bank_size
-    out = []
-    for lane in range(vector_len):
-        bank = lane
-        blob = spad.tiles[tile].banks[bank].mem[slot]
-        blob = bytes(blob) if blob is not None else b"\x00\x00"
-        if len(blob) < 2:
-            blob = blob + (b"\x00" * (2 - len(blob)))
-        out.append(int.from_bytes(blob[:2], "little", signed=False))
-    return out
-
-
 def _write_slot_vector_u16(spad: Scratchpad, addr: int, values: List[int], tile_id: int = 0) -> None:
     tile = int(tile_id)
     slot = int(addr) % spad.bank_size
@@ -96,10 +55,6 @@ def _write_slot_vector_u16(spad: Scratchpad, addr: int, values: List[int], tile_
     for lane, value in enumerate(padded[: spad.num_banks]):
         bank = lane
         spad.tiles[tile].banks[bank].mem[slot] = int(value).to_bytes(2, "little", signed=False)
-
-
-def _fp16_from_u16(value: int) -> float:
-    return float(np.frombuffer(np.uint16(int(value)).tobytes(), dtype=np.float16)[0])
 
 
 def _decode_fp16_vector(values: List[int]) -> List[float]:
@@ -616,7 +571,7 @@ class TiledTPUCosim:
             backend_dram_burst_bytes=self.backend_dram_burst_bytes,
             backend_delay_cycles=1,
             mirror=False,
-            vls_bridge_cls=MetricsVLSFrontendBridge,
+            vls_bridge_cls=VLSFrontendBridge,
         )
         self.vc = platform.vc
         self.spad = platform.spad
@@ -964,12 +919,13 @@ class TiledTPUCosim:
                         raise AssertionError("unexpected accumulator row load")
                     partial_bits = current_job.accum_load_rows.pop(row_idx)["data"]
                     self._mark_kernel_path_start(current_job.tag, "datapath_add", self.global_cycle)
-                    assert self.vc.enqueue_compute(
-                        op="add",
-                        dst=self.SUM_REG,
-                        src0=_decode_fp16_vector(partial_bits),
-                        src1=_decode_fp16_vector(list(wb.get("data", []))),
-                    )
+                    assert self.vc.enqueue_scheduler_instruction({
+                        "unit": "datapath",
+                        "op": "add",
+                        "dst": self.SUM_REG,
+                        "src0": _decode_fp16_vector(partial_bits),
+                        "src1": _decode_fp16_vector(list(wb.get("data", []))),
+                    })
                     current_job.sum_issue_rows.append(row_idx)
 
                 elif src == "gsau" and dst == self.OUT_REG:
@@ -1219,6 +1175,7 @@ def _write_logs(runner: TiledTPUCosim, stats: Dict[str, int], log_dir: Path) -> 
         close_debug()
 
 
+@pytest.mark.slow
 def test_scratchpad_vector_core_sysarr_tpu_tiled_1024x1024() -> None:
     act = _act_matrix_u16(MATRIX)
     wgt = _weights_matrix_u16(MATRIX)

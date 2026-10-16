@@ -1,3 +1,10 @@
+"""Xbar: the pipelined crossbar between a scratchpad's banks and its frontend.
+
+route() is the combinational routing (each output picks the input its shift
+mask names); Xbar adds `delay` pipeline stages and backpressure. See the
+class docstring for the timing.
+"""
+
 from base.clocked_object import Clocked
 from base.debug import dprintf
 from base.queue import SimQueue
@@ -153,6 +160,7 @@ class Xbar(Clocked):
         return completed
 
     def get_stats(self) -> Dict[str, Any]:
+        """The configuration and the traffic counters, for reports."""
         return {
             "delay": self.delay,
             "num_banks": self.num_banks,

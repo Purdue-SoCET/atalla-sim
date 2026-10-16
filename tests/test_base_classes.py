@@ -1,4 +1,3 @@
-import os, sys
 
 from base.eventq import EventQueue
 from base.clock_domain import ClockDomain

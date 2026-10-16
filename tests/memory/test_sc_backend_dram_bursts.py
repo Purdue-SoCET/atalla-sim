@@ -1,12 +1,7 @@
 import pytest
 
-import os, sys
 
 from base.testing import build_sim
-from base.eventq import EventQueue
-from base.clock_domain import ClockDomain
-from base.core import Core
-from base.sim import Sim
 
 from memory.backend import Backend
 
@@ -75,7 +70,7 @@ def test_backend_stalls():
     max_cycles = 20
     for cycle in range(max_cycles):
         backend.tick(cycle)
-        st = backend.backend_to_driver_get_stats()
+        st = backend.get_stats()
         print(
             f"[{cycle}] dram_pending={st['dram_pending']} "
             f"issued={st['issued_bursts']} completed={st['completed_bursts']} "
@@ -84,7 +79,7 @@ def test_backend_stalls():
         if st["tx_completed"] == 1 and len(complete_cycles) == 8:
             break
 
-    stats = backend.backend_to_driver_get_stats()
+    stats = backend.get_stats()
     print("Backend stats after serialized bursts:", stats)
     # The backend's stall counter includes deferred retry attempts while the
     # serialized DRAM-facing channel is busy, so the timing checks below are the

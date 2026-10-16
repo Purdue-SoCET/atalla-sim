@@ -1,20 +1,22 @@
+"""The vector register file ("Veggie") and the operand collector.
+
+Veggie: banked storage (register r lives in bank r % bank_count). Each cycle
+it grants one read and one write per bank; requests that lose the bank are
+listed in conflict_ports and must be retried.
+OpBuffer: holds a slot's operands as they arrive over several cycles and says
+when a slot has both operands and its mask (slot_ready), so an instruction
+issues only once everything is there.
+Both talk through connect(inp, out) signal bundles, as the RTL's ports do.
+"""
+
 from base.clocked_object import Clocked
 from collections import defaultdict
 from typing import Optional
 
 Time = float
 
-class VBank:
-    def __init__(self, rows, width):
-        self.mem = [[0.0] * width for _ in range(rows)]
-
-    def read(self, addr):
-        return self.mem[addr]
-
-    def write(self, addr, data):
-        self.mem[addr] = data
-
 class Veggie(Clocked):
+    """The banked vector register file; see the module docstring."""
     def __init__(self, bank_count=4, regs_per_bank=64, dread_ports=4, dwrite_ports=2, mask_banks=2):
         super().__init__()
         self.bank_count = bank_count
@@ -85,6 +87,9 @@ class Veggie(Clocked):
             self.out.ready = True
 
 class OpBuffer(Clocked):
+    """The operand collector; see the module docstring. Slot i takes read
+    ports 2i and 2i+1 and mask i.
+    """
     def __init__(self, num_pairs=1):
         super().__init__()
         self.num_pairs = num_pairs

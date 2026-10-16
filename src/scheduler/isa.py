@@ -19,7 +19,7 @@ whenever it is present, so the two cannot drift silently.
 Where the ISA spreadsheet disagrees, the RTL wins -- this module models the
 hardware as built -- with one addition: the spreadsheet's transpose
 instructions, tpop.vi (78) and tpus.vi (79), which neither RTL branch nor
-the functional sim decodes yet (docs/modelling-rules.md). The spreadsheet
+the functional sim decodes yet. The spreadsheet
 also names opcode 46 jalr.s; the RTL calls it jalr.
 
 The RTL computes `PACKET_W = INST_W * PACKET_SIZE` and then comments it as

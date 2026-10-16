@@ -10,12 +10,9 @@ import os
 import subprocess
 import sys
 
-import pytest
-
 
 from base.clocked_object import Clocked
-from base import sched
-from base.sched import CompositeClocked, SimClock, WakeGroup
+from base.sched import CompositeClocked, WakeGroup
 
 
 class Counter(Clocked):
@@ -126,14 +123,6 @@ def test_disabled_group_ticks_everything():
     assert a.ticks == [0, 1, 2, 3]
 
 
-def test_sim_clock_only_moves_forward():
-    c = SimClock()
-    c.advance_to(5)
-    assert c.cycle == 5
-    c.advance_to(3)
-    assert c.cycle == 5
-
-
 def test_composite_ticks_children_in_phase_order():
     order = []
 
@@ -169,6 +158,95 @@ def test_composite_preserves_insertion_order_within_a_phase():
         root.add_child(Rec(tag), phase=10)
     root.tick(0)
     assert order == ["x", "y", "z"]
+
+
+class Handoff(Clocked):
+    """Sleeps when it has no work; `give` hands it some, as a unit would."""
+
+    def __init__(self, tag, order):
+        super().__init__()
+        self.tag, self.order, self.work, self.target = tag, order, 0, None
+
+    def give(self):
+        self.work += 1
+        self.wake()
+
+    def tick(self, time=None):
+        self.order.append((int(time), self.tag))
+        if self.work:
+            self.work -= 1
+            if self.target is not None:
+                self.target.give()
+
+    def next_wake(self, now):
+        return now + 1 if self.work else None
+
+
+def test_clocked_children_tick_only_when_due():
+    order = []
+
+    class Parent(Clocked):
+        def tick(self, time=None):
+            self.tick_children(time)
+
+    parent = Parent()
+    a = parent.add_child(Handoff("a", order))
+    for c in range(3):
+        parent.tick(c)
+    assert order == [(0, "a")], "ticks once (everyone starts awake), then sleeps"
+    a.give()
+    for c in range(3, 6):
+        parent.tick(c)
+    assert order == [(0, "a"), (3, "a")], "woken, does its work, sleeps again"
+
+
+def test_work_handed_forward_runs_the_same_cycle():
+    """A member that comes later in the order sees work from an earlier one in
+    the same cycle -- as it would if every member ticked every cycle."""
+    order = []
+    g = WakeGroup("t", enabled=True)
+    first, second = g.add(Handoff("first", order)), g.add(Handoff("second", order))
+    first.target = second
+    g.tick(0)
+    order.clear()
+    first.give()
+    g.tick(1)
+    assert order == [(1, "first"), (1, "second")]
+
+
+def test_work_handed_back_runs_the_next_cycle():
+    """An earlier member has already ticked this cycle: it sees the work next
+    cycle, again as it would if ticked every cycle."""
+    order = []
+    g = WakeGroup("t", enabled=True)
+    first, second = g.add(Handoff("first", order)), g.add(Handoff("second", order))
+    second.target = first
+    g.tick(0)
+    order.clear()
+    second.give()
+    g.tick(1)
+    g.tick(2)
+    g.tick(3)
+    assert order == [(1, "second"), (2, "first")]
+
+
+def test_a_rotating_group_starts_from_member_cycle_mod_count():
+    order = []
+
+    class Rec(Clocked):
+        def __init__(self, tag):
+            super().__init__()
+            self.tag = tag
+
+        def tick(self, time=None):
+            order.append(self.tag)
+
+    g = WakeGroup("t", enabled=True, rotate=True)
+    for tag in "abc":
+        g.add(Rec(tag))
+    for c in range(3):
+        g.tick(c)
+    assert order == list("abc" "bca" "cab")
 
 
 # ---------------------------------------------------------------------------

@@ -9,12 +9,13 @@ kernel called directly) must match it bit for bit.
 
 import struct
 
+from array import array
+
 import numpy as np
 import pytest
 
 from base.dtype import DType, bf16_round, cast_scalar, cast_vector
 from native import kernels as native
-from scheduler import golden
 
 requires_native = pytest.mark.skipif(
     not native.HAVE_NATIVE,
@@ -50,7 +51,6 @@ def bf16_corpus():
 
 
 def golden_bf16_round():
-    golden.require(pytest)
     from src.components.vector_lanes import bf16_round as ref
     return ref
 
@@ -61,12 +61,14 @@ def expected(values):
         return ref(np.asarray(values, dtype=np.float64))
 
 
+@pytest.mark.golden
 @pytest.mark.parametrize("name", sorted(bf16_corpus().keys()))
 def test_bf16_round_matches_the_functional_sim(name):
     values = bf16_corpus()[name]
     assert np.array_equal(f32_bits(bf16_round(values)), f32_bits(expected(values)))
 
 
+@pytest.mark.golden
 @pytest.mark.parametrize("name", sorted(bf16_corpus().keys()))
 def test_cast_scalar_matches_the_functional_sim(name):
     values = bf16_corpus()[name]
@@ -74,6 +76,7 @@ def test_cast_scalar_matches_the_functional_sim(name):
     assert np.array_equal(f32_bits(got), f32_bits(expected(values)))
 
 
+@pytest.mark.golden
 @pytest.mark.parametrize("n", [1, 8, 31, 32, 33, 256, 1000])
 def test_cast_vector_matches_the_functional_sim(n):
     """Below 32 elements cast_vector uses numpy, above it the SIMD kernel."""
@@ -82,14 +85,14 @@ def test_cast_vector_matches_the_functional_sim(n):
     assert np.array_equal(f32_bits(got), f32_bits(expected(values)))
 
 
+@pytest.mark.golden
 @requires_native
 @pytest.mark.parametrize("name", sorted(bf16_corpus().keys()))
 def test_native_cast_matches_the_functional_sim(name):
     values = bf16_corpus()[name]
-    got = native.cast_array(values, native.CAST_BF16)
-    assert np.array_equal(f32_bits(got), f32_bits(expected(values)))
-    one = [native.cast_scalar_native(v, native.CAST_BF16)[0] for v in values[:2000]]
-    assert np.array_equal(f32_bits(one), f32_bits(expected(values[:2000])))
+    buf = array("d", np.asarray(values, dtype=np.float64))
+    native.cast_buffer_inplace(buf, native.CAST_BF16)       # dtype.cast_vector's path
+    assert np.array_equal(f32_bits(np.array(buf)), f32_bits(expected(values)))
 
 
 def test_bf16_is_not_fp16():

@@ -1,3 +1,17 @@
+"""The vector lanes: element-wise ops and reductions on whole vectors.
+
+VectorDatapath.enqueue(src0, src1, op=...) starts one vector instruction. The
+vector is cut into lane_count equal slices; each VectorLane runs its slice
+through the functional unit for the op (alu, sqrt, exp, div, shift: each a
+FunctionalUnitPipeline with its own latency). The ResultCollector puts the
+slices back together, and for reductions combines the lanes' partial results
+in GlobalReductionUnit's tree. Finished vectors are taken with
+collector.pop_completed().
+
+To add an op: add it to _op_lut, and to _fu_for_op if it needs a unit other
+than the ALU (a new unit also needs a latency in VectorLane.fu_latencies).
+"""
+
 import math
 from base.clocked_object import Clocked
 from base.queue import SimQueue
@@ -15,16 +29,6 @@ FLOAT_SLOT_BITS = 16
 def slice_width(vector_len: int, lane_count: int) -> int:
     """Elements each lane handles per instruction."""
     return vector_len // lane_count
-
-
-def slice_to_lane(elem: int, slice_w: int) -> tuple:
-    """Element -> (lane, position within that lane's slice).
-
-    Contiguous: lane L owns elements [L*slice_w, (L+1)*slice_w). The whole
-    vector is cut into lane_count adjacent pieces rather than dealt out
-    round-robin, so neighbouring elements share a lane.
-    """
-    return elem // slice_w, elem % slice_w
 
 
 def lane_slice_indices(lane_id: int, slice_w: int) -> list:
@@ -82,6 +86,9 @@ def _fu_for_op(op: str) -> str:
 
 
 class FunctionalUnitPipeline:
+    """A pipelined functional unit: everything pushed comes out `latency`
+    cycles later, up to `capacity` in flight.
+    """
     def __init__(self, name: str, latency: int, capacity: int = 8):
         self.name = name
         self.latency = max(1, latency)
@@ -113,15 +120,6 @@ class FunctionalUnitPipeline:
             else:
                 self.entries.enqueue(entry)
 
-    def is_idle(self) -> bool:
-        """True when tick() provably cannot change anything.
-
-        tick() only ever moves entries towards completion, so with no entries
-        in flight there is nothing for it to do. Note this deliberately ignores
-        `completed`: that queue is drained by the lane, not by tick().
-        """
-        return self.entries.is_empty()
-
     def has_completed(self) -> bool:
         return not self.completed.is_empty()
 
@@ -130,6 +128,9 @@ class FunctionalUnitPipeline:
 
 
 class LaneFUContext:
+    """One instruction's work on one lane: its operands, which elements
+    are the lane's, and how many it has sent through its unit.
+    """
     def __init__(
         self,
         inst_id: int,
@@ -158,6 +159,9 @@ class LaneFUContext:
 
 
 class GlobalReductionUnit:
+    """Combines values in a binary tree (sum, min or max), and lays the
+    result out in a vector (format_output_vector).
+    """
     SUPPORTED_OPS = ("sum", "min", "max")
     SUPPORTED_OUT_MODES = ("partial_zero", "partial_passthru", "broadcast")
 
@@ -178,6 +182,9 @@ class GlobalReductionUnit:
         raise ValueError("unsupported reduction op: %s" % op)
 
     def reduce_tree(self, values: Sequence[float], op: str) -> Optional[float]:
+        """Reduce `values` pairwise, level by level, as the hardware's tree does
+        (the order matters for floating-point sums). None for no values.
+        """
         if op not in self.SUPPORTED_OPS:
             raise ValueError("unsupported reduction op: %s" % op)
         if not values:
@@ -227,6 +234,10 @@ class GlobalReductionUnit:
 
 
 class ResultCollector(Clocked):
+    """Gathers each lane's results and puts the vector back together.
+    A reduction's lane partials are combined here, reduction_alu_latency
+    cycles later. Finished vectors come out of pop_completed().
+    """
     def __init__(
         self,
         lane_count: int,
@@ -263,6 +274,7 @@ class ResultCollector(Clocked):
         dtype: Optional[DType] = None,
         reduce_index: int = 0,
     ) -> None:
+        """Start collecting results for instruction `inst_id`."""
         if reduce:
             if reduce_op not in self.reduction_unit.SUPPORTED_OPS:
                 raise ValueError("unsupported reduction op: %s" % reduce_op)
@@ -289,6 +301,7 @@ class ResultCollector(Clocked):
         self.inflight[inst_id]["lane_pending"][lane_id] += 1
 
     def lane_reduce_accum(self, inst_id: int, lane_id: int, value: float) -> None:
+        """Fold one of a lane's values into its partial reduction."""
         state = self.inflight[inst_id]
         reduce_op = state["reduce_op"]
         if reduce_op == "sum":
@@ -411,6 +424,9 @@ class ResultCollector(Clocked):
 
 
 class VectorLane(Clocked):
+    """One lane: a functional unit per kind of op (fu_latencies), each
+    working through its slice of the vector one element a cycle.
+    """
     def __init__(
         self,
         lane_id: int,
@@ -587,6 +603,9 @@ class VectorLane(Clocked):
 
 
 class VectorDatapath(Clocked):
+    """The lanes together: enqueue() takes a vector instruction, slices it
+    across the lanes and returns its id; the result comes out of the collector.
+    """
     def __init__(
         self,
         veggie_size: int,
@@ -656,6 +675,12 @@ class VectorDatapath(Clocked):
         dtype: Optional[object] = None,
         reduce_index: int = 0,
     ) -> int:
+        """Queue one vector instruction; returns its id.
+
+        `op` is a name in _op_lut; src1 defaults to zeros, mask to every element.
+        With reduce=True the result is reduce_op over the masked elements, laid out
+        as reduce_out_mode says (see GlobalReductionUnit.format_output_vector).
+        """
         if len(src0) != self.vector_len:
             raise ValueError("src0 length mismatch")
         op_dtype = normalize_dtype(dtype, default=self.dtype)
@@ -695,7 +720,20 @@ class VectorDatapath(Clocked):
             }
         ):
             raise RuntimeError("datapath pending issue queue overflow")
+        self.wake()
         return inst_id
+
+    def next_wake(self, now: int) -> Optional[int]:
+        """Asleep with nothing queued, in the lanes or in the collector, and
+        no result still showing. enqueue wakes it."""
+        c = self.collector
+        if (self.result_valid or not self.pending_issue.is_empty() or c.inflight
+                or not c.pending_reductions.is_empty() or not c.completed_vectors.is_empty()):
+            return now + 1
+        for lane in self.lanes:
+            if not lane.is_idle():
+                return now + 1
+        return None
 
     def _can_issue_to_all_lanes(self, fu_name: str) -> bool:
         for lane in self.lanes:

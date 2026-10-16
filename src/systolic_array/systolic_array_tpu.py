@@ -1,3 +1,17 @@
+"""SystolicArrayTPU: the TPU-style systolic array (the alternative to MEISSA).
+
+A size x size grid of processing elements, in groups of group_size along the
+reduction dimension. Weights are shifted in with weight_en, then activation
+rows stream in (enqueue) with start; each output row comes out of the bottom
+output_latency cycles later and is read with get_buffer(). The arithmetic of
+each tick runs in the native kernel (src/native) when it is built, else in
+_tick_fallback; both give the same values. Op and byte counters (metrics,
+internal_bytes, algo_counts) feed the experiments' reports.
+
+To change the timing, use the latency arguments (mul/add4/add2); to change
+the arithmetic, change both the native kernel and _tick_fallback.
+"""
+
 from typing import List, Optional
 import math
 
@@ -8,50 +22,6 @@ from base.clocked_object import Clocked
 from base.queue import SimQueue
 
 from native import kernels as _native
-
-
-class TPUCell4Input:
-    """Grouped TPU-style MAC cell.
-
-    Each cell stores a vector of GROUP_SIZE weights, accepts a vector of
-    GROUP_SIZE activations, computes a grouped dot product, then adds a psum.
-    This mirrors the TPU RTL structure more closely than the old scalar PE mesh.
-    """
-
-    def __init__(self, group_size: int = 4):
-        self.group_size = int(group_size)
-        self.activation_latch: List[float] = [0.0] * self.group_size
-        self.weight: List[float] = [0.0] * self.group_size
-        self.accumulation: float = 0.0
-        self.mul_reg: float = 0.0
-        self.mul_ops: int = 0
-        self.add_ops: int = 0
-        self.psum_adds: int = 0
-        self.mac_ops: int = 0
-
-    def _input(self, activation: List[float]) -> None:
-        vals = list(activation)[: self.group_size]
-        if len(vals) < self.group_size:
-            vals += [0.0] * (self.group_size - len(vals))
-        self.activation_latch = [float(v) for v in vals]
-
-    def _weight(self, weight: List[float]) -> None:
-        vals = list(weight)[: self.group_size]
-        if len(vals) < self.group_size:
-            vals += [0.0] * (self.group_size - len(vals))
-        self.weight = [float(v) for v in vals]
-
-    def _accumulation(self, accumulation: float) -> None:
-        self.accumulation = float(accumulation)
-
-    def count_mul(self, count: int) -> None:
-        self.mul_ops += int(count)
-        self.mac_ops += int(count)
-
-    def count_add(self, count: int = 1, is_psum: bool = False) -> None:
-        self.add_ops += int(count)
-        if is_psum:
-            self.psum_adds += int(count)
 
 
 class _ArrayCell:
@@ -65,8 +35,7 @@ class _ArrayCell:
     Op counters are not stored per cell. Every cell is charged the identical
     amount on every tick (one psum add always, plus group_size multiplies and
     group_size-1 adds while `start` is asserted), so the totals are held once
-    on the owning array and shared by all cells. A cell only gets its own entry
-    if something calls `count_mul`/`count_add` on it directly.
+    on the owning array and shared by all cells.
     """
 
     __slots__ = ("_o", "_g", "_j")
@@ -87,6 +56,7 @@ class _ArrayCell:
     @activation_latch.setter
     def activation_latch(self, values) -> None:
         self._o._arr.act[self._g, :, self._j] = self._o._fit(values)
+        self._o._steady = None
 
     @property
     def weight(self) -> List[float]:
@@ -95,6 +65,7 @@ class _ArrayCell:
     @weight.setter
     def weight(self, values) -> None:
         self._o._arr.wgt[self._g, :, self._j] = self._o._fit(values)
+        self._o._steady = None
 
     @property
     def accumulation(self) -> float:
@@ -103,6 +74,7 @@ class _ArrayCell:
     @accumulation.setter
     def accumulation(self, value: float) -> None:
         self._o._arr.acc[self._g, self._j] = float(value)
+        self._o._steady = None
 
     @property
     def mul_reg(self) -> float:
@@ -111,50 +83,31 @@ class _ArrayCell:
     @mul_reg.setter
     def mul_reg(self, value: float) -> None:
         self._o._arr.mul[self._g, self._j] = float(value)
-
-    def _extra(self, key: str) -> int:
-        return self._o._cell_extra.get((self._g, self._j, key), 0)
-
-    def _bump(self, key: str, amount: int) -> None:
-        k = (self._g, self._j, key)
-        self._o._cell_extra[k] = self._o._cell_extra.get(k, 0) + int(amount)
+        self._o._steady = None
 
     @property
     def mul_ops(self) -> int:
-        return self._o._common_mul_ops + self._extra("mul")
+        return self._o._common_mul_ops
 
     @property
     def add_ops(self) -> int:
-        return self._o._common_add_ops + self._extra("add")
+        return self._o._common_add_ops
 
     @property
     def psum_adds(self) -> int:
-        return self._o._common_psum_adds + self._extra("psum")
+        return self._o._common_psum_adds
 
     @property
     def mac_ops(self) -> int:
-        return self._o._common_mac_ops + self._extra("mac")
-
-    def _input(self, activation: List[float]) -> None:
-        self.activation_latch = activation
-
-    def _weight(self, weight: List[float]) -> None:
-        self.weight = weight
-
-    def _accumulation(self, accumulation: float) -> None:
-        self.accumulation = accumulation
-
-    def count_mul(self, count: int) -> None:
-        self._bump("mul", count)
-        self._bump("mac", count)
-
-    def count_add(self, count: int = 1, is_psum: bool = False) -> None:
-        self._bump("add", count)
-        if is_psum:
-            self._bump("psum", count)
-
+        return self._o._common_mac_ops
 
 class SystolicArrayTPU(Clocked):
+    """The TPU array; see the module docstring.
+
+    Each cycle: set_control() chooses what the tick does (weight_en shifts in
+    weights, start + mac_shift computes), enqueue*() supply the rows, and
+    tick() advances one cycle.
+    """
     def __init__(
         self,
         size: int,
@@ -211,7 +164,6 @@ class SystolicArrayTPU(Clocked):
         self._common_add_ops = 0
         self._common_psum_adds = 0
         self._common_mac_ops = 0
-        self._cell_extra = {}
         self.array: List[List[_ArrayCell]] = [
             [_ArrayCell(self, g, j) for j in range(self.size)] for g in range(self.num_groups)
         ]
@@ -233,6 +185,12 @@ class SystolicArrayTPU(Clocked):
         self.value_ready: bool = False
         self._output_pipe: List[Optional[List[float]]] = [None] * self.output_latency
         self._output_tag_pipe: List[bool] = [False] * self.output_latency
+        #: While the array idles in a fixed point -- nothing coming in, nothing
+        #: in the output pipe, the partial sums no longer changing -- every
+        #: cycle is the same, so the counts one such cycle added are replayed
+        #: instead of running the datapath: (psum non-zeros, saturations,
+        #: overflows). None when not in one.
+        self._steady = None
 
     def _fit(self, values) -> List[float]:
         """Trim or zero-pad a lane vector to exactly group_size entries."""
@@ -242,6 +200,9 @@ class SystolicArrayTPU(Clocked):
         return vals
 
     def _resolve_dtype(self, dtype: Optional[object]) -> DType:
+        # Every input (rows, weights, psums) passes through here, and any of
+        # them ends a steady idle state.
+        self._steady = None
         dtype_norm = normalize_dtype(dtype, default=self.dtype)
         if dtype_norm is None:
             raise ValueError("dtype must be specified")
@@ -256,13 +217,6 @@ class SystolicArrayTPU(Clocked):
         if dtype == DType.INT8:
             return 1
         return 2
-
-    def _note_cast(self, value: float, cast_value: float) -> None:
-        if self._current_dtype == DType.FP16:
-            if abs(float(value)) > 65504.0:
-                self.saturation_count += 1
-            if not math.isfinite(float(cast_value)):
-                self.overflow_count += 1
 
     def _cast_group(self, values: List[float], dtype: DType) -> List[float]:
         """Cast a whole boundary vector at once.
@@ -317,11 +271,10 @@ class SystolicArrayTPU(Clocked):
     def active_lane_count(self) -> int:
         return int(np.count_nonzero((self._arr.act != 0.0) & (self._arr.wgt != 0.0)))
 
-    def active_cell_count(self) -> int:
-        both = (self._arr.act != 0.0) & (self._arr.wgt != 0.0)
-        return int(np.count_nonzero(both.any(axis=1)))
-
     def enqueue(self, activations: List[float], dtype: Optional[object] = None, *, count_algo: bool = True) -> bool:
+        """Queue an activation row (size values). False if the input queues
+        are full. count_algo=False for flush rows, which are not real work.
+        """
         if len(activations) != self.size:
             raise ValueError("activations must match systolic array size")
         if any(q.is_full() for q in self._input_fifo_left) or self._input_algo_flags.is_full():
@@ -337,6 +290,7 @@ class SystolicArrayTPU(Clocked):
         return True
 
     def enqueue_weights(self, weights: List[float], dtype: Optional[object] = None, *, count_algo: bool = True) -> bool:
+        """Queue a weight row (size values) to shift in. False if full."""
         if len(weights) != self.size:
             raise ValueError("weights must match systolic array size")
         if any(q.is_full() for q in self._weight_boundary):
@@ -493,6 +447,40 @@ class SystolicArrayTPU(Clocked):
         if self.stall:
             return
 
+        idle = not (self.weight_en or self.mac_shift or self.start)
+        if idle and self._steady is not None:
+            self._idle_tick()
+            return
+        acc_before = None
+        if (idle and self._psum_input_fifo_top[0].is_empty() and not self._issued_nonzero
+                and not any(self._output_tag_pipe)
+                and all(row is None for row in self._output_pipe)):
+            acc_before = self._arr.acc.copy()
+        metrics = self._step()
+        if acc_before is not None and np.array_equal(acc_before, self._arr.acc):
+            self._steady = (int(metrics[_native.SaArrays.M_PSUM_NNZ]),
+                            int(metrics[_native.SaArrays.M_SAT]),
+                            int(metrics[_native.SaArrays.M_OVF]))
+
+    def _idle_tick(self) -> None:
+        """A cycle in the steady idle state: exactly the counts _step adds on
+        such a cycle (no rows in, start low), with the state left as it is.
+        Keep it in step with _step."""
+        nnz, sat, ovf = self._steady
+        eb = self._dtype_bytes()
+        cells = self.num_groups * self.size
+        self.internal_bytes["psum_shift"] += cells * eb
+        self.internal_bytes_valid["psum_shift"] += nnz * eb
+        self.saturation_count += sat
+        self.overflow_count += ovf
+        self._common_add_ops += 1
+        self._common_psum_adds += 1
+        self.metrics["add_ops"] += cells
+        self.metrics["psum_adds"] += cells
+        self.value_ready = False
+
+    def _step(self):
+        """One full cycle of the datapath. Returns the kernel's metrics."""
         a = self._arr
         G, S, GS = a.G, a.S, a.GS
         weight_en = self.weight_en
@@ -609,9 +597,8 @@ class SystolicArrayTPU(Clocked):
             for val in ready_row:
                 if val != 0.0:
                     self.internal_bytes_valid["output"] += elem_bytes
+        return metrics
 
     def get_buffer(self) -> List[List[float]]:
         return self.psum_output_fifo_bottom
 
-    def boundary_levels(self) -> List[int]:
-        return [len(q) for q in self._input_fifo_left]

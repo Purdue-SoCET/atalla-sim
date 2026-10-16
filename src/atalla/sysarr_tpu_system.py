@@ -1,3 +1,20 @@
+"""The TPU platform: the vector core, scratchpad, DRAM and a systolic array, wired.
+
+build_tpu_platform() builds and connects the parts and returns a TPUPlatform:
+
+    DRAM -> Backend[p] -> scratchpad pad p -> VLSFrontendBridge -> VLSU p
+         -> vector registers -> GSAU -> GSAUTPUBridge -> systolic array
+
+Nothing in it decides what to run: a harness (a test, the experiment in
+sysarr_tpu_experiment.py, or SysArrTPUSystem here) issues the loads, stores
+and array requests. AtallaPlatform (atalla_platform.py) reuses these parts
+with the scheduler as the driver.
+
+Also here: the tick phases (PHASE_*: the order components run in within a
+cycle), the scratchpad's size constants (SPAD_*), and SysArrTPUSystem, a
+small end-to-end GEMM run (`python -m atalla.sysarr_tpu_system`).
+"""
+
 import argparse
 import json
 import os
@@ -12,25 +29,15 @@ if __package__ is None or __package__ == "":
 
 from base.clock_domain import ClockDomain
 from base.clocked_object import Clocked
-from base.core import Core
 from base.eventq import EventQueue
 from base.sched import CompositeClocked
 from base.sim import Sim
+from base.testing import build_sim
 from memory.backend import Backend, SharedDRAMBurstChannel
-from memory.dram import DRAM
+from memory.dram import DRAM, DRAM_BURST_BYTES
 from memory.scratchpad import Scratchpad
 from systolic_array.systolic_array_tpu import SystolicArrayTPU
 from vector_core.vector_core import VectorCore
-
-
-def build_sim():
-    eq = EventQueue()
-    clk = ClockDomain(eq, period=1.0)
-    core = Core(eq)
-    core.add_clock_domain(clk)
-    sim = Sim()
-    sim.init(eq, core)
-    return eq, clk, sim
 
 
 def _encode_vector_u16(vec):
@@ -68,6 +75,9 @@ def _fp16_bits(value: float) -> int:
 
 
 class TPUMetrics:
+    """Byte and FLOP counters for SysArrTPUSystem's GEMM run, and its
+    arithmetic intensity (FLOPs per byte moved).
+    """
     def __init__(self, size: int):
         self.size = int(size)
         self.cycles = 0
@@ -94,6 +104,12 @@ class TPUMetrics:
 
 
 class VLSFrontendBridge(Clocked):
+    """Carries one VLSU's requests to its scratchpad pad, one a cycle.
+
+    A store is written to the pad; a load is read, and the data goes back to
+    the VLSU (push_scratchpad_response) when the pad returns it. Lanes travel
+    as raw 16-bit patterns. trace_hook, if set, sees every request and response.
+    """
     def __init__(self, vc: VectorCore, spad: Scratchpad, vls_id: int = 0, frontend_id: int = 0):
         super().__init__()
         self.vc = vc
@@ -206,6 +222,10 @@ class VLSFrontendBridge(Clocked):
 
 
 class TPUReference:
+    """A second systolic array fed the same rows as the real one, for
+    checking: GSAUTPUBridge mirrors each request into it, and its outputs
+    (FP16 bit patterns) are compared with what the platform produced.
+    """
     def __init__(self, size: int, dtype: str = "fp16"):
         self.sa = SystolicArrayTPU(size=size, dtype=dtype)
         self.size = size
@@ -232,6 +252,7 @@ class TPUReference:
         did_flush: bool,
         time: Optional[float] = None,
     ) -> None:
+        """Do what the bridge did this cycle, on the reference array."""
         self.sa.set_control(weight_en=False, mac_shift=False, start=False, stall=False)
         if did_req:
             if is_weight:
@@ -265,6 +286,15 @@ class TPUReference:
 
 
 class GSAUTPUBridge(Clocked):
+    """Connects the GSAU to the systolic array.
+
+    Each cycle it takes at most one request from the GSAU -- a weight row
+    (shifted into the array) or an activation row (streamed through it) -- and
+    returns each output row to the GSAU with its request's metadata, skipping
+    the array's warm-up rows. After finish_inputs() it pushes zero rows to
+    flush the last outputs out. _pack_rsp sets the result format (FP16 bit
+    patterns here; ArrayValueBridge in atalla_platform.py returns values).
+    """
     def __init__(self, vc: VectorCore, sa: SystolicArrayTPU, mirror: Optional[TPUReference] = None):
         super().__init__()
         self.vc = vc
@@ -374,18 +404,20 @@ class GSAUTPUBridge(Clocked):
 
 
 class RoundRobinBackendTicker(Clocked):
+    """Ticks a list of DRAM masters, starting from a different one each
+    cycle (master cycle mod count first), so no master always gets the
+    shared DRAM channel first. Idle masters sleep.
+    """
+    CHILDREN_ROTATE = True
+
     def __init__(self, backends: List[Backend]):
         super().__init__()
         self.backends = list(backends)
+        for backend in self.backends:
+            self.add_child(backend)
 
     def tick(self, time: Optional[float] = None) -> None:
-        if not self.backends:
-            return
-        cycle = int(time) if time is not None else 0
-        start_backend = cycle % len(self.backends)
-        for offset in range(len(self.backends)):
-            backend = self.backends[(start_backend + offset) % len(self.backends)]
-            backend.tick(time)
+        self.tick_children(time)
 
 
 # Tick phases. Stated once here rather than being re-specified as a list
@@ -427,6 +459,10 @@ PAD_OUT = 3     # outputs
 
 @dataclass
 class TPUPlatform:
+    """The parts build_tpu_platform() made, and the tree that ticks them
+    (root). `backend` and `vls_bridge` are the first of `backends` and
+    `vls_bridges`; `mirror` is the TPUReference, or None.
+    """
     eq: EventQueue
     clk: ClockDomain
     sim: Sim
@@ -548,7 +584,7 @@ def build_tpu_platform(
     dram_block_bytes: int = 256,
     backend_dram_latency: Optional[int] = None,
     backend_dram_q_depth: int = 16,
-    backend_dram_burst_bytes: int = 32,
+    backend_dram_burst_bytes: int = DRAM_BURST_BYTES,
     backend_delay_cycles: int = 1,
     mirror: bool = False,
     vls_bridge_cls: Callable[..., Any] = VLSFrontendBridge,
@@ -638,6 +674,13 @@ def build_tpu_platform(
 
 
 class SysArrTPUSystem:
+    """A whole GEMM on the TPU platform, driven by a small harness.
+
+    load_inputs() puts activations and weights in DRAM; run() DMAs them into
+    the pads, loads them into vector registers, streams them through the
+    array, stores the outputs back to DRAM, and returns (outputs, mirror's
+    outputs, cycles, TPUMetrics).
+    """
     def __init__(self, size: int = 32, dtype: str = "fp16", mirror: bool = True,
                  **platform_kwargs):
         """Extra keywords go straight to build_tpu_platform, so a test that only
@@ -682,6 +725,10 @@ class SysArrTPUSystem:
         self.metrics = TPUMetrics(size=self.size)
 
     def load_inputs(self, act: List[List[int]], wgt_stream: List[List[int]]) -> None:
+        """Put the activation rows and the weight stream (FP16 bit patterns,
+        one row per array column, in the order they are shifted in) in DRAM, and
+        preload the same rows into the activation and weight pads.
+        """
         row_bytes = self.size * 2
         for r in range(self.size):
             self.dram.write(self.DRAM_ACT + r * row_bytes, _encode_row_u16(act[r]))
@@ -699,6 +746,9 @@ class SysArrTPUSystem:
                 self.spad.tiles[self.WGT_PAD].banks[bank].mem[slot] = int(value).to_bytes(2, "little", signed=False)
 
     def run(self, max_cycles: int = 20000) -> Tuple[List[List[int]], Optional[List[List[int]]], int, "TPUMetrics"]:
+        """Run the GEMM to the end. Returns (output rows read back from DRAM,
+        the reference array's output rows or None, cycles, TPUMetrics).
+        """
         row_bytes = self.size * 2
         observed_rows: List[Optional[List[int]]] = [None for _ in range(self.size)]
         state = {
@@ -718,6 +768,122 @@ class SysArrTPUSystem:
             "store_issue_window": self.spad.tiles[self.OUT_PAD].depth,
         }
 
+        def _handle_writeback():
+            """Route this cycle's vector-core writeback: a weight row goes to the
+            array as weights, an activation row as an input, a GSAU result is
+            queued to be stored."""
+            if self_outer.vc.wb_valid and self_outer.vc.last_wb is not None:
+                wb = self_outer.vc.last_wb
+                src = wb.get("source")
+                dst = wb.get("dst")
+
+                if src == "vlsu" and dst == self_outer.W_REG and state["weight_loads_inflight"] > 0:
+                    state["weight_loads_inflight"] -= 1
+                    self_outer.metrics.count_weight_load()
+                    assert self_outer.vc.enqueue_scheduler_instruction(
+                        {
+                            "unit": "gsau",
+                            "vdata": list(wb.get("data", [])),
+                            "is_weight": True,
+                            "expect_output": False,
+                            "dtype": self_outer.dtype,
+                        }
+                    )
+                    state["weight_row"] += 1
+                    if state["weight_row"] >= self_outer.size:
+                        state["weights_done"] = True
+
+                elif src == "vlsu" and dst == self_outer.A_REG and state["act_loads_inflight"] > 0:
+                    state["act_loads_inflight"] -= 1
+                    self_outer.metrics.count_act_load()
+                    assert self_outer.vc.enqueue_scheduler_instruction(
+                        {
+                            "unit": "gsau",
+                            "vdata": list(wb.get("data", [])),
+                            "dst": self_outer.OUT_REG,
+                            "is_weight": False,
+                            "expect_output": True,
+                            "dtype": self_outer.dtype,
+                        }
+                    )
+                    state["act_row"] += 1
+
+                elif src == "gsau" and dst == self_outer.OUT_REG:
+                    row_idx = state["next_out_row"]
+                    if row_idx < self_outer.size:
+                        self_outer.metrics.count_output_row()
+                        if observed_rows[row_idx] is None:
+                            observed_rows[row_idx] = [int(x) for x in list(wb.get("data", []))[: self_outer.size]]
+                        state["pending_output_rows"].append(
+                            {
+                                "row": row_idx,
+                                "data": list(wb.get("data", [])),
+                            }
+                        )
+                        state["next_out_row"] += 1
+
+        def _issue_loads():
+            """Ask for more weight rows, then (once all weights are in) activation
+            rows, up to the scratchpad's issue window."""
+            while (
+                state["weight_issue_row"] < self_outer.size
+                and state["weight_loads_inflight"] < state["load_issue_window"]
+            ):
+                if not _issue_weight_load():
+                    break
+
+            if state["weights_done"]:
+                while (
+                    state["act_issue_row"] < self_outer.size
+                    and state["act_loads_inflight"] < state["load_issue_window"]
+                ):
+                    if not _issue_act_load():
+                        break
+
+        def _commit_stores():
+            """Count the output rows that reached the scratchpad."""
+            completed_store_rows = []
+            for row_idx, store_meta in list(state["store_inflight"].items()):
+                slot = int(self_outer.SPAD_OUT_BASE + row_idx) % self_outer.spad.bank_size
+                spad_vec = []
+                for lane in range(self_outer.vc.vector_len):
+                    bank = lane
+                    blob = self_outer.spad.tiles[self_outer.OUT_PAD].banks[bank].mem[slot]
+                    blob = bytes(blob) if blob is not None else b"\x00\x00"
+                    if len(blob) < 2:
+                        blob = blob + (b"\x00" * (2 - len(blob)))
+                    spad_vec.append(int.from_bytes(blob[:2], "little", signed=False))
+                store_meta["age"] += 1
+                if spad_vec == (store_meta["data"] or []):
+                    self_outer.dram.write(self_outer.DRAM_OUT + row_idx * row_bytes, _encode_row_u16(spad_vec))
+                    self_outer.metrics.count_store_row()
+                    state["completed_rows"].add(row_idx)
+                    completed_store_rows.append(row_idx)
+                elif store_meta["age"] > 1000:
+                    raise AssertionError("store did not commit to scratchpad")
+            for row_idx in completed_store_rows:
+                state["store_inflight"].pop(row_idx, None)
+
+        def _queue_stores():
+            """Send finished output rows to the scratchpad, up to its window."""
+            while state["pending_output_rows"] and len(state["store_inflight"]) < state["store_issue_window"]:
+                next_item = state["pending_output_rows"].pop(0)
+                row_idx = next_item["row"]
+                row_data = next_item["data"]
+                assert self_outer.vc.enqueue_memory(
+                    {
+                        "kind": "store",
+                        "vls": self_outer.OUT_PAD,
+                        "data": row_data,
+                        "addr": self_outer.SPAD_OUT_BASE + row_idx,
+                        "dtype": self_outer.dtype,
+                    }
+                )
+                state["store_inflight"][row_idx] = {
+                    "data": row_data,
+                    "age": 0,
+                }
+
         class RunHarness(Clocked):
             def __init__(self):
                 super().__init__()
@@ -731,111 +897,10 @@ class SysArrTPUSystem:
                 if self.done:
                     return
 
-                if self_outer.vc.wb_valid and self_outer.vc.last_wb is not None:
-                    wb = self_outer.vc.last_wb
-                    src = wb.get("source")
-                    dst = wb.get("dst")
-
-                    if src == "vlsu" and dst == self_outer.W_REG and state["weight_loads_inflight"] > 0:
-                        state["weight_loads_inflight"] -= 1
-                        self_outer.metrics.count_weight_load()
-                        assert self_outer.vc.enqueue_scheduler_instruction(
-                            {
-                                "unit": "gsau",
-                                "vdata": list(wb.get("data", [])),
-                                "is_weight": True,
-                                "expect_output": False,
-                                "dtype": self_outer.dtype,
-                            }
-                        )
-                        state["weight_row"] += 1
-                        if state["weight_row"] >= self_outer.size:
-                            state["weights_done"] = True
-
-                    elif src == "vlsu" and dst == self_outer.A_REG and state["act_loads_inflight"] > 0:
-                        state["act_loads_inflight"] -= 1
-                        self_outer.metrics.count_act_load()
-                        assert self_outer.vc.enqueue_scheduler_instruction(
-                            {
-                                "unit": "gsau",
-                                "vdata": list(wb.get("data", [])),
-                                "dst": self_outer.OUT_REG,
-                                "is_weight": False,
-                                "expect_output": True,
-                                "dtype": self_outer.dtype,
-                            }
-                        )
-                        state["act_row"] += 1
-
-                    elif src == "gsau" and dst == self_outer.OUT_REG:
-                        row_idx = state["next_out_row"]
-                        if row_idx < self_outer.size:
-                            self_outer.metrics.count_output_row()
-                            if observed_rows[row_idx] is None:
-                                observed_rows[row_idx] = [int(x) for x in list(wb.get("data", []))[: self_outer.size]]
-                            state["pending_output_rows"].append(
-                                {
-                                    "row": row_idx,
-                                    "data": list(wb.get("data", [])),
-                                }
-                            )
-                            state["next_out_row"] += 1
-
-                while (
-                    state["weight_issue_row"] < self_outer.size
-                    and state["weight_loads_inflight"] < state["load_issue_window"]
-                ):
-                    if not _issue_weight_load():
-                        break
-
-                if state["weights_done"]:
-                    while (
-                        state["act_issue_row"] < self_outer.size
-                        and state["act_loads_inflight"] < state["load_issue_window"]
-                    ):
-                        if not _issue_act_load():
-                            break
-
-                completed_store_rows = []
-                for row_idx, store_meta in list(state["store_inflight"].items()):
-                    slot = int(self_outer.SPAD_OUT_BASE + row_idx) % self_outer.spad.bank_size
-                    spad_vec = []
-                    for lane in range(self_outer.vc.vector_len):
-                        bank = lane
-                        blob = self_outer.spad.tiles[self_outer.OUT_PAD].banks[bank].mem[slot]
-                        blob = bytes(blob) if blob is not None else b"\x00\x00"
-                        if len(blob) < 2:
-                            blob = blob + (b"\x00" * (2 - len(blob)))
-                        spad_vec.append(int.from_bytes(blob[:2], "little", signed=False))
-                    store_meta["age"] += 1
-                    if spad_vec == (store_meta["data"] or []):
-                        self_outer.dram.write(self_outer.DRAM_OUT + row_idx * row_bytes, _encode_row_u16(spad_vec))
-                        self_outer.metrics.count_store_row()
-                        state["completed_rows"].add(row_idx)
-                        completed_store_rows.append(row_idx)
-                    elif store_meta["age"] > 1000:
-                        raise AssertionError("store did not commit to scratchpad")
-                for row_idx in completed_store_rows:
-                    state["store_inflight"].pop(row_idx, None)
-
-                while state["pending_output_rows"] and len(state["store_inflight"]) < state["store_issue_window"]:
-                    next_item = state["pending_output_rows"].pop(0)
-                    row_idx = next_item["row"]
-                    row_data = next_item["data"]
-                    assert self_outer.vc.enqueue_memory(
-                        {
-                            "kind": "store",
-                            "vls": self_outer.OUT_PAD,
-                            "data": row_data,
-                            "addr": self_outer.SPAD_OUT_BASE + row_idx,
-                            "dtype": self_outer.dtype,
-                        }
-                    )
-                    state["store_inflight"][row_idx] = {
-                        "data": row_data,
-                        "age": 0,
-                    }
-
+                _handle_writeback()
+                _issue_loads()
+                _commit_stores()
+                _queue_stores()
                 state["cycles"] += 1
                 self_outer.metrics.count_cycle()
                 if len(state["completed_rows"]) >= self_outer.size:

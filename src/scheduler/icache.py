@@ -48,6 +48,7 @@ def split_address(addr: int):
 
 
 class ICache(RTLModule):
+    """The instruction cache; see the module docstring."""
     REGS = dict(state=IDLE, fill_count=0, active_idx=0, active_tag=0,
                 wait_left=0,
                 valid=[False] * LINES, tags=[0] * LINES)

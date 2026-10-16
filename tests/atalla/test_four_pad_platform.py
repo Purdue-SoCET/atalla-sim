@@ -7,7 +7,6 @@ Proves the system-level path end to end:
 for every pad, and that the four pads are genuinely separate address spaces --
 the same local slot in each holds different data.
 """
-import pytest
 
 from atalla.sysarr_tpu_system import (
     PAD_ACT, PAD_OUT, PAD_PSUM, PAD_WGT, SPAD_NUM_PADS, build_tpu_platform)

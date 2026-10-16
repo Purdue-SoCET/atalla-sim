@@ -25,11 +25,13 @@ from collections import deque
 from typing import Deque, List, Optional, Tuple
 
 from base.clocked_object import Clocked
+from memory.dram import DRAM_BURST_BYTES
 
 
 class BusMaster(Clocked):
+    """One cache's port on the shared DRAM channel; see the module docstring."""
     def __init__(self, name: str, channel, *, dram_latency: int = 6,
-                 burst_bytes: int = 32, beat_bytes: int = 8,
+                 burst_bytes: int = DRAM_BURST_BYTES, beat_bytes: int = 8,
                  max_outstanding: int = 16, write_buffer_bytes: int = 64):
         super().__init__()
         self.name = name

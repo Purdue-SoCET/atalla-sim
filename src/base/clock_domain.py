@@ -1,12 +1,20 @@
+"""A clock: ticks a list of objects every `period` time units.
+
+ClockDomain puts its own tick on the EventQueue, ticks every object added
+with add_clocked() in the order they were added, and schedules the next tick.
+Most of atalla-sim doesn't use this (the platforms tick a CompositeClocked
+tree by hand, base/sched.py); the event-queue harnesses do. To clock a new
+component from a domain, give it a tick(time) method and add_clocked() it.
+"""
+
 from base.eventq import EventQueue
 from base.clocked_object import Clocked
-from typing import Tuple
 
 Time = float
-EventHandle = Tuple[Time, int]
 
 class ClockDomain:
 
+    """A clock with a period, ticking `objects` in order on each edge."""
     def __init__(self, event_queue: EventQueue, period: Time, name: str = "clk") -> None:
         self.event_queue = event_queue
         self.period = period
@@ -17,9 +25,6 @@ class ClockDomain:
 
     def add_clocked(self, obj: Clocked) -> None:
         self.objects.append(obj)
-
-    def remove_clocked(self, obj: Clocked) -> None:
-        self.objects.remove(obj)
 
     def start(self, time: Time = 0.0) -> None:
         self.running = True

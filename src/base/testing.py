@@ -1,7 +1,7 @@
-"""Shared helpers for tests and scratch drivers.
+"""build_sim: the event queue, clock and simulator, wired together.
 
-`build_sim` was copy-pasted, byte-identical, into 17 test files; it lives here
-now so the wiring cannot drift between them.
+Every test and harness that needs a simulated clock uses this one, so the
+wiring can't drift between them.
 """
 
 from base.clock_domain import ClockDomain
@@ -19,25 +19,3 @@ def build_sim(period: float = 1.0, name: str = "clk"):
     sim = Sim()
     sim.init(eq, core)
     return eq, clk, sim
-
-
-def tick_n(obj, n: int, start: int = 0):
-    """Tick `obj` for `n` cycles, returning the next unused cycle number."""
-    for t in range(start, start + n):
-        obj.tick(float(t))
-    return start + n
-
-
-def run_until(obj, done, max_cycles: int = 200, start: int = 0, hook=None):
-    """Tick until `done()` is true; return the cycle it became true.
-
-    `hook(cycle)` runs after each tick, for driving peripherals. Raises rather
-    than returning a sentinel, so a hung test fails loudly.
-    """
-    for t in range(start, start + max_cycles):
-        obj.tick(float(t))
-        if hook is not None:
-            hook(t)
-        if done():
-            return t
-    raise AssertionError("condition not reached within %d cycles" % max_cycles)

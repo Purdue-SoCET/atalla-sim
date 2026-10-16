@@ -58,9 +58,9 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from base.rtl_module import RTLModule
 from scheduler.control import (
-    SdmaOp, ScalarOp, VectorOp, V_ALU_ADD, V_EXP, V_GSAU, V_MUL, V_MVMT, V_TRANS,
-    V_REDU, V_VLSU, VECTOR_ALU_FUS, decode_scalar, decode_sdma, decode_vector)
-from scheduler.isa import INST_W, PACKET_SIZE
+    SdmaOp, ScalarOp, VectorOp, V_EXP, V_GSAU, V_MUL, V_MVMT, V_TRANS, V_REDU, V_VLSU,
+    VECTOR_ALU_FUS, decode_scalar, decode_sdma, decode_vector)
+from scheduler.isa import PACKET_SIZE
 
 NUM_SCALAR_REGS = 256
 NUM_VECTOR_REGS = 256
@@ -84,6 +84,9 @@ class PacketContractError(ValueError):
 # -- the packet --------------------------------------------------------------------
 @dataclass
 class DecodedPacket:
+    """One VLIW packet, decoded: its scalar, vector and SDMA slots, and the
+    registers it reads, in the RTL's port order.
+    """
     scalar: List[ScalarOp]
     vector: List[VectorOp]
     sdma: List[SdmaOp]
@@ -202,11 +205,6 @@ class Scoreboard(RTLModule):
         return None
 
     @property
-    def scalar_halt_ready(self) -> bool:
-        """The RTL's name; it is high while something is still outstanding."""
-        return bool(self.scalar)
-
-    @property
     def idle(self) -> bool:
         return not (self.scalar or self.vector or self.mask)
 
@@ -262,6 +260,9 @@ class RegFile(RTLModule):
 
     def eval_ready_for(self, reads: Sequence[int], writes: Sequence[int],
                        deps_ready: bool) -> bool:
+        """Can this cycle's reads be served? False while the bank-conflict
+        FSM is still serving a conflicting read set (see the class docstring).
+        """
         self._reads, self._deps_ready = list(reads), deps_ready
         rreqs, wreqs = self._banked(reads), self._banked(writes)
         if any(len(w) > 1 for w in wreqs):
@@ -275,6 +276,7 @@ class RegFile(RTLModule):
         return True                                  # DONE
 
     def next_state(self, dec2_ready: bool, writes: Sequence[Tuple[int, object]]) -> None:
+        """Next state of the conflict FSM, and the writes to apply at commit."""
         rreqs = self._banked(self._reads)
         if self.state == READY:
             grant_from = rreqs
@@ -324,9 +326,6 @@ def _with_data(entries) -> Tuple[List[int], List[Tuple[int, object]]]:
 
 
 # -- decode_2 ------------------------------------------------------------------------
-#: Every vector unit decode 2 asks after; "vlsu" is one flag per scratchpad.
-VECTOR_UNITS = ("alu", "mul", "exp", "reduction", "gsau", "movement", "transpose")
-
 
 @dataclass
 class IssuedPacket:
@@ -347,6 +346,13 @@ class IssuedPacket:
 
 class Decode2(RTLModule):
 
+    """Decode 2: reads a packet's operands and issues it, or holds it.
+
+    A packet issues only when every register it reads is free (the scoreboard),
+    its register-file bank reads fit the ports, and every unit it needs is
+    ready; otherwise stall_reasons and blocked_by say why it waited. It owns the
+    scalar, vector and mask register files and applies the writebacks each cycle.
+    """
     INS = dict(scalar=[0] * PACKET_SIZE, vector=[0] * PACKET_SIZE,
                sdma=[0] * PACKET_SIZE, valid=False, pc=0, pc_pred_addr=0,
                predict_taken=False, flush=False, halt=False,
@@ -483,10 +489,3 @@ class Decode2(RTLModule):
     def scalar_halt_ready(self) -> bool:
         return bool(self.scoreboard.scalar)
 
-    @property
-    def vector_halt_ready(self) -> bool:
-        return bool(self.scoreboard.vector)
-
-    @property
-    def mask_halt_ready(self) -> bool:
-        return bool(self.scoreboard.mask)

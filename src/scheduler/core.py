@@ -1,6 +1,7 @@
-"""SchedulerCore: the one Clocked object the platform registers.
+"""SchedulerCore: the scheduler pipeline -- fetch, decode, execute, writeback.
 
-Owns every pipeline stage as an RTLModule and drives them in three phases per
+It is the one Clocked object the platform registers for the scheduler. It
+owns every pipeline stage as an RTLModule and drives them in three phases per
 cycle -- settle readiness, settle data and next state, commit -- so that no
 stage's view of another depends on the order they were ticked in.
 
@@ -57,7 +58,6 @@ from scheduler.execute import (
 from scheduler.vector import VectorSide
 from scheduler.fetch import BTB, Fetch, IFD1Latch
 from scheduler.icache import ICache
-from scheduler.isa import PACKET_BYTE_W
 
 Time = float
 
@@ -114,6 +114,9 @@ class VeggieStorage:
 
 class SchedulerCore(Clocked):
 
+    """The scheduler: fetch, decode, execute and writeback; see the module
+    docstring. Load a program with load(), tick it, and read `done`.
+    """
     def __init__(self, program: Optional[Dict[int, int]] = None, *,
                  icache_first_beat_wait: int = 0, icache_beat_wait: int = 0,
                  strict: bool = True, execute: bool = True,
@@ -141,7 +144,8 @@ class SchedulerCore(Clocked):
         self._modules = (self.icache, self.btb, self.fetch, self.ifd1, self.d1d2,
                          self.decode2)
 
-        # Inputs from stages that do not exist yet.
+        # Execute-side signals (module docstring): execute sets them each
+        # cycle, or a test does when execute=False.
         self.decode2_override: Optional[bool] = None
         self.ex_ready = {u: True for u in range(1, 6)}
         self.vector_ready = {}

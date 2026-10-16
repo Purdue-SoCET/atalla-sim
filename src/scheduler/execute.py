@@ -33,7 +33,7 @@ mv.stm's result goes to the mask register file instead, which is always ready.
 """
 
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Deque, Dict, List, Optional, Tuple
 
 from scheduler.control import ScalarOp
@@ -76,6 +76,7 @@ class Result:
 
 @dataclass
 class Redirect:
+    """A taken branch or jump: where to go, and the branch's own pc."""
     target: int
     pc: int                     # the control op's own pc: where the BTB is written
 
@@ -167,6 +168,9 @@ class MultiCycleUnit:
         return self.state == START and ex is None
 
     def advance(self, ex: Optional[ExOp], granted: bool) -> None:
+        """The clock edge: start `ex` if idle, count down a running op, and
+        free the unit once writeback has `granted` its result.
+        """
         if self.state != START:
             self.busy_cycles += 1
         if self.state == START:
@@ -298,6 +302,10 @@ class LoadStoreUnit:
 
     # -- phase 3: the edge ----------------------------------------------------------
     def advance(self, granted: bool) -> None:
+        """The clock edge: act on the cache's answer to this cycle's lookup
+        (retry, wait for the fill, or done), queue the newly arrived request,
+        and drop the writeback `granted` took.
+        """
         if self._outcome is not None:
             kind, a = self._outcome
             self.in_lookup = None

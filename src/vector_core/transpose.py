@@ -135,22 +135,6 @@ class TransposeUnit(Clocked):
         self.pushes = 0
         self.columns = 0
 
-    # -- costs ---------------------------------------------------------------
-    @property
-    def push_cycles(self) -> int:
-        """Accept to ready again, for one row."""
-        return 1 + self.clos_latency + bank_done_delay(self.sram_write_latency)
-
-    @property
-    def column_cycles(self) -> int:
-        """POPPING to the end of DONE, with a consumer that is always ready."""
-        return 1 + bank_done_delay(self.sram_read_latency) + self.clos_latency + 1
-
-    @property
-    def drain_cycles(self) -> int:
-        """IDLE seeing the pop to the end of the last column's DONE."""
-        return 1 + self.vec_len * self.column_cycles
-
     # -- handshake -------------------------------------------------------------
     @property
     def ready_in(self) -> bool:
@@ -175,7 +159,7 @@ class TransposeUnit(Clocked):
             raise ValueError("transpose push expects %d elements, got %d"
                              % (self.vec_len, len(data)))
         self._push_req = data
-        self.request_wake(self._tick + 1)
+        self.wake()
         return True
 
     def pop(self, dsts: Optional[Sequence[int]] = None) -> bool:
@@ -190,7 +174,7 @@ class TransposeUnit(Clocked):
                                  % (self.vec_len, len(dsts)))
         self._pop_req = True
         self._pop_dsts = dsts
-        self.request_wake(self._tick + 1)
+        self.wake()
         return True
 
     # -- writeback port --------------------------------------------------------

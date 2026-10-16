@@ -261,6 +261,19 @@ def _schedule(sa, w, a):
     return total, acts, weights
 
 
+def _run(sa, total, acts, weights):
+    """Drive the array through a _schedule one tick() at a time."""
+    for c in range(total):
+        if weights[c] is not None:
+            sa.enqueue_weights(weights[c])
+            sa.set_control(weight_en=True)
+        else:
+            sa.set_control(weight_en=False)
+        if acts[c] is not None:
+            assert sa.enqueue(acts[c])
+        sa.tick(float(c))
+
+
 @pytest.mark.parametrize("size", [8, 16, 32])
 @pytest.mark.parametrize("mixed", [False, True])
 @pytest.mark.parametrize("dtype", ["bf16", "fp16", None])
@@ -279,39 +292,12 @@ def test_the_kernel_is_bit_identical_to_the_numpy_path(size, mixed, dtype):
         if native and not sa.use_native:
             pytest.skip("native kernel not built")
         total, acts, weights = _schedule(sa, w, a)
-        sa.run_cycles(total, activations=acts, weights=weights)
+        _run(sa, total, acts, weights)
         out.append(np.array(sa.get_buffer(), dtype=np.float32))
 
     assert out[0].shape == out[1].shape == (size, size)
     assert np.array_equal(out[0].view(np.uint32), out[1].view(np.uint32)), \
         "kernel and reference diverged"
-
-
-def test_batched_and_per_cycle_agree():
-    """run_cycles must produce exactly what the same schedule produces one
-    tick() at a time -- batching changes when Python runs, not what happens."""
-    n = 8
-    rng = np.random.default_rng(3)
-    w = (rng.random((n, n), dtype=np.float32) * 4 - 2)
-    a = (rng.random((n, n), dtype=np.float32) * 4 - 2)
-
-    batch = SystolicArrayMEISSA(size=n, dtype="fp16")
-    total, acts, weights = _schedule(batch, w, a)
-    batch.run_cycles(total, activations=acts, weights=weights)
-
-    step = SystolicArrayMEISSA(size=n, dtype="fp16")
-    for c in range(total):
-        if weights[c] is not None:
-            step.enqueue_weights(weights[c])
-            step.set_control(weight_en=True)
-        else:
-            step.set_control(weight_en=False)
-        if acts[c] is not None:
-            assert step.enqueue(acts[c])
-        step.tick(float(c))
-
-    assert np.array_equal(np.array(batch.get_buffer(), dtype=np.float32).view(np.uint32),
-                          np.array(step.get_buffer(), dtype=np.float32).view(np.uint32))
 
 
 def test_activity_stats_are_off_until_asked_for():
