@@ -53,12 +53,14 @@ def test_counts_agree_with_the_performance_monitor(gemm):
     whether it is moving work or held up, so active + stalled."""
     a, busy = gemm.activity, gemm.perf.busy
     same = {"gsau": "gsau", "array": "array", "channel": "dram_channel",
-            "ex2": "ex2", "ex3": "ex3", "ex4": "ex4", "lsu": "lsu", "dcache": "dcache",
+            "ex3": "ex3", "ex4": "ex4", "lsu": "lsu", "dcache": "dcache",
             **{"vlsu%d" % i: "vlsu%d" % i for i in range(4)},
             **{"sdma%d" % i: "sdma%d" % i for i in range(4)}}
     for bid, unit in same.items():
         k = a.counts(bid)
         assert k["active"] + k["stalled"] == busy.get(unit, 0), bid
+    ex2 = sum(a.counts(b)["active"] for b in ("ex2_div", "ex2_cvt"))
+    assert ex2 == busy.get("ex2", 0), "EX2's two kinds of op together are EX2"
     assert a.counts("gsau")["active"] > 0 and a.counts("array")["active"] > 0
 
 
@@ -90,7 +92,8 @@ def test_a_scalar_program_lights_no_vector_array_or_dma_block():
     assert quiet
     for bid in quiet:
         assert a.intervals[bid] == [], bid
-    assert a.counts("ex1")["active"] > 0 and a.counts("d2_scalar")["active"] > 0
+    assert a.counts("ex1_alu")["active"] > 0 and a.counts("ex1_br")["active"] > 0
+    assert sum(a.counts("d2_s%d" % i)["active"] for i in range(4)) > 0
 
 
 def test_the_viewer_draws_every_block(gemm, tmp_path):
@@ -99,6 +102,7 @@ def test_the_viewer_draws_every_block(gemm, tmp_path):
     embedded = re.search(r'<script id="trace" type="application/json">(.*?)</script>', page, re.S)
     assert json.loads(embedded.group(1)) == json.loads(json.dumps(trace))
     assert "<title>gemm activity</title>" in page
+    assert "Percentages: the share of the run" in page
     path = tmp_path / "t.json"
     gemm.activity.to_json(str(path), {"program": "gemm"})
     assert {b["id"] for b in json.loads(path.read_text())["blocks"]} == {b.id for b in gemm.activity.blocks}

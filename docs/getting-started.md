@@ -106,14 +106,21 @@ python tools/run_kernel.py gemm --activity gemm.html
 ```
 
 writes one self-contained page (open it in a browser, no server needed):
-the chip's blocks in panels, each coloured by what it was doing at the
-chosen cycle -- idle, active (moving work) or stalled (holding work it
+a drawing of the chip as the model builds it -- fetch, decode, the
+register-file banks, scalar execute, the vector lanes, GSAU and load/store
+units, the systolic array, the scratchpads with their crossbars and DMA
+engines, the DRAM channel -- with every block coloured by what it was doing
+at the chosen cycle: idle, active (moving work) or stalled (holding work it
 can't move: a busy DRAM channel, a bank conflict). A slider and a play
-button move through the run; a window of 10, 100 or 1000 cycles shows how
-busy each block was over that span instead. Each block prints its busy
-share of the whole run, and hovering it says what its states mean. Below,
-a timeline has a row per block and, on top, the performance monitor's
-cycle buckets; click it to jump there.
+button move through the run; a window of 10, 100 or 1000 cycles shades each
+block by how much of that span it was busy instead.
+
+The percentage on a block is the share of the run's cycles in which it had
+work, active or stalled: 30% on the GSAU means it had rows to send or
+results to return on 30% of the cycles. Hovering a block splits that into
+active and stalled cycles and says what each state means for it. Below the
+drawing, a timeline has a row per block and, on top, the performance
+monitor's cycle buckets; click it to jump there.
 
 `--activity gemm.json` saves the recording instead;
 `python tools/activity_view.py gemm.json` draws it later. The blocks and

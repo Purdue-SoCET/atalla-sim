@@ -13,9 +13,12 @@ three states and records them as intervals, so a long run stays small:
     plat.run_until_done()
     plat.activity.to_json("trace.json")      # tools/activity_view.py draws it
 
-The blocks follow the chip's top-level diagram -- fetch, decode 1 and 2,
-scalar execute, the vector core, the systolic array, memory -- drawn as the
-model is built (four scratchpads, `lane_count` lanes, the transpose unit).
+The blocks follow the chip's top-level diagram -- Fetch, Decode1, Decode2,
+Execute, the Systolic Array, Memory -- down to its boxes: each decode slot,
+each register-file bank, each lane, each scratchpad and its crossbars. Where
+the model has more or other parts than the diagram (four scratchpads,
+`lane_count` lanes, the transpose unit, separate EX2 and EX4), the blocks
+follow the model.
 
 To add a block: give it an entry in `_blocks` (an id, a label, the panel it
 is drawn in, and what active and stalled mean) and a line in `_sample` that
@@ -27,9 +30,22 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from base.clocked_object import Clocked
+from scheduler.decode1 import SCALAR_SLOTS as SLOTS, slot_word
+from scheduler.isa import OP_W, OPCODES
+from scheduler.semantics import is_control
 
 IDLE, ACTIVE, STALLED = 0, 1, 2
 STATE_NAMES = ("idle", "active", "stalled")
+
+#: EX2 ops that are conversions; the rest of EX2 is divide, mod, rcp and sqrt.
+CONVERSIONS = ("bfts.s", "stbf.s")
+
+
+def _is_instruction(word: int) -> bool:
+    """A real instruction in a packet slot (not empty, not a nop)."""
+    if not word:
+        return False
+    return OPCODES.get(word & ((1 << OP_W) - 1), ("",))[0] != "nop.s"
 
 
 @dataclass
@@ -57,57 +73,73 @@ class ActivityProbe(Clocked):
         #: The performance monitor's cycle bucket, as [[first, last, name], ...]
         self.buckets: List[list] = []
         # Counters whose change between cycles says something happened.
-        self._prev = {"issued": 0, "to_d1d2": 0, "mul_ops": 0, "pc": None}
+        self._prev = {"issued": 0, "to_d1d2": 0, "mul_ops": 0, "act_rows": 0}
         self._prev_stalls = [0] * len(platform.backends)
         self._prev_contention = {n: 0 for n in platform.ports}
 
     # -- the blocks ---------------------------------------------------------------------
     def _blocks(self) -> List[Block]:
         p = self.p
-        lanes = len(p.vc.datapath.lanes)
-        array = "MEISSA" if hasattr(p.sa, "_is_drained") else "TPU"
+        meissa = hasattr(p.sa, "_is_drained")
         b = [
-            Block("fetch", "PC + BTB", "Fetch", "a packet moved into IF/D1",
-                  "waiting for the iCache"),
+            Block("bpu", "Branch Prediction Unit", "Fetch",
+                  "a prediction used, or the BTB written"),
+            Block("pc", "PC", "Fetch", "a packet moved into IF/D1", "waiting for the iCache"),
             Block("icache", "iCache", "Fetch", "filling a line"),
-            Block("decode1", "Decode 0-3 + xbar", "Decode 1", "IF/D1 holds a packet"),
-            Block("d2_scalar", "Scalar decode", "Decode 2",
-                  "a packet with scalar ops issued", "a packet with scalar ops held"),
-            Block("d2_vector", "Vector decode", "Decode 2",
-                  "a packet with vector ops issued", "a packet with vector ops held"),
-            Block("d2_sdma", "SDMA decode", "Decode 2",
-                  "a packet with a DMA op issued", "a packet with a DMA op held"),
-            Block("srf", "Scalar reg file", "Decode 2", "operands read",
-                  "a bank conflict"),
-            Block("vrf", "Vector reg file", "Decode 2", "operands read",
-                  "a bank conflict"),
-            Block("mrf", "Mask reg file", "Decode 2", "operands read", "a bank conflict"),
-            Block("ex1", "ALU + branch (EX1)", "Scalar execute", "an op in EX1",
-                  "a result waiting for writeback"),
-            Block("ex2", "Div / convert / sqrt (EX2)", "Scalar execute", "an op in flight"),
-            Block("ex3", "BF16 FP ALU (EX3)", "Scalar execute", "an op in flight"),
-            Block("ex4", "Multiply (EX4)", "Scalar execute", "an op in flight"),
-            Block("lsu", "Load/store (EX5)", "Scalar execute", "requests queued",
+        ]
+        b += [Block("dec1_s%d" % i, "Decode %d" % i, "Decode1",
+                    "slot %d of the packet in IF/D1 holds an instruction" % i)
+              for i in range(SLOTS)]
+        b += [Block("decode1_xbar", "Decode1 xbar", "Decode1", "IF/D1 holds a packet")]
+        for kind, label, n in (("s", "ALU decode", SLOTS), ("v", "Vector decode", SLOTS),
+                               ("d", "SDMA decode", SLOTS)):
+            b += [Block("d2_%s%d" % (kind, i), "%s %d" % (label, i), "Decode2",
+                        "slot %d holds an op and the packet issued" % i,
+                        "slot %d holds an op and the packet is held" % i) for i in range(n)]
+        for rf, name in (("srf", "Sclr"), ("vrf", "Vec")):
+            regs = getattr(p.core.decode2, rf)
+            b.append(Block("%s_read" % rf, "%s issue reg read" % name, "Decode2", "operands read"))
+            b += [Block("%s_b%d" % (rf, k), "%s Reg File bank %d" % (name, k), "Decode2",
+                        "a register in bank %d read" % k) for k in range(regs.banks)]
+            b.append(Block("%s_oc" % rf, "%s operand collectors" % name, "Decode2",
+                           "holding the operands of a conflicting packet",
+                           "serving a bank conflict"))
+        b.append(Block("mrf", "Mask reg file", "Decode2", "masks read", "a bank conflict"))
+        b += [
+            Block("ex1_alu", "Sclr ALU", "Execute", "an ALU op in EX1",
+                  "its result waiting for writeback"),
+            Block("ex1_br", "Branch", "Execute", "a branch or jump in EX1",
+                  "its result waiting for writeback"),
+            Block("ex2_div", "Divide / sqrt (EX2)", "Execute", "a divide, mod, rcp or sqrt"),
+            Block("ex2_cvt", "int to bf16 (EX2)", "Execute", "a conversion"),
+            Block("ex3", "FP ALU (EX3)", "Execute", "a BF16 add, sub, mul or compare"),
+            Block("ex4", "Multiply (EX4)", "Execute", "an integer multiply"),
+            Block("lsu", "SCLR LD/ST", "Execute", "requests queued",
                   "only waiting for cache misses"),
-            Block("dcache", "dCache", "Scalar execute", "a lookup or a fill"),
         ]
-        b += [Block("lane%d" % i, "Lane %d" % i, "Vector core",
-                    "a functional unit holds work") for i in range(lanes)]
+        b += [Block("lane%d" % i, "Lane %d" % i, "Execute", "a functional unit holds work")
+              for i in range(len(p.vc.datapath.lanes))]
         b += [
-            Block("gsau", "GSAU", "Vector core", "rows to or from the array"),
-            Block("transpose", "Transpose", "Vector core", "a row or column in flight"),
-            Block("mts", "Move to scalar", "Vector core", "",
-                  "a result waiting for writeback"),
+            Block("gsau", "GSAU", "Execute", "rows to or from the array"),
+            Block("transpose", "Transpose", "Execute", "a row or column in flight"),
+            Block("mts", "Move to scalar", "Execute", "", "a result waiting for writeback"),
         ]
-        b += [Block("vlsu%d" % i, "Vec LD/ST %d" % i, "Vector core",
-                    "a load or store in flight") for i in range(len(p.vc.vls_units))]
+        b += [Block("vlsu%d" % i, "Vec LD/ST %d" % i, "Execute", "a load or store in flight")
+              for i in range(len(p.vc.vls_units))]
+        b += [Block("array_in", "input fifo", "Systolic Array", "a row queued for the array")]
+        if not meissa:
+            b += [Block("psum_in", "psum input fifo", "Systolic Array", "partial sums queued")]
         b += [
-            Block("array", "PE grid (%s %dx%d)" % (array, p.sa.size, p.sa.size),
-                  "Systolic array", "multiplies this cycle"),
-            Block("array_out", "Output buffer", "Systolic array", "results in flight"),
+            Block("array", "PE grid (%s %dx%d)" % ("MEISSA" if meissa else "TPU",
+                                                   p.sa.size, p.sa.size),
+                  "Systolic Array", "multiplies this cycle"),
+            Block("array_out", "psum output fifo", "Systolic Array", "results in flight"),
+            Block("dcache", "dCache", "Memory", "a lookup or a fill"),
         ]
-        b += [Block("spad%d" % i, "Scratchpad %d" % i, "Memory",
-                    "requests queued or in flight") for i in range(len(p.spad.tiles))]
+        for i in range(len(p.spad.tiles)):
+            b += [Block("spad%d_w" % i, "Scpad %d write xbar" % i, "Memory", "writes queued"),
+                  Block("spad%d" % i, "Scpad %d" % i, "Memory", "requests queued or in flight"),
+                  Block("spad%d_r" % i, "Scpad %d read xbar" % i, "Memory", "reads queued or returning")]
         b += [Block("sdma%d" % i, "DMA %d" % i, "Memory", "a transfer running",
                     "its burst lost the DRAM channel") for i in range(len(p.backends))]
         b += [Block("%s_port" % n, "%s port" % ("iCache" if n == "icache" else "dCache"),
@@ -129,7 +161,8 @@ class ActivityProbe(Clocked):
             return
         self.cycles = cycle + 1
         for bid, state in self._sample(cycle).items():
-            self._record(bid, state, cycle)
+            if bid in self.intervals:
+                self._record(bid, state, cycle)
         perf = self.p.perf
         if perf is not None and perf.timeline:
             name = perf.timeline[-1]
@@ -152,34 +185,55 @@ class ActivityProbe(Clocked):
         prev = self._prev
         d2 = core.decode2
 
-        # Front end.
+        # Fetch and decode 1.
         moved = len(core.issued_to_d1d2) > prev["to_d1d2"]
         prev["to_d1d2"] = len(core.issued_to_d1d2)
         filling = core.icache.state != 0
         s["icache"] = ACTIVE if filling else IDLE
-        s["fetch"] = ACTIVE if moved else STALLED if filling else IDLE
-        s["decode1"] = ACTIVE if core.ifd1.valid else IDLE
+        s["pc"] = ACTIVE if moved else STALLED if filling else IDLE
+        s["bpu"] = ACTIVE if (core.fetch.out_predict_taken or core.btb.in_update_en) else IDLE
+        ifd1 = core.ifd1
+        s["decode1_xbar"] = ACTIVE if ifd1.valid else IDLE
+        for i in range(SLOTS):
+            word = slot_word(ifd1.inst_packet, i) if ifd1.valid else 0
+            s["dec1_s%d" % i] = ACTIVE if _is_instruction(word) else IDLE
 
         # Decode 2: the packet in D1/D2, issued this cycle or held.
         issued = len(core.issued) > prev["issued"]
         prev["issued"] = len(core.issued)
         latch = core.d1d2
-        for bid, words in (("d2_scalar", latch.scalar), ("d2_vector", latch.vector),
-                           ("d2_sdma", latch.sdma)):
-            if not (latch.valid and any(words)):
-                s[bid] = IDLE
-            else:
-                s[bid] = ACTIVE if issued else STALLED
-        for bid, rf in (("srf", d2.srf), ("vrf", d2.vrf), ("mrf", d2.mrf)):
-            reading = latch.valid and rf._reads
-            s[bid] = STALLED if rf.state == "CONFLICT" else ACTIVE if reading else IDLE
+        for kind, words in (("s", latch.scalar), ("v", latch.vector), ("d", latch.sdma)):
+            for i, word in enumerate(words):
+                if latch.valid and _is_instruction(word):
+                    s["d2_%s%d" % (kind, i)] = ACTIVE if issued else STALLED
+                else:
+                    s["d2_%s%d" % (kind, i)] = IDLE
+        for name in ("srf", "vrf", "mrf"):
+            rf = getattr(d2, name)
+            reads = list(rf._reads) if latch.valid else []
+            conflict = rf.state == "CONFLICT"
+            if name == "mrf":
+                s["mrf"] = STALLED if conflict else ACTIVE if reads else IDLE
+                continue
+            s[name + "_read"] = ACTIVE if reads else IDLE
+            for k in range(rf.banks):
+                s["%s_b%d" % (name, k)] = ACTIVE if any(r % rf.banks == k for r in reads) else IDLE
+            s[name + "_oc"] = STALLED if conflict else ACTIVE if rf.state == "DONE" else IDLE
 
         # Scalar execute.
         ex1 = core.ex1
-        s["ex1"] = (STALLED if ex1.held is not None
-                    else ACTIVE if getattr(ex1, "_in", None) is not None else IDLE)
-        for name in ("ex2", "ex3", "ex4"):
-            s[name] = ACTIVE if getattr(core, name).busy else IDLE
+        held = ex1.held[0] if ex1.held is not None else None
+        live = held or getattr(ex1, "_in", None)
+        branch = live is not None and is_control(live.op)
+        state1 = STALLED if held is not None else ACTIVE if live is not None else IDLE
+        s["ex1_br"] = state1 if branch else IDLE
+        s["ex1_alu"] = IDLE if branch else state1
+        ex2 = core.ex2
+        convert = ex2.mnemonic in CONVERSIONS
+        s["ex2_cvt"] = ACTIVE if ex2.busy and convert else IDLE
+        s["ex2_div"] = ACTIVE if ex2.busy and not convert else IDLE
+        s["ex3"] = ACTIVE if core.ex3.busy else IDLE
+        s["ex4"] = ACTIVE if core.ex4.busy else IDLE
         lsu = core.lsu
         if lsu.idle:
             s["lsu"] = IDLE
@@ -210,15 +264,22 @@ class ActivityProbe(Clocked):
         mul = sa.metrics.get("mul_ops", 0)
         s["array"] = ACTIVE if mul > prev["mul_ops"] else IDLE
         prev["mul_ops"] = mul
+        rows = sa.algo_counts.get("act_rows", 0)
+        s["array_in"] = ACTIVE if rows > prev["act_rows"] else IDLE
+        prev["act_rows"] = rows
         if hasattr(sa, "_is_drained"):                  # MEISSA
             out = not sa._is_drained()
         else:
             out = any(row is not None for row in sa._output_pipe)
+            s["psum_in"] = (IDLE if all(q.is_empty() for q in sa._psum_input_fifo_top)
+                            else ACTIVE)
         s["array_out"] = ACTIVE if out else IDLE
 
         # Memory.
         for i, pad in enumerate(p.spad.tiles):
             s["spad%d" % i] = IDLE if pad.idle() else ACTIVE
+            s["spad%d_w" % i] = ACTIVE if pad.wq else IDLE
+            s["spad%d_r" % i] = ACTIVE if (pad.rq or pad.out) else IDLE
         sdma_busy = vs.sdma_busy if vs is not None else [False] * len(p.backends)
         for i, be in enumerate(p.backends):
             lost = be.total_backend_stalls > self._prev_stalls[i]

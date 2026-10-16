@@ -157,6 +157,8 @@ class MultiCycleUnit:
         self.state = START
         self.count = 0
         self.cur: Optional[Result] = None
+        #: The running op's mnemonic, for observers (the activity probe).
+        self.mnemonic: Optional[str] = None
         self.L = 1
         self.ops = 0
         self.busy_cycles = 0
@@ -180,6 +182,7 @@ class MultiCycleUnit:
                 to_mask = op.mask_reg_write
                 rd = op.rd & 0xF if to_mask else op.rd
                 self.cur = Result(rd, scalar_value(op, ex.rs1, ex.rs2), to_mask, self.name)
+                self.mnemonic = op.mnemonic
                 self.state = DONE if self.L <= 1 else LATCH
                 self.count = 0
                 self.ops += 1
@@ -189,7 +192,7 @@ class MultiCycleUnit:
             self.count += 1
         elif self.state == DONE:
             if granted:
-                self.state, self.count, self.cur = START, 0, None
+                self.state, self.count, self.cur, self.mnemonic = START, 0, None, None
 
     @property
     def busy(self) -> bool:
