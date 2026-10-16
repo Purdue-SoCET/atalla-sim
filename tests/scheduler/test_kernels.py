@@ -94,9 +94,9 @@ _DRAM_SHORTCUT = "vreg.ld/st on a DRAM address: only the functional sim allows i
 _NUM_COLS = "vreg.ld/st move 32 lanes; the functional sim moves num_cols + 1"
 #: sw.s to an address that is not a multiple of 4: the data cache aligns it
 #: down (word-addressed memory), the functional sim writes at the byte address.
-#: The vector load doesn't wait for the DMA that fills its scratchpad: the
-#: compiler gives scpad.ld and vreg.ld different registers, and only a read of
-#: the DMA's rs1 waits for it. Correct only when the DMA happens to win.
+#: A compiler bug: the vector load doesn't wait for the DMA that fills its
+#: scratchpad. Only a read of the DMA's rs1 waits for it, and the compiler
+#: puts the address in a different register. Correct only when the DMA wins.
 _DMA_RACE = "vector_load doesn't wait for its scpad_load (no shared register)"
 _MISALIGNED = "misaligned sw.s on the stack: aligned down here, not in the functional sim"
 
