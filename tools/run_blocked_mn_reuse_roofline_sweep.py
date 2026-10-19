@@ -2,9 +2,6 @@
 
 import argparse
 import contextlib
-import csv
-import importlib.util
-import json
 import shutil
 import sys
 import time
@@ -13,12 +10,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from sweep_common import BLOCKED_HARNESS_PATH, algo_flops, load_blocked_harness, safe_json_dump, theoretical_peak_compute, write_csv  # noqa: E402  (tools/sweep_common.py)
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = REPO_ROOT / "src"
-BLOCKED_HARNESS_PATH = (
-    REPO_ROOT / "tests" / "atalla" / "test_scratchpad_vector_core_sysarr_tpu_tiled_1024_blocked_mn.py"
-)
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "logs" / "roofline_study" / "blocked_mn_reuse_1024"
 LATEST_RUN_FILE = "LATEST.txt"
 
@@ -40,17 +36,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 
-def _load_blocked_harness_module():
-    spec = importlib.util.spec_from_file_location("_blocked_mn_roofline_harness", BLOCKED_HARNESS_PATH)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"failed to load blocked harness from {BLOCKED_HARNESS_PATH}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-blocked = _load_blocked_harness_module()
+blocked = load_blocked_harness("_blocked_mn_roofline_harness")
 
 
 def _utc_now_iso() -> str:
@@ -84,20 +70,6 @@ def _parse_case_spec(spec: str, order: int) -> Dict[str, Any]:
         "weight_reuse_m": weight_reuse_m,
         "activation_reuse_n": activation_reuse_n,
     }
-
-
-def _algo_flops(matrix_size: int) -> int:
-    size = int(matrix_size)
-    return 2 * size * size * size
-
-
-def _theoretical_peak_compute(tile_size: int) -> int:
-    tile = int(tile_size)
-    return 2 * tile * tile
-
-
-def _safe_json_dump(path: Path, payload: object) -> None:
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def _resolve_output_dir(args: argparse.Namespace) -> Tuple[Path, Optional[Path]]:
@@ -150,7 +122,7 @@ def _enrich_result(
     flops_micro = float(payload.get("flops_micro", 0) or 0)
     bytes_transmitted = float(payload.get("bytes_transmitted", 0) or 0)
     bytes_internal = float(payload.get("bytes_internal", 0) or 0)
-    flops_algo = float(_algo_flops(matrix_size))
+    flops_algo = float(_int_flops(matrix_size))
 
     throughput_algo = (flops_algo / cycles) if cycles else 0.0
     arithmetic_intensity_external_algo = (flops_algo / bytes_transmitted) if bytes_transmitted else 0.0
@@ -168,7 +140,7 @@ def _enrich_result(
             "arithmetic_intensity_external_algo_flops_per_byte": arithmetic_intensity_external_algo,
             "arithmetic_intensity_external_micro_flops_per_byte": arithmetic_intensity_external_micro,
             "arithmetic_intensity_internal_algo_flops_per_byte": arithmetic_intensity_internal_algo,
-            "theoretical_peak_compute_flops_per_cycle": float(_theoretical_peak_compute(tile_size)),
+            "theoretical_peak_compute_flops_per_cycle": float(_int_peak(tile_size)),
         }
     )
     return payload
@@ -183,7 +155,7 @@ def _execute_case(
     write_run_logs: bool,
     output_dir: Path,
 ) -> Dict[str, Any]:
-    blocked_module = _load_blocked_harness_module()
+    blocked_module = load_blocked_harness("_blocked_mn_roofline_harness")
     stdout_log_path = output_dir / f"{case['name']}.stdout.log"
     stderr_log_path = output_dir / f"{case['name']}.stderr.log"
     wall_start = time.perf_counter()
@@ -229,7 +201,7 @@ def _execute_case(
             "weight_reuse_m": int(case["weight_reuse_m"]),
             "activation_reuse_n": int(case["activation_reuse_n"]),
             "spad_frontend_queue_size": int(spad_frontend_queue_size),
-            "theoretical_peak_compute_flops_per_cycle": float(_theoretical_peak_compute(tile_size)),
+            "theoretical_peak_compute_flops_per_cycle": float(_int_peak(tile_size)),
             "wall_seconds": round(time.perf_counter() - wall_start, 3),
             "stdout_log": stdout_log_path.name,
             "stderr_log": stderr_log_path.name,
@@ -312,8 +284,59 @@ def _summary_row(result: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _write_results_csv(path: Path, rows: Sequence[Dict[str, Any]]) -> None:
-    fieldnames = [
+def _build_manifest(args: argparse.Namespace, cases: Sequence[Dict[str, Any]], output_dir: Path) -> Dict[str, Any]:
+    return {
+        "repo_root": str(REPO_ROOT),
+        "harness": str(BLOCKED_HARNESS_PATH),
+        "output_dir": str(output_dir),
+        "matrix_size": int(args.matrix_size),
+        "tile_size": int(args.tile_size),
+        "spad_frontend_queue_size": int(args.spad_frontend_queue_size),
+        "cases": list(cases),
+        "write_run_logs": bool(args.write_run_logs),
+        "run_count": len(cases),
+        "completed_run_count": 0,
+        "successful_run_count": 0,
+        "failed_run_count": 0,
+        "status": "running",
+        "started_at_utc": _utc_now_iso(),
+        "theoretical_peak_compute_flops_per_cycle": float(_int_peak(args.tile_size)),
+        "empirical_peak_compute_algo_flops_per_cycle": 0.0,
+        "empirical_peak_external_bandwidth_avg_bytes_per_cycle": 0.0,
+        "empirical_peak_external_bandwidth_active_bytes_per_cycle": 0.0,
+    }
+
+
+def _refresh_manifest(manifest: Dict[str, Any], results: Sequence[Dict[str, Any]]) -> None:
+    ok_results = [row for row in results if row.get("status") == "ok"]
+    failed_results = [row for row in results if row.get("status") != "ok"]
+    manifest["completed_run_count"] = len(results)
+    manifest["successful_run_count"] = len(ok_results)
+    manifest["failed_run_count"] = len(failed_results)
+    manifest["empirical_peak_compute_algo_flops_per_cycle"] = max(
+        (float(row.get("throughput_algo_flops_per_cycle", 0.0) or 0.0) for row in ok_results),
+        default=0.0,
+    )
+    manifest["empirical_peak_external_bandwidth_avg_bytes_per_cycle"] = max(
+        (float(row.get("external_bandwidth_avg_bytes_per_cycle", 0.0) or 0.0) for row in ok_results),
+        default=0.0,
+    )
+    manifest["empirical_peak_external_bandwidth_active_bytes_per_cycle"] = max(
+        (float(row.get("external_bandwidth_active_bytes_per_cycle", 0.0) or 0.0) for row in ok_results),
+        default=0.0,
+    )
+
+
+def _int_peak(tile_size: int) -> int:
+    return int(theoretical_peak_compute(tile_size))
+
+
+def _int_flops(matrix_size: int) -> int:
+    return int(algo_flops(matrix_size))
+
+
+#: results.csv's columns, in order.
+RESULT_FIELDS = [
         "name",
         "policy_label",
         "policy_order",
@@ -350,54 +373,6 @@ def _write_results_csv(path: Path, rows: Sequence[Dict[str, Any]]) -> None:
         "error_type",
         "error_message",
     ]
-    with path.open("w", encoding="utf-8", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(row)
-
-
-def _build_manifest(args: argparse.Namespace, cases: Sequence[Dict[str, Any]], output_dir: Path) -> Dict[str, Any]:
-    return {
-        "repo_root": str(REPO_ROOT),
-        "harness": str(BLOCKED_HARNESS_PATH),
-        "output_dir": str(output_dir),
-        "matrix_size": int(args.matrix_size),
-        "tile_size": int(args.tile_size),
-        "spad_frontend_queue_size": int(args.spad_frontend_queue_size),
-        "cases": list(cases),
-        "write_run_logs": bool(args.write_run_logs),
-        "run_count": len(cases),
-        "completed_run_count": 0,
-        "successful_run_count": 0,
-        "failed_run_count": 0,
-        "status": "running",
-        "started_at_utc": _utc_now_iso(),
-        "theoretical_peak_compute_flops_per_cycle": float(_theoretical_peak_compute(args.tile_size)),
-        "empirical_peak_compute_algo_flops_per_cycle": 0.0,
-        "empirical_peak_external_bandwidth_avg_bytes_per_cycle": 0.0,
-        "empirical_peak_external_bandwidth_active_bytes_per_cycle": 0.0,
-    }
-
-
-def _refresh_manifest(manifest: Dict[str, Any], results: Sequence[Dict[str, Any]]) -> None:
-    ok_results = [row for row in results if row.get("status") == "ok"]
-    failed_results = [row for row in results if row.get("status") != "ok"]
-    manifest["completed_run_count"] = len(results)
-    manifest["successful_run_count"] = len(ok_results)
-    manifest["failed_run_count"] = len(failed_results)
-    manifest["empirical_peak_compute_algo_flops_per_cycle"] = max(
-        (float(row.get("throughput_algo_flops_per_cycle", 0.0) or 0.0) for row in ok_results),
-        default=0.0,
-    )
-    manifest["empirical_peak_external_bandwidth_avg_bytes_per_cycle"] = max(
-        (float(row.get("external_bandwidth_avg_bytes_per_cycle", 0.0) or 0.0) for row in ok_results),
-        default=0.0,
-    )
-    manifest["empirical_peak_external_bandwidth_active_bytes_per_cycle"] = max(
-        (float(row.get("external_bandwidth_active_bytes_per_cycle", 0.0) or 0.0) for row in ok_results),
-        default=0.0,
-    )
 
 
 def main() -> int:
@@ -447,7 +422,7 @@ def main() -> int:
     print(f"writing sweep outputs to {output_dir}", flush=True)
 
     manifest = _build_manifest(args, cases, output_dir)
-    _safe_json_dump(output_dir / "manifest.json", manifest)
+    safe_json_dump(output_dir / "manifest.json", manifest)
 
     results: List[Dict[str, Any]] = []
     summary_rows: List[Dict[str, Any]] = []
@@ -472,16 +447,16 @@ def main() -> int:
 
         results.append(result)
         summary_rows.append(_summary_row(result))
-        _safe_json_dump(output_dir / f"{case['name']}.json", result)
-        _write_results_csv(output_dir / "results.csv", summary_rows)
-        _safe_json_dump(output_dir / "results.json", results)
+        safe_json_dump(output_dir / f"{case['name']}.json", result)
+        write_csv(output_dir / "results.csv", summary_rows, RESULT_FIELDS)
+        safe_json_dump(output_dir / "results.json", results)
         _refresh_manifest(manifest, results)
-        _safe_json_dump(output_dir / "manifest.json", manifest)
+        safe_json_dump(output_dir / "manifest.json", manifest)
 
     _refresh_manifest(manifest, results)
     manifest["status"] = "completed" if manifest["failed_run_count"] == 0 else "completed_with_failures"
     manifest["finished_at_utc"] = _utc_now_iso()
-    _safe_json_dump(output_dir / "manifest.json", manifest)
+    safe_json_dump(output_dir / "manifest.json", manifest)
 
     print(f"wrote {output_dir / 'results.csv'}", flush=True)
     print(f"wrote {output_dir / 'results.json'}", flush=True)

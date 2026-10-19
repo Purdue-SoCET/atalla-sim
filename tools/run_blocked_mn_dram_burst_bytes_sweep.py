@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
 
 import argparse
-import csv
-import importlib.util
-import json
 import sys
 import traceback
 from pathlib import Path
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List
+
+from sweep_common import BLOCKED_HARNESS_PATH, load_blocked_harness, safe_json_dump, write_csv  # noqa: E402  (tools/sweep_common.py)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = REPO_ROOT / "src"
-BLOCKED_HARNESS_PATH = (
-    REPO_ROOT / "tests" / "atalla" / "test_scratchpad_vector_core_sysarr_tpu_tiled_1024_blocked_mn.py"
-)
 DEFAULT_BURST_BYTES = [4, 8, 16, 32, 64]
 
 if sys.version_info < (3, 7):
@@ -26,17 +22,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 
-def _load_blocked_harness_module():
-    spec = importlib.util.spec_from_file_location("_blocked_mn_burst_sweep_harness", BLOCKED_HARNESS_PATH)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"failed to load blocked harness from {BLOCKED_HARNESS_PATH}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-blocked = _load_blocked_harness_module()
+blocked = load_blocked_harness("_blocked_mn_burst_sweep_harness")
 
 
 def _build_run_name(weight_reuse_m: int, activation_reuse_n: int, burst_bytes: int) -> str:
@@ -44,10 +30,6 @@ def _build_run_name(weight_reuse_m: int, activation_reuse_n: int, burst_bytes: i
         f"m{int(weight_reuse_m)}_n{int(activation_reuse_n)}_"
         f"backend_dram_burst_bytes_{int(burst_bytes)}"
     )
-
-
-def _safe_json_dump(path: Path, payload: object) -> None:
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def _summary_row(result: Dict[str, Any]) -> Dict[str, Any]:
@@ -74,8 +56,8 @@ def _summary_row(result: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _write_results_csv(path: Path, rows: Sequence[Dict[str, Any]]) -> None:
-    fieldnames = [
+#: results.csv's columns, in order.
+RESULT_FIELDS = [
         "name",
         "status",
         "matrix_size",
@@ -96,11 +78,6 @@ def _write_results_csv(path: Path, rows: Sequence[Dict[str, Any]]) -> None:
         "error_type",
         "error_message",
     ]
-    with path.open("w", encoding="utf-8", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(row)
 
 
 def main() -> int:
@@ -183,11 +160,11 @@ def main() -> int:
 
         results.append(result)
         summary_rows.append(_summary_row(result))
-        _safe_json_dump(output_dir / f"{run_name}.json", result)
+        safe_json_dump(output_dir / f"{run_name}.json", result)
 
-    _write_results_csv(output_dir / "results.csv", summary_rows)
-    _safe_json_dump(output_dir / "results.json", results)
-    _safe_json_dump(
+    write_csv(output_dir / "results.csv", summary_rows, RESULT_FIELDS)
+    safe_json_dump(output_dir / "results.json", results)
+    safe_json_dump(
         output_dir / "manifest.json",
         {
             "repo_root": str(REPO_ROOT),

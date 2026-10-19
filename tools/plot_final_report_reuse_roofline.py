@@ -7,6 +7,8 @@ import math
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+from sweep_common import algo_flops, theoretical_peak_compute  # noqa: E402  (tools/sweep_common.py)
+
 
 try:
     import matplotlib
@@ -68,16 +70,6 @@ ANNOTATION_BBOX = {
 }
 
 
-def _algo_flops(matrix_size: int) -> float:
-    size = int(matrix_size)
-    return float(2 * size * size * size)
-
-
-def _theoretical_peak_compute(tile_size: int) -> float:
-    tile = int(tile_size)
-    return float(2 * tile * tile)
-
-
 def _parse_scalar(raw: str) -> Any:
     text = raw.strip()
     try:
@@ -129,7 +121,7 @@ def _normalize_row(payload: Dict[str, Any], *, label: str, order: int) -> Dict[s
     bytes_internal = float(row.get("bytes_internal", 0.0) or 0.0)
 
     if flops_algo <= 0.0 and matrix_size > 0:
-        flops_algo = _algo_flops(matrix_size)
+        flops_algo = algo_flops(matrix_size)
 
     throughput_algo = float(row.get("throughput_algo_flops_per_cycle", 0.0) or 0.0)
     if throughput_algo <= 0.0 and flops_algo > 0.0 and cycles > 0.0:
@@ -155,7 +147,7 @@ def _normalize_row(payload: Dict[str, Any], *, label: str, order: int) -> Dict[s
 
     theoretical_peak_compute = float(row.get("theoretical_peak_compute_flops_per_cycle", 0.0) or 0.0)
     if theoretical_peak_compute <= 0.0 and tile_size > 0:
-        theoretical_peak_compute = _theoretical_peak_compute(tile_size)
+        theoretical_peak_compute = theoretical_peak_compute(tile_size)
 
     row.update(
         {

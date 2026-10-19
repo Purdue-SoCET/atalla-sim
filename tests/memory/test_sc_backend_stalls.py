@@ -1,21 +1,10 @@
-import os, sys
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..", "src")))
+import pytest
 
-from base.eventq import EventQueue
-from base.clock_domain import ClockDomain
-from base.core import Core
-from base.sim import Sim
+
+from base.testing import build_sim
 
 from memory.backend import Backend
 
-def build_sim():
-    eq = EventQueue()
-    clk = ClockDomain(eq, period=1.0)
-    core = Core(eq)
-    core.add_clock_domain(clk)
-    sim = Sim()
-    sim.init(eq, core)
-    return eq, clk, sim
 
 def test_backend_stalls():
     eq, clk, sim = build_sim()
@@ -50,11 +39,11 @@ def test_backend_stalls():
 
     sim.run(until=16.0)
 
-    stats = backend.backend_to_driver_get_stats()
+    stats = backend.get_stats()
     print("Backend stats after forced stalls:", stats)
     # There should be at least 6 stalls (8 bursts attempted, 2 accepted, 6 stalled)
     assert stats["backend_stalls"] >= 6, f"Expected at least 6 backend stalls, got {stats['backend_stalls']}"
     print("Backend stall test passed.")
 
 if __name__ == "__main__":
-    test_backend_stalls()
+    raise SystemExit(pytest.main([__file__]))

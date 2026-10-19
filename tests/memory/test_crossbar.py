@@ -1,21 +1,10 @@
-import os, sys
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..", "src")))
+import pytest
 
-from base.eventq import EventQueue
-from base.clock_domain import ClockDomain
-from base.core import Core
-from base.sim import Sim
+
+from base.testing import build_sim
 
 from memory.crossbar import Xbar
 
-def build_sim():
-    eq = EventQueue()
-    clk = ClockDomain(eq, period=1.0)
-    core = Core(eq)
-    core.add_clock_domain(clk)
-    sim = Sim()
-    sim.init(eq, core)
-    return eq, clk, sim
 
 def test_crossbar_basic():
     eq, clk, sim = build_sim()
@@ -138,6 +127,4 @@ def test_crossbar_backpressure_stalls_tail_until_sink_accepts():
     assert x.get_stats()["total_retire_stalls"] == 1
 
 if __name__ == "__main__":
-    test_crossbar_basic()
-    test_crossbar_pipeline_staggers_completions()
-    test_crossbar_backpressure_stalls_tail_until_sink_accepts()
+    raise SystemExit(pytest.main([__file__]))

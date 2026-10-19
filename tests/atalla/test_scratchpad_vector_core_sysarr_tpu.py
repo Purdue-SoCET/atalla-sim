@@ -1,112 +1,31 @@
-import os
-import sys
+import pytest
+
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict
 
-import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..//..", "src")))
-
-from base.clock_domain import ClockDomain
+from base.testing import build_sim
 from base.clocked_object import Clocked
-from base.core import Core
 from base.debug import close_debug, configure_debug, dprintf
-from base.eventq import EventQueue
-from base.sim import Sim
 from memory.backend import Backend, SharedDRAMBurstChannel
 from memory.dram import DRAM
-from memory.sc_sram_banks import _xor_bank
 from memory.scratchpad import Scratchpad
 from systolic_array.systolic_array_tpu import SystolicArrayTPU
 from vector_core.vector_core import VectorCore
-from atalla.sysarr_tpu_system import RoundRobinBackendTicker, TPUMetrics
-
-
-def build_sim():
-    eq = EventQueue()
-    clk = ClockDomain(eq, period=1.0)
-    core = Core(eq)
-    core.add_clock_domain(clk)
-    sim = Sim()
-    sim.init(eq, core)
-    return eq, clk, sim
-
-
-def _encode_vector_u16(vec):
-    return b"".join(int(v).to_bytes(2, "little", signed=False) for v in vec)
-
-
-def _decode_lanes_u16(lanes, vector_len: int):
-    out = []
-    for lane in list(lanes)[:vector_len]:
-        if lane is False:
-            lane = b"\x00\x00"
-        blob = bytes(lane) if lane is not None else b"\x00\x00"
-        if len(blob) < 2:
-            blob = blob + (b"\x00" * (2 - len(blob)))
-        out.append(int.from_bytes(blob[:2], "little", signed=False))
-    while len(out) < vector_len:
-        out.append(0)
-    return out
-
-
-def _read_slot_vector_u16(spad: Scratchpad, addr: int, vector_len: int, tile_id: int = 0):
-    tile = int(tile_id)
-    slot = int(addr) % spad.bank_size
-    out = []
-    for lane in range(vector_len):
-        bank = _xor_bank(slot, lane, spad.num_banks)
-        blob = spad.tiles[tile].banks[bank].mem[slot]
-        blob = bytes(blob) if blob is not None else b"\x00\x00"
-        if len(blob) < 2:
-            blob = blob + (b"\x00" * (2 - len(blob)))
-        out.append(int.from_bytes(blob[:2], "little", signed=False))
-    return out
+from atalla.sysarr_tpu_system import (
+    GSAUTPUBridge, VLSFrontendBridge, RoundRobinBackendTicker, TPUMetrics,
+    TPUReference, _fp16_bits)
+from atalla.sysarr_tpu_experiment import (
+    _fp16_from_u16, _phase_snapshot, _read_dram_row_u16, _read_dram_tile_u16,
+    _write_dram_tile_u16, _read_slot_vector_u16)
 
 
 def _write_slot_vector_u16(spad: Scratchpad, addr: int, values, tile_id: int = 0):
     tile = int(tile_id)
     slot = int(addr) % spad.bank_size
     for lane, value in enumerate(list(values)):
-        bank = _xor_bank(slot, lane, spad.num_banks)
+        bank = lane
         spad.tiles[tile].banks[bank].mem[slot] = int(value).to_bytes(2, "little", signed=False)
-
-
-def _encode_row_u16(row):
-    return b"".join(int(v).to_bytes(2, "little", signed=False) for v in row)
-
-
-def _decode_row_u16(blob: bytes, cols: int):
-    out = []
-    for i in range(int(cols)):
-        start = i * 2
-        out.append(int.from_bytes(blob[start : start + 2], "little", signed=False))
-    return out
-
-
-def _read_dram_row_u16(dram: DRAM, addr: int, cols: int):
-    row_bytes = int(cols) * 2
-    blob = dram.read(int(addr), row_bytes)
-    return _decode_row_u16(blob, cols)
-
-
-def _write_dram_tile_u16(dram: DRAM, base_addr: int, tile: List[List[int]]):
-    rows = len(tile)
-    if rows == 0:
-        return
-    cols = len(tile[0])
-    row_bytes = cols * 2
-    for r in range(rows):
-        dram.write(int(base_addr) + r * row_bytes, _encode_row_u16(tile[r]))
-
-
-def _read_dram_tile_u16(dram: DRAM, base_addr: int, rows: int, cols: int) -> List[List[int]]:
-    out = []
-    row_bytes = int(cols) * 2
-    for r in range(int(rows)):
-        blob = dram.read(int(base_addr) + r * row_bytes, row_bytes)
-        out.append(_decode_row_u16(blob, cols))
-    return out
 
 
 def _act_u16(size: int) -> List[List[int]]:
@@ -260,30 +179,6 @@ def _busy_units_snapshot(vc: VectorCore, sa: SystolicArrayTPU, state: Dict, spad
     return busy
 
 
-def _phase_snapshot(state: Dict, sa: SystolicArrayTPU, tile: int) -> str:
-    if state.get("weight_row", 0) < tile:
-        return "weight_preload"
-    if state.get("act_issue_row", 0) < tile or state.get("act_loads_inflight", 0) > 0:
-        return "activation_stream"
-    if state.get("next_out_row", 0) < tile and len(state.get("completed_rows", set())) == 0:
-        return "compute_ramp"
-    if state.get("next_out_row", 0) < tile:
-        return "steady_compute"
-    if state.get("pending_output_rows") or state.get("store_inflight"):
-        return "store_tail"
-    if sa.value_ready or len(sa.get_buffer()) > 0:
-        return "drain"
-    return "idle"
-
-
-def _fp16_bits(value: float) -> int:
-    return int(np.asarray(value, dtype=np.float16).view(np.uint16).item())
-
-
-def _fp16_from_u16(value: int) -> float:
-    return float(np.frombuffer(np.uint16(int(value)).tobytes(), dtype=np.float16)[0])
-
-
 def _tpu_reference_output(
     act_rows: List[List[int]],
     weight_stream: List[List[int]],
@@ -364,244 +259,6 @@ def _tpu_reference_output(
     return out
 
 
-class VLSFrontendBridge(Clocked):
-    # Adapts the VectorCore's abstract scratchpad request/response interface onto
-    # the scratchpad frontend model used in this simulator.
-    def __init__(self, vc: VectorCore, spad: Scratchpad, vls_id: int = 0, frontend_id: int = 0):
-        super().__init__()
-        self.vc = vc
-        self.spad = spad
-        self.vls_id = int(vls_id)
-        self.frontend_id = int(frontend_id)
-        self._next_load_id = 0
-        self._completed_load_ids = set()
-        self.bytes_load = 0
-        self.bytes_store = 0
-        self.activity_this_cycle = False
-
-    def start_cycle(self) -> None:
-        self.activity_this_cycle = False
-
-    def _on_frontend_read(self, load_id: int, addr: int, lanes) -> None:
-        if load_id in self._completed_load_ids:
-            return
-        self._completed_load_ids.add(load_id)
-        data = _decode_lanes_u16(lanes, self.vc.vector_len)
-        self.bytes_load += len(data) * 2
-        self.activity_this_cycle = True
-        nz = [i for i, v in enumerate(data) if v != 0]
-        if load_id < 2:
-            dprintf(
-                "SYSARR",
-                f"vls_rsp data head={data[:8]} nz_count={len(nz)} nz_idx_head={nz[:8]}",
-            )
-        dprintf("SYSARR", f"vls_rsp load_id={load_id} addr={addr} len={len(data)}")
-        assert self.vc.push_scratchpad_response(self.vls_id, {"addr": addr, "data": data})
-
-    def tick(self, time: Optional[float] = None) -> None:
-        self.activity_this_cycle = False
-        vls = self.vc.vls_units[self.vls_id]
-        req = vls.req_q.peek()
-        if req is None:
-            return
-
-        addr = int(req.get("addr", 0))
-        if req["kind"] == "store":
-            if self.spad.frontends[self.frontend_id].writeq.is_full():
-                return
-            req = self.vc.pop_scratchpad_request(self.vls_id)
-            if req is None:
-                return
-            dprintf("SYSARR", f"vls_req store addr={addr} len={len(req.get('data', []))}")
-            self.bytes_store += len(req.get("data", [])) * 2
-            self.activity_this_cycle = True
-            assert self.spad.frontend_write(
-                addr,
-                _encode_vector_u16(req["data"]),
-                row_idx=0,
-                tile_id=self.frontend_id,
-            )
-            return
-
-        if req["kind"] == "load":
-            if self.spad.frontends[self.frontend_id].readq.is_full():
-                return
-            req = self.vc.pop_scratchpad_request(self.vls_id)
-            if req is None:
-                return
-            dprintf("SYSARR", f"vls_req load addr={addr}")
-            load_id = self._next_load_id
-            self._next_load_id += 1
-            assert self.spad.frontends[self.frontend_id].read(
-                addr,
-                0,
-                lambda lanes, _lid=load_id, _addr=addr: self._on_frontend_read(_lid, _addr, lanes),
-            )
-            return
-
-        raise ValueError("unsupported request kind: %s" % req["kind"])
-
-
-class TPUReference:
-    def __init__(self, size: int, dtype: str = "fp16"):
-        self.sa = SystolicArrayTPU(size=size, dtype=dtype)
-        self.size = size
-        self.dtype = dtype
-        self._pending = 0
-        self._out_read_idx = 0
-        self._warmup = self.sa.warmup_cycles()
-        self._flush_pending = 0
-        self._zero_row = [0.0] * size
-        self.outputs: List[List[int]] = []
-        self._input_done = False
-
-    def finish_inputs(self) -> None:
-        self._input_done = True
-        self._flush_pending = self.sa.flush_cycles()
-
-    def tick_from_bridge(
-        self,
-        *,
-        did_req: bool,
-        row: List[float],
-        is_weight: bool,
-        expect_output: bool,
-        did_flush: bool,
-        time: Optional[float] = None,
-    ) -> None:
-        self.sa.set_control(weight_en=False, mac_shift=False, start=False, stall=False)
-        if did_req:
-            if is_weight:
-                assert self.sa.enqueue_weights(row, dtype=self.dtype)
-                self.sa.set_control(weight_en=True, mac_shift=False, start=False, stall=False)
-            else:
-                assert self.sa.enqueue(row, dtype=self.dtype)
-                assert self.sa.enqueue_psums([0.0] * self.size, dtype=self.dtype)
-                self.sa.set_control(weight_en=False, mac_shift=True, start=True, stall=False)
-                if expect_output:
-                    self._pending += 1
-        elif did_flush and self._input_done and self._flush_pending > 0:
-            if self.sa.enqueue(self._zero_row, dtype=self.dtype, count_algo=False):
-                assert self.sa.enqueue_psums([0.0] * self.size, dtype=self.dtype)
-                self.sa.set_control(weight_en=False, mac_shift=True, start=True, stall=False)
-                self._flush_pending -= 1
-
-        self.sa.tick(time)
-
-        buf = self.sa.get_buffer()
-        while self._out_read_idx < len(buf):
-            if self._out_read_idx < self._warmup:
-                self._out_read_idx += 1
-                continue
-            if self._pending <= 0:
-                break
-            out_row = [float(x) for x in buf[self._out_read_idx]]
-            self.outputs.append([_fp16_bits(x) for x in out_row[: self.size]])
-            self._pending -= 1
-            self._out_read_idx += 1
-
-
-class GSAUTPUBridge(Clocked):
-    """Consumes VectorCore GSAU requests, drives TPU model, returns responses."""
-
-    def __init__(self, vc: VectorCore, sa: SystolicArrayTPU, mirror: TPUReference = None):
-        super().__init__()
-        self.vc = vc
-        self.sa = sa
-        self.mirror = mirror
-        self.size = sa.size
-        self._pending_meta: List[Dict] = []
-        self._out_read_idx = 0
-        self._warmup = self.sa.warmup_cycles()
-        self._flush_pending = 0
-        self._zero_row = [0.0] * self.size
-        self._debug_weight_count = 0
-        self._debug_act_count = 0
-        self._debug_out_count = 0
-        self._input_done = False
-
-    def finish_inputs(self) -> None:
-        self._input_done = True
-        self._flush_pending = self.sa.flush_cycles()
-        if self.mirror is not None:
-            self.mirror.finish_inputs()
-
-    def _pack_rsp(self, out_row: List[float], meta: Dict) -> Dict:
-        vec = [0.0] * self.vc.vector_len
-        for i, val in enumerate(out_row[: self.size]):
-            vec[i] = _fp16_bits(val)
-        return {"vdata": vec, "meta": dict(meta), "dtype": meta.get("dtype")}
-
-    def tick(self, time: Optional[float] = None) -> None:
-        # Default: idle compute controls.
-        self.sa.set_control(weight_en=False, mac_shift=False, start=False, stall=False)
-
-        req = self.vc.pop_systolic_request()
-        did_req = False
-        did_flush = False
-        row = self._zero_row
-        is_weight = False
-        expect_output = False
-        if req is not None:
-            vdata = [float(x) for x in req.get("vdata", [])]
-            row = vdata[: self.size]
-            if len(row) < self.size:
-                row += [0.0] * (self.size - len(row))
-
-            if bool(req.get("is_weight", False)):
-                did_req = True
-                is_weight = True
-                assert self.sa.enqueue_weights(row, dtype=req.get("dtype"))
-                self.sa.set_control(weight_en=True, mac_shift=False, start=False, stall=False)
-                if self._debug_weight_count < 2:
-                    dprintf("SYSARR", f"ref weight enqueue head={row[:8]}")
-                    self._debug_weight_count += 1
-            else:
-                did_req = True
-                expect_output = bool(req.get("expect_output", True))
-                assert self.sa.enqueue(row, dtype=req.get("dtype"))
-                assert self.sa.enqueue_psums([0.0] * self.size, dtype=req.get("dtype"))
-                self.sa.set_control(weight_en=False, mac_shift=True, start=True, stall=False)
-                if self._debug_act_count < 2:
-                    dprintf("SYSARR", f"ref act enqueue head={row[:8]}")
-                    self._debug_act_count += 1
-                if expect_output:
-                    self._pending_meta.append(dict(req.get("meta", {})))
-        elif self._input_done and self._flush_pending > 0:
-            if self.sa.enqueue(self._zero_row, dtype=self.sa.dtype, count_algo=False):
-                did_flush = True
-                assert self.sa.enqueue_psums([0.0] * self.size, dtype=self.sa.dtype)
-                self.sa.set_control(weight_en=False, mac_shift=True, start=True, stall=False)
-                self._flush_pending -= 1
-
-        if self.mirror is not None:
-            self.mirror.tick_from_bridge(
-                did_req=did_req,
-                row=row,
-                is_weight=is_weight,
-                expect_output=expect_output,
-                did_flush=did_flush,
-                time=time,
-            )
-
-        self.sa.tick(time)
-
-        buf = self.sa.get_buffer()
-        while self._out_read_idx < len(buf):
-            if self._out_read_idx < self._warmup:
-                self._out_read_idx += 1
-                continue
-            if not self._pending_meta:
-                break
-            out_row = [float(x) for x in buf[self._out_read_idx]]
-            if self._debug_out_count < 2:
-                dprintf("SYSARR", f"ref out row head={out_row[:8]}")
-                self._debug_out_count += 1
-            meta = self._pending_meta.pop(0)
-            assert self.vc.push_systolic_response(self._pack_rsp(out_row, meta))
-            self._out_read_idx += 1
-
-
 def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
     log_dir = Path(__file__).resolve().parents[2] / "logs" / "sysarr_gemm_tpu"
     configure_debug(flags=["DRAM", "SYSARR", "Xbar"], log_dir=str(log_dir))
@@ -617,9 +274,8 @@ def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
             bank_size=128,
             read_latency=2,
             write_latency=2,
-            xbar_delay=3,
             elem_bytes=2,
-            frontend_queue_size=4,
+            queue_depth=4,
         )
         sa = SystolicArrayTPU(size=tile, dtype="fp16")
 
@@ -729,8 +385,8 @@ def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
             # - each frontend has one active read path and one active write path
             # Use frontend queue depth + the currently serviceable in-flight slot
             # instead of an unbounded tile-wide window.
-            "load_issue_window": spad.frontends[0].readq.max_size + 1,
-            "store_issue_window": spad.frontends[1].writeq.max_size + 1,
+            "load_issue_window": spad.tiles[0].depth,
+            "store_issue_window": spad.tiles[1].depth,
         }
         q_stats = {
             "samples": 0,
@@ -750,15 +406,7 @@ def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
                 state["preload_wait_drain"] = True
 
         def _spad_write_path_idle() -> bool:
-            if any(spad.backend_write_inflight):
-                return False
-            if any(xbar.get_stats()["pending"] > 0 for xbar in spad.tile_write_xbars):
-                return False
-            for tile_obj in spad.tiles:
-                for bank in tile_obj.banks:
-                    if len(bank._pending) > 0:
-                        return False
-            return True
+            return spad.write_path_idle()
 
         def _on_backend_store_done(row_idx: int, tx_id: int) -> None:
             state["backend_store_tx_done"].add(row_idx)
@@ -1313,4 +961,4 @@ def test_scratchpad_vector_core_sysarr_tpu_end_to_end():
 
 
 if __name__ == "__main__":
-    test_scratchpad_vector_core_sysarr_tpu_end_to_end()
+    raise SystemExit(pytest.main([__file__]))

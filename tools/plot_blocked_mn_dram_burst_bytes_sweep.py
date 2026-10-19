@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 
 import argparse
-import json
 import math
 from pathlib import Path
 from typing import Any, Dict, List
+
+from sweep_common import format_cycles_in_millions, label_for_int, load_json_rows, ok_rows  # noqa: E402  (tools/sweep_common.py)
 
 
 try:
@@ -19,27 +20,6 @@ except ModuleNotFoundError as exc:
     ) from exc
 
 
-def _load_json_rows(input_dir: Path) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
-    for path in sorted(input_dir.glob("*.json")):
-        if path.name in {"results.json", "manifest.json"}:
-            continue
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(payload, dict):
-            rows.append(payload)
-    return rows
-
-
-def _ok_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    filtered = [row for row in rows if str(row.get("status", "ok")) == "ok"]
-    filtered.sort(key=lambda row: int(row.get("backend_dram_burst_bytes", 0) or 0))
-    return filtered
-
-
-def _label_for_int(value: int) -> str:
-    return str(int(value))
-
-
 def _annotate_points(ax: Any, x: List[int], y: List[float], *, dy: float = 0.0) -> None:
     if not y:
         return
@@ -52,11 +32,6 @@ def _annotate_points(ax: Any, x: List[int], y: List[float], *, dy: float = 0.0) 
         ax.text(x_val, y_val + offset, label, ha="center", va="bottom", fontsize=8)
 
 
-def _format_cycles_in_millions(ax: Any) -> None:
-    ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _: str(int(round(value / 1_000_000.0)))))
-    ax.set_ylabel("cycles (x 1M)")
-
-
 def plot_cycles(rows: List[Dict[str, Any]], output_path: Path) -> Path:
     x = [int(row["backend_dram_burst_bytes"]) for row in rows]
     cycles = [float(row["cycles"]) for row in rows]
@@ -65,8 +40,8 @@ def plot_cycles(rows: List[Dict[str, Any]], output_path: Path) -> Path:
     ax.plot(x, cycles, marker="o", linewidth=2.4, color="#4e79a7")
     ax.set_title("Blocked M=8, N=32: Total Cycles vs DRAM Burst Bytes")
     ax.set_xlabel("backend dram burst bytes")
-    _format_cycles_in_millions(ax)
-    ax.set_xticks(x, [_label_for_int(value) for value in x])
+    format_cycles_in_millions(ax)
+    ax.set_xticks(x, [label_for_int(value) for value in x])
     ax.grid(True, alpha=0.28)
     _annotate_points(ax, x, cycles)
 
@@ -86,7 +61,7 @@ def plot_external_bandwidth(rows: List[Dict[str, Any]], output_path: Path) -> Pa
     ax.set_title("Blocked M=8, N=32: External Bandwidth vs DRAM Burst Bytes")
     ax.set_xlabel("backend dram burst bytes")
     ax.set_ylabel("external bandwidth (bytes/cycle)")
-    ax.set_xticks(x, [_label_for_int(value) for value in x])
+    ax.set_xticks(x, [label_for_int(value) for value in x])
     ax.grid(True, alpha=0.28)
     _annotate_points(ax, x, bandwidth)
 
@@ -108,15 +83,15 @@ def plot_summary(rows: List[Dict[str, Any]], output_path: Path) -> Path:
     axes[0].plot(x, cycles, marker="o", linewidth=2.4, color="#4e79a7")
     axes[0].set_title("Total Cycles")
     axes[0].set_xlabel("backend dram burst bytes")
-    _format_cycles_in_millions(axes[0])
-    axes[0].set_xticks(x, [_label_for_int(value) for value in x])
+    format_cycles_in_millions(axes[0])
+    axes[0].set_xticks(x, [label_for_int(value) for value in x])
     axes[0].grid(True, alpha=0.28)
 
     axes[1].plot(x, bandwidth, marker="o", linewidth=2.4, color="#e15759")
     axes[1].set_title("External Bandwidth")
     axes[1].set_xlabel("backend dram burst bytes")
     axes[1].set_ylabel("bytes/cycle")
-    axes[1].set_xticks(x, [_label_for_int(value) for value in x])
+    axes[1].set_xticks(x, [label_for_int(value) for value in x])
     axes[1].grid(True, alpha=0.28)
 
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.95))
@@ -150,7 +125,7 @@ def main() -> int:
     )
     output_dir = Path(args.output_dir) if args.output_dir else input_dir / "plots"
 
-    rows = _ok_rows(_load_json_rows(input_dir))
+    rows = ok_rows(load_json_rows(input_dir), "backend_dram_burst_bytes")
     if not rows:
         raise SystemExit(f"no successful run JSON files found in {input_dir}")
 

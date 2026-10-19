@@ -1,19 +1,18 @@
-import os
-import sys
 import argparse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+import pytest
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'src')))
 
-from atalla.sysarr_tpu_experiment import MetricsVLSFrontendBridge, QUEUE_NAMES
-from atalla.sysarr_tpu_system import build_tpu_compute_path, build_tpu_platform
+from atalla.sysarr_tpu_experiment import (
+    QUEUE_NAMES, _fp16_from_u16, _read_dram_row_u16,
+    _read_slot_vector_u16, _write_dram_tile_u16)
+from atalla.sysarr_tpu_system import VLSFrontendBridge, build_tpu_compute_path, build_tpu_platform, _fp16_bits
 from base.debug import close_debug, configure_debug, dprintf
 from memory.dram import DRAM
-from memory.sc_sram_banks import _xor_bank
 from memory.scratchpad import Scratchpad
 
 
@@ -21,6 +20,9 @@ TILE = 32
 MATRIX = 1024
 NUM_TILES = MATRIX // TILE
 SPAD_TOTAL_BYTES = 2 * 1024 * 1024
+# This harness uses pads as double-buffer prefetch slots, not as data roles, so
+# it pins its own geometry (two slots) rather than taking the platform's default
+# of four. Published results in docs/results/ were measured on this.
 SPAD_NUM_TILES = 2
 SPAD_NUM_BANKS = 32
 SPAD_ELEM_BYTES = 2
@@ -44,50 +46,6 @@ def _tile_weight_stream(tile: np.ndarray) -> List[List[int]]:
     return [[int(tile[r, c]) for r in range(size)] for c in range(size - 1, -1, -1)]
 
 
-def _encode_row_u16(row: List[int]) -> bytes:
-    return b"".join(int(v).to_bytes(2, "little", signed=False) for v in row)
-
-
-def _decode_row_u16(blob: bytes, cols: int) -> List[int]:
-    out = []
-    for i in range(int(cols)):
-        start = i * 2
-        out.append(int.from_bytes(blob[start : start + 2], "little", signed=False))
-    return out
-
-
-def _write_dram_tile_u16(dram: DRAM, base_addr: int, tile: List[List[int]]) -> None:
-    rows = len(tile)
-    cols = len(tile[0]) if rows else 0
-    row_bytes = cols * 2
-    for r in range(rows):
-        dram.write(int(base_addr) + r * row_bytes, _encode_row_u16(tile[r]))
-
-
-def _read_dram_row_u16(dram: DRAM, addr: int, cols: int) -> List[int]:
-    row_bytes = cols * 2
-    blob = dram.read(int(addr), row_bytes)
-    return _decode_row_u16(blob, cols)
-
-
-def _fp16_bits(value: float) -> int:
-    return int(np.asarray(value, dtype=np.float16).view(np.uint16).item())
-
-
-def _read_slot_vector_u16(spad: Scratchpad, addr: int, vector_len: int, tile_id: int = 0) -> List[int]:
-    tile = int(tile_id)
-    slot = int(addr) % spad.bank_size
-    out = []
-    for lane in range(vector_len):
-        bank = _xor_bank(slot, lane, spad.num_banks)
-        blob = spad.tiles[tile].banks[bank].mem[slot]
-        blob = bytes(blob) if blob is not None else b"\x00\x00"
-        if len(blob) < 2:
-            blob = blob + (b"\x00" * (2 - len(blob)))
-        out.append(int.from_bytes(blob[:2], "little", signed=False))
-    return out
-
-
 def _write_slot_vector_u16(spad: Scratchpad, addr: int, values: List[int], tile_id: int = 0) -> None:
     tile = int(tile_id)
     slot = int(addr) % spad.bank_size
@@ -95,12 +53,8 @@ def _write_slot_vector_u16(spad: Scratchpad, addr: int, values: List[int], tile_
     for lane in range(len(padded), spad.num_banks):
         padded.append(0)
     for lane, value in enumerate(padded[: spad.num_banks]):
-        bank = _xor_bank(slot, lane, spad.num_banks)
+        bank = lane
         spad.tiles[tile].banks[bank].mem[slot] = int(value).to_bytes(2, "little", signed=False)
-
-
-def _fp16_from_u16(value: int) -> float:
-    return float(np.frombuffer(np.uint16(int(value)).tobytes(), dtype=np.float16)[0])
 
 
 def _decode_fp16_vector(values: List[int]) -> List[float]:
@@ -188,7 +142,21 @@ class TiledTPUCosim:
         dtype: str = "fp16",
         spad_frontend_queue_size: int = 4,
         backend_dram_burst_bytes: int = 32,
+        systolic_array: str = "tpu",
+        spad_num_tiles: int = SPAD_NUM_TILES,
+        collect_sa_stats: bool = True,
     ):
+        """systolic_array / spad_num_tiles select the architecture.
+
+        The default is the configuration every published result in
+        docs/results/ was measured on: the TPU array behind two scratchpad
+        pads. `systolic_array="meissa", spad_num_tiles=4` runs the same
+        decomposition and scheduling on the new architecture, so a cycle
+        difference between the two is the hardware and not the harness.
+
+        A pad is one prefetch slot: its own bank array, its own DRAM backend
+        and its own VLSU, all indexed by the same integer.
+        """
         self.matrix_size = int(matrix_size)
         self.tile_size = int(tile_size)
         self.num_tiles = self.matrix_size // self.tile_size
@@ -196,6 +164,16 @@ class TiledTPUCosim:
         self.dtype = str(dtype)
         self.spad_frontend_queue_size = max(1, int(spad_frontend_queue_size))
         self.backend_dram_burst_bytes = max(1, int(backend_dram_burst_bytes))
+        self.systolic_array = str(systolic_array)
+        self.spad_num_tiles = max(1, int(spad_num_tiles))
+        self.collect_sa_stats = bool(collect_sa_stats)
+        #: One prefetch slot per pad, so the double buffer widens with the
+        #: scratchpad instead of staying pinned at two.
+        self.num_slots = self.spad_num_tiles
+        # Total scratchpad capacity is a property of the chip, not of how many
+        # pads it is cut into, so the bank depth follows the pad count.
+        self.spad_bank_size = SPAD_TOTAL_BYTES // (
+            self.spad_num_tiles * SPAD_NUM_BANKS * SPAD_ELEM_BYTES)
 
         self.W_REG = 1
         self.A_REG = 2
@@ -203,12 +181,15 @@ class TiledTPUCosim:
         self.ACC_REG = 4
         self.SUM_REG = 5
 
-        self.ACT_SLOT_BASES = [0, self.tile_size]
-        self.WGT_SLOT_BASES = [2 * self.tile_size, 3 * self.tile_size]
-        self.ACC_SLOT_BASE = 6 * self.tile_size
+        # Slot s keeps its activation tile and its weight tile in pad s, at
+        # fixed offsets; the accumulator sits above both.
+        n_slots = self.num_slots
+        self.ACT_SLOT_BASES = [s * self.tile_size for s in range(n_slots)]
+        self.WGT_SLOT_BASES = [(n_slots + s) * self.tile_size for s in range(n_slots)]
+        self.ACC_SLOT_BASE = (2 * n_slots + 1) * self.tile_size
 
-        self.DRAM_ACT_STAGE = [0x100000, 0x110000]
-        self.DRAM_WGT_STAGE = [0x200000, 0x210000]
+        self.DRAM_ACT_STAGE = [0x100000 + s * 0x10000 for s in range(n_slots)]
+        self.DRAM_WGT_STAGE = [0x200000 + s * 0x10000 for s in range(n_slots)]
         self.DRAM_OUT = 0x300000
 
         self.global_cycle = 0
@@ -560,7 +541,14 @@ class TiledTPUCosim:
             "backend_dram_burst_bytes": self.backend_dram_burst_bytes,
             "kernel_gantt_tag_count": len(self.kernel_tag_info),
             "kernel_gantt_span_count": len(self.kernel_path_spans),
-            "prefetch_slots": 2,
+            "prefetch_slots": self.num_slots,
+            "systolic_array": self.systolic_array,
+            "spad_pads": self.spad_num_tiles,
+            "spad_bank_size": self.spad_bank_size,
+            "spad_total_bytes": SPAD_TOTAL_BYTES,
+            "vls_count": len(self.vc.vls_units),
+            "sa_stats_not_applicable": list(
+                getattr(self.sa, "INAPPLICABLE_STATS", ())),
             "total_tile_pairs": self.total_tile_pairs,
             "total_output_tiles": self.num_tiles ** 2,
         }
@@ -570,12 +558,12 @@ class TiledTPUCosim:
             size=self.tile_size,
             dtype=self.dtype,
             lane_count=4,
-            vls_count=2,
+            vls_count=self.num_slots,
             spad_num_banks=SPAD_NUM_BANKS,
-            spad_bank_size=SPAD_BANK_SIZE,
+            spad_bank_size=self.spad_bank_size,
+            spad_num_tiles=self.spad_num_tiles,
             spad_read_latency=2,
             spad_write_latency=2,
-            spad_xbar_delay=3,
             spad_frontend_queue_size=self.spad_frontend_queue_size,
             dram_block_bytes=256,
             backend_dram_latency=28,
@@ -583,21 +571,21 @@ class TiledTPUCosim:
             backend_dram_burst_bytes=self.backend_dram_burst_bytes,
             backend_delay_cycles=1,
             mirror=False,
-            vls_bridge_cls=MetricsVLSFrontendBridge,
+            vls_bridge_cls=VLSFrontendBridge,
         )
         self.vc = platform.vc
         self.spad = platform.spad
         self.dram = platform.dram
         self.backends = platform.backends
-        assert len(self.backends) == 2
+        assert len(self.backends) == self.num_slots
         assert all(backend.dram is self.dram for backend in self.backends)
         self.backend = self.backends[0]
         self.vls_bridges = platform.vls_bridges
         self.vls_bridge = platform.vls_bridge
         for bridge in self.vls_bridges:
             bridge.trace_hook = self._trace_vls_event
-        self.load_issue_window = self.spad.frontends[0].readq.max_size + 1
-        self.store_issue_window = self.spad.frontends[0].writeq.max_size + 1
+        self.load_issue_window = self.spad.tiles[0].depth
+        self.store_issue_window = self.spad.tiles[0].depth
         self.tile_row_bytes = self.tile_size * 2
         self._reset_compute_pipeline()
 
@@ -607,7 +595,12 @@ class TiledTPUCosim:
             size=self.tile_size,
             dtype=self.dtype,
             mirror=None,
+            systolic_array=self.systolic_array,
         )
+        # MEISSA keeps its per-element counters off by default because they
+        # cost two NxN comparisons a cycle; the harness reports them, so ask.
+        if hasattr(self.sa, "collect_stats"):
+            self.sa.collect_stats = self.collect_sa_stats
         self.sysarr_bridge.trace_hook = self._trace_sysarr_event
         self._prev_sa_valid_mac_cycles = 0
 
@@ -926,12 +919,13 @@ class TiledTPUCosim:
                         raise AssertionError("unexpected accumulator row load")
                     partial_bits = current_job.accum_load_rows.pop(row_idx)["data"]
                     self._mark_kernel_path_start(current_job.tag, "datapath_add", self.global_cycle)
-                    assert self.vc.enqueue_compute(
-                        op="add",
-                        dst=self.SUM_REG,
-                        src0=_decode_fp16_vector(partial_bits),
-                        src1=_decode_fp16_vector(list(wb.get("data", []))),
-                    )
+                    assert self.vc.enqueue_scheduler_instruction({
+                        "unit": "datapath",
+                        "op": "add",
+                        "dst": self.SUM_REG,
+                        "src0": _decode_fp16_vector(partial_bits),
+                        "src1": _decode_fp16_vector(list(wb.get("data", []))),
+                    })
                     current_job.sum_issue_rows.append(row_idx)
 
                 elif src == "gsau" and dst == self.OUT_REG:
@@ -1181,6 +1175,7 @@ def _write_logs(runner: TiledTPUCosim, stats: Dict[str, int], log_dir: Path) -> 
         close_debug()
 
 
+@pytest.mark.slow
 def test_scratchpad_vector_core_sysarr_tpu_tiled_1024x1024() -> None:
     act = _act_matrix_u16(MATRIX)
     wgt = _weights_matrix_u16(MATRIX)
@@ -1201,6 +1196,12 @@ def main() -> None:
     parser.add_argument("--matrix-size", type=int, default=MATRIX)
     parser.add_argument("--tile-size", type=int, default=TILE)
     parser.add_argument("--backend-dram-burst-bytes", type=int, default=32)
+    parser.add_argument("--systolic-array", choices=("tpu", "meissa"), default="tpu",
+                        help="array model: tpu (published results) or meissa")
+    parser.add_argument("--spad-pads", type=int, default=SPAD_NUM_TILES,
+                        help="scratchpad pads; total capacity is fixed, so this "
+                             "splits the same 2 MB into more, smaller pads and "
+                             "gives each its own frontend, backend and VLSU")
     parser.add_argument(
         "--log-dir",
         type=str,
@@ -1217,6 +1218,8 @@ def main() -> None:
         tile_size=args.tile_size,
         dtype="fp16",
         backend_dram_burst_bytes=args.backend_dram_burst_bytes,
+        systolic_array=args.systolic_array,
+        spad_num_tiles=args.spad_pads,
     )
     got, _ = runner.run(act, wgt)
     stats = runner.build_stats(got, expected)

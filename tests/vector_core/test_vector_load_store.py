@@ -1,23 +1,12 @@
-import os
-import sys
+import pytest
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..//..", "src")))
-
-from base.eventq import EventQueue
-from base.clock_domain import ClockDomain
-from base.core import Core
-from base.sim import Sim
+from base.testing import build_sim
 from vector_core.vector_load_store import VLSU
 
 
-def build_sim():
-    eq = EventQueue()
-    clk = ClockDomain(eq, period=1.0)
-    core = Core(eq)
-    core.add_clock_domain(clk)
-    sim = Sim()
-    sim.init(eq, core)
-    return eq, clk, sim
+def fifo_occupancy(vls):
+    """How many loads wait in each scratchpad's destination FIFO."""
+    return [len(fifo) for fifo in vls.load_dst_fifos]
 
 
 def test_vlsu_load_issue_tracks_destination_per_scratchpad():
@@ -33,13 +22,13 @@ def test_vlsu_load_issue_tracks_destination_per_scratchpad():
     req0 = vls.pop_request()
     assert req0["kind"] == "load"
     assert req0["scratchpad"] == 0
-    assert vls.fifo_occupancy() == [1, 0]
+    assert fifo_occupancy(vls) == [1, 0]
 
     sim.run(until=2.0)
     req1 = vls.pop_request()
     assert req1["kind"] == "load"
     assert req1["scratchpad"] == 1
-    assert vls.fifo_occupancy() == [1, 1]
+    assert fifo_occupancy(vls) == [1, 1]
     assert vls.outstanding_loads() == 2
 
 
@@ -56,7 +45,7 @@ def test_vlsu_load_response_maps_back_to_dest_fifo_order():
     assert vls.pop_request()["kind"] == "load"
     sim.run(until=2.0)
     assert vls.pop_request()["kind"] == "load"
-    assert vls.fifo_occupancy() == [2, 0]
+    assert fifo_occupancy(vls) == [2, 0]
 
     assert vls.push_response({"scratchpad": 0, "data": [11, 12], "addr": 0x1000})
     assert vls.push_response({"scratchpad": 0, "data": [21, 22], "addr": 0x1040})
@@ -133,7 +122,4 @@ def test_vlsu_writeback_callback_consumes_completed_load():
 
 
 if __name__ == "__main__":
-    test_vlsu_load_issue_tracks_destination_per_scratchpad()
-    test_vlsu_load_response_maps_back_to_dest_fifo_order()
-    test_vlsu_store_is_pass_through_and_uses_vrf_read_callback()
-    test_vlsu_writeback_callback_consumes_completed_load()
+    raise SystemExit(pytest.main([__file__]))

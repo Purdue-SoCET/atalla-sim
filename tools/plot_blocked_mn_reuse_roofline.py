@@ -6,6 +6,8 @@ import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from sweep_common import algo_flops, ok_rows, theoretical_peak_compute  # noqa: E402  (tools/sweep_common.py)
+
 
 try:
     import matplotlib
@@ -120,16 +122,6 @@ def _load_json_rows(input_dir: Path) -> List[Dict[str, Any]]:
     return rows
 
 
-def _algo_flops(matrix_size: int) -> float:
-    size = int(matrix_size)
-    return float(2 * size * size * size)
-
-
-def _theoretical_peak_compute(tile_size: int) -> float:
-    tile = int(tile_size)
-    return float(2 * tile * tile)
-
-
 def _derive_policy_label(row: Dict[str, Any]) -> str:
     policy_label = str(row.get("policy_label") or "").strip()
     if policy_label:
@@ -168,7 +160,7 @@ def _normalize_row(row: Dict[str, Any], *, default_policy_order: int) -> Dict[st
     bytes_internal = float(payload.get("bytes_internal", 0.0) or 0.0)
 
     if flops_algo <= 0.0 and matrix_size > 0:
-        flops_algo = _algo_flops(matrix_size)
+        flops_algo = algo_flops(matrix_size)
 
     throughput_algo = float(payload.get("throughput_algo_flops_per_cycle", 0.0) or 0.0)
     if throughput_algo <= 0.0 and flops_algo > 0.0 and cycles > 0.0:
@@ -194,7 +186,7 @@ def _normalize_row(row: Dict[str, Any], *, default_policy_order: int) -> Dict[st
 
     theoretical_peak_compute = float(payload.get("theoretical_peak_compute_flops_per_cycle", 0.0) or 0.0)
     if theoretical_peak_compute <= 0.0 and tile_size > 0:
-        theoretical_peak_compute = _theoretical_peak_compute(tile_size)
+        theoretical_peak_compute = theoretical_peak_compute(tile_size)
 
     payload.update(
         {
@@ -233,12 +225,6 @@ def _load_reference_rows(reference_paths: List[Path], existing_rows: List[Dict[s
         identities.add(identity)
         next_policy_order += 1
     return reference_rows
-
-
-def _ok_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    filtered = [row for row in rows if str(row.get("status", "ok")) == "ok"]
-    filtered.sort(key=lambda row: int(row.get("policy_order", 0) or 0))
-    return filtered
 
 
 def _positive_or(default: float, *values: float) -> float:
@@ -520,7 +506,7 @@ def main() -> int:
     manifest = _load_manifest(input_dir)
     base_rows = [
         _normalize_row(row, default_policy_order=index)
-        for index, row in enumerate(_ok_rows(_load_json_rows(input_dir)))
+        for index, row in enumerate(ok_rows(_load_json_rows(input_dir), "policy_order"))
     ]
     if not base_rows:
         raise SystemExit(f"no successful run JSON files found in {input_dir}")
@@ -531,7 +517,7 @@ def main() -> int:
     if args.reference_json:
         reference_paths.extend(Path(value) for value in args.reference_json)
 
-    rows = _ok_rows(base_rows + _load_reference_rows(reference_paths, base_rows))
+    rows = ok_rows(base_rows + _load_reference_rows(reference_paths, base_rows), "policy_order")
 
     print(f"using {input_dir}")
     written = plot_roofline(rows, manifest, output_path, args.bandwidth_source)

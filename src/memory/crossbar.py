@@ -1,3 +1,10 @@
+"""Xbar: the pipelined crossbar between a scratchpad's banks and its frontend.
+
+route() is the combinational routing (each output picks the input its shift
+mask names); Xbar adds `delay` pipeline stages and backpressure. See the
+class docstring for the timing.
+"""
+
 from base.clocked_object import Clocked
 from base.debug import dprintf
 from base.queue import SimQueue
@@ -53,6 +60,20 @@ class Xbar(Clocked):
     def inflight(self) -> int:
         return len(self._issue_q) + len(self._inflight) + (1 if self._blocked_tail is not None else 0)
 
+    def next_wake(self, now: int) -> Optional[int]:
+        """Idle only when the issue queue, the pipeline and the tail are empty.
+
+        A blocked tail retries every cycle, and a queued entry has to be moved
+        into the pipeline on the very next tick (that is where its due_cycle is
+        stamped), so both force now+1. Only entries already in flight can be
+        deferred to their own deadline.
+        """
+        if self._blocked_tail is not None or len(self._issue_q):
+            return now + 1
+        if self._inflight:
+            return self._inflight[0]["due_cycle"]
+        return None
+
     def can_accept(self) -> bool:
         return self.inflight() < self.max_size
 
@@ -79,6 +100,10 @@ class Xbar(Clocked):
             dprintf("Xbar", f"enqueue dropped: queue full (op={self._op_counter})")
             return -1
         self.total_submitted += 1
+        # Run on the next available tick so the entry is moved into the
+        # pipeline exactly when it would have been before scheduling existed.
+        # _tick may be stale if we have been asleep; asking too early is safe.
+        self.request_wake(self._tick + 1)
         dprintf("Xbar", f"enqueue op={self._op_counter} delay={self.delay} inflight={self.inflight()}")
         return self._op_counter
 
@@ -135,6 +160,7 @@ class Xbar(Clocked):
         return completed
 
     def get_stats(self) -> Dict[str, Any]:
+        """The configuration and the traffic counters, for reports."""
         return {
             "delay": self.delay,
             "num_banks": self.num_banks,

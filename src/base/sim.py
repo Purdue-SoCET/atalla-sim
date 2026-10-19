@@ -1,12 +1,19 @@
+"""Sim: runs an EventQueue, until a time or until it is empty.
+
+Built by base/testing.build_sim together with an EventQueue, a Core and a
+ClockDomain.
+"""
+
 from base.eventq import EventQueue
 from base.core import Core
-from base.debug import close_debug, configure_debug, dprintf
-from typing import Iterable, Optional, Tuple
+from base.debug import close_debug, dprintf
+from typing import Optional, Tuple
 
 Time = float
 EventHandle = Tuple[Time, int]
 
 class Sim:
+    """Runs the event queue."""
     def __init__(self) -> None:
         self.event_queue = None
         self.core = None
@@ -25,21 +32,6 @@ class Sim:
 
     def stop(self) -> None:
         dprintf("Sim", "stop()")
-
-    def configure_debug(
-        self,
-        flags: Optional[Iterable[str]] = None,
-        log_dir: str = "logs",
-        append: bool = False,
-        also_stdout: bool = False,
-    ) -> None:
-        configure_debug(
-            enabled=True,
-            flags=flags,
-            log_dir=log_dir,
-            append=append,
-            also_stdout=also_stdout,
-        )
 
     def close_debug(self) -> None:
         close_debug()

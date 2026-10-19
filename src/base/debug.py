@@ -1,3 +1,12 @@
+"""Debug logging: dprintf(flag, msg) writes msg to logs/<flag>.log.
+
+Off by default, so dprintf costs one check. Turn it on with
+configure_debug(flags=[...]) (no flags = every flag), optionally echoing to
+stdout. Each flag gets its own file, opened on first use; close_debug()
+closes them. To log from a new component, call dprintf with a flag named
+after it.
+"""
+
 from pathlib import Path
 from threading import Lock
 from typing import Dict, Iterable, Optional, TextIO
@@ -75,6 +84,10 @@ def configure_debug(
     append: bool = False,
     also_stdout: bool = False,
 ) -> None:
+    """Turn debug logging on for `flags` (all flags if none), writing
+    logs/<flag>.log under `log_dir`, appended to if `append`, and echoed to
+    stdout if `also_stdout`.
+    """
     _STATE.configure(
         enabled=enabled,
         flags=flags,

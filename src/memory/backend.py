@@ -1,3 +1,15 @@
+"""The scratchpad's DMA backend: moves tiles between DRAM and a scratchpad pad.
+
+A load (driver_to_backend_start_load) copies `rows` rows of `cols` elements
+from DRAM into the pad; a store does the reverse. Each row is cut into
+burst-sized DRAM requests; at most dram_q_depth bursts are in flight, each
+returns dram_latency cycles after it launched, and backends that share a
+SharedDRAMBurstChannel launch one burst a cycle between them. Finished rows
+are written to the pad through the send_sram_write callback the scratchpad
+installs; stores read rows back through request_sram_read.
+Statistics: get_stats().
+"""
+
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple, Any
@@ -9,11 +21,14 @@ from base.queue import SimQueue
 
 import math
 
-from memory.dram import DRAM
+from memory.dram import DRAM, DRAM_BURST_BYTES
 
 
 @dataclass(slots=True)
 class DRAMOperation:
+    """One DRAM burst in flight: which transaction, row and part of the
+    row it belongs to, and when it completes.
+    """
     tx_id: int
     row: int
     subidx: int
@@ -27,6 +42,9 @@ class DRAMOperation:
 
 @dataclass(slots=True)
 class BackendTransaction:
+    """One tile load or store and how far along it is: the rows assembled
+    so far, the bursts issued and completed, and the callback to run at the end.
+    """
     tx_id: int
     base_sp: int
     base_dram: int
@@ -41,6 +59,12 @@ class BackendTransaction:
     issued_subreqs: List[set] = field(default_factory=list)
     total_subreqs: int = 0
     completed_subreqs: int = 0
+    #: Store: rows whose SRAM read has been requested from the scratchpad.
+    next_read_row: int = 0
+    #: Bytes between consecutive rows in DRAM. 0 means the rows are packed
+    #: (cols * elem_bytes); a tile cut out of a wider matrix uses the
+    #: matrix's row width.
+    dram_stride: int = 0
 
 
 @dataclass
@@ -78,7 +102,7 @@ class Backend(Clocked):
         self,
         dram_latency: int = 6,
         dram_q_depth: int = 32,
-        dram_burst_bytes: int = 8,
+        dram_burst_bytes: int = DRAM_BURST_BYTES,
         elem_bytes: int = 2,
         delay_cycles: int = 1,
         shared_burst_channel: Optional[SharedDRAMBurstChannel] = None,
@@ -92,6 +116,11 @@ class Backend(Clocked):
         self.elem_bytes = int(elem_bytes)
         self.send_sram_write = send_sram_write
         self.send_sram_read = send_sram_read
+        #: Asynchronous SRAM read, set by Scratchpad.attach_backend:
+        #: (sp_addr, row_idx, tx_id) -> accepted. The row comes back later
+        #: through queue_sram_read_response, after the pad's read latency.
+        #: When unset, stores fall back to the untimed send_sram_read.
+        self.request_sram_read: Optional[Callable[[int, int, int], bool]] = None
         self.dram: Optional[DRAM] = None
         self.shared_burst_channel = shared_burst_channel
 
@@ -150,16 +179,6 @@ class Backend(Clocked):
         self.total_dram_bursts_issued += 1
         return True
 
-    def attach_scratchpad(self, scratchpad: Any, tile_id: Optional[int] = None) -> Any:
-        if hasattr(scratchpad, "attach_backend"):
-            scratchpad.attach_backend(self, tile_id=tile_id)
-            return scratchpad
-        self.send_sram_write = scratchpad._accept_backend_write
-        self.send_sram_read = scratchpad.backend_read_row
-        if getattr(scratchpad, "backend", None) is not self:
-            scratchpad.backend = self
-        return scratchpad
-
     def attach_dram(self, dram: DRAM) -> DRAM:
         self.dram = dram
         return dram
@@ -172,7 +191,8 @@ class Backend(Clocked):
 
     # Public API for scheduler/driver
     def driver_to_backend_start_load(
-        self, base_sp_addr: int, base_dram_addr: int, rows: int, cols: int, callback: Optional[Callable[[int], None]] = None
+        self, base_sp_addr: int, base_dram_addr: int, rows: int, cols: int, callback: Optional[Callable[[int], None]] = None,
+        dram_stride: int = 0,
     ) -> int:
         """
         Start a LOAD transaction: DRAM -> Scratchpad.
@@ -195,14 +215,17 @@ class Backend(Clocked):
             is_store=False,
             issued_subreqs=[set() for _ in range(rows)],
             total_subreqs=rows * subreqs,
+            dram_stride=int(dram_stride) or cols * self.elem_bytes,
         )
         if not self._tx_queue.enqueue(tx):
             self.total_backend_stalls += 1
             return -1
+        self.wake()
         return tx_id
 
     def driver_to_backend_start_store(
-        self, base_sp_addr: int, base_dram_addr: int, rows: int, cols: int, callback: Optional[Callable[[int], None]] = None
+        self, base_sp_addr: int, base_dram_addr: int, rows: int, cols: int, callback: Optional[Callable[[int], None]] = None,
+        dram_stride: int = 0,
     ) -> int:
         """
         Start a STORE transaction: Scratchpad -> DRAM (writeback).
@@ -226,11 +249,31 @@ class Backend(Clocked):
             is_store=True,
             issued_subreqs=[set() for _ in range(rows)],
             total_subreqs=rows * subreqs,
+            dram_stride=int(dram_stride) or cols * self.elem_bytes,
         )
         if not self._tx_queue.enqueue(tx):
             self.total_backend_stalls += 1
             return -1
+        self.wake()
         return tx_id
+
+    def queue_sram_read_response(self, tx_id: int, row_idx: int, row_bytes: bytes) -> None:
+        """A row read for a store has come back from the scratchpad. It is
+        handled on the backend's next tick, so its DRAM bursts launch at the
+        backend's own cycle."""
+        self._pending_sram_reads.append((tx_id, row_idx, row_bytes))
+        self.wake()
+
+    def _request_store_rows(self) -> None:
+        """Ask the scratchpad for the next row of each store, one per cycle:
+        the pad takes one request a cycle, and refuses when it is busy."""
+        for tx in list(self._active_txs.values()):
+            if not tx.is_store or tx.next_read_row >= tx.rows:
+                continue
+            r = tx.next_read_row
+            if self.request_sram_read(tx.base_sp + r, r, tx.tx_id):
+                tx.next_read_row += 1
+            return
 
     # Called by Body/other unit when it produces a SRAM-read response for a store transaction.
     def body_to_backend_sram_read_response(self, tx_id: int, row_idx: int, row_bytes: bytes) -> None:
@@ -248,12 +291,16 @@ class Backend(Clocked):
         if not tx.is_store:
             return
 
+        # The scratchpad hands over a whole row; only the tile's columns go to
+        # DRAM, as a load reads only them. A narrower tile's last burst is short.
+        row_bytes = row_bytes[: tx.cols * self.elem_bytes]
+
         # split row_bytes into sub-chunks of dram_burst_bytes
         subreqs = []
         for subidx in range(tx.subreqs_per_row):
             off = subidx * self.dram_burst_bytes
             chunk = row_bytes[off : off + self.dram_burst_bytes]
-            dram_addr = tx.base_dram + (row_idx * tx.cols * self.elem_bytes) + off
+            dram_addr = tx.base_dram + (row_idx * tx.dram_stride) + off
             subreqs.append(DRAMOperation(
                             tx_id=tx.tx_id, 
                             row=row_idx, 
@@ -300,7 +347,7 @@ class Backend(Clocked):
                 tx_id=tx.tx_id,
                 row=r,
                 subidx=s,
-                dram_addr=tx.base_dram + (r * tx.cols * self.elem_bytes) + s * self.dram_burst_bytes,
+                dram_addr=tx.base_dram + (r * tx.dram_stride) + s * self.dram_burst_bytes,
                 length=min(self.dram_burst_bytes, tx.cols * self.elem_bytes - s * self.dram_burst_bytes),
                 is_write=False,
                 data=None,
@@ -324,7 +371,7 @@ class Backend(Clocked):
                         tx_id=tx.tx_id,
                         row=row_idx,
                         subidx=subidx,
-                        dram_addr=tx.base_dram + (row_idx * tx.cols * self.elem_bytes) + subidx * self.dram_burst_bytes,
+                        dram_addr=tx.base_dram + (row_idx * tx.dram_stride) + subidx * self.dram_burst_bytes,
                         length=len(chunk),
                         is_write=True,
                         data=chunk,
@@ -470,13 +517,16 @@ class Backend(Clocked):
                 self._active_txs[tx.tx_id] = tx
                 if not tx.is_store:
                     self.backend_to_dram_issue_row_load_subreqs(tx)
-                else:
-                    # For store: request all rows from scratchpad if not present
+                elif self.request_sram_read is None:
+                    # Untimed fallback: read every row at once.
                     if self.send_sram_read:
                         for row_idx in range(tx.rows):
                             if all(x is None for x in tx.row_bufs[row_idx]):
                                 row_bytes = self.send_sram_read(tx.base_sp + row_idx, row_idx, tx.tx_id)
                                 self.body_to_backend_sram_read_response(tx.tx_id, row_idx, row_bytes)
+
+            if self.request_sram_read is not None:
+                self._request_store_rows()
 
             # 2) Progress only the bursts whose due cycle has arrived.
             while self._dram_ready_heap and self._dram_ready_heap[0][0] <= self._tick:
@@ -490,15 +540,24 @@ class Backend(Clocked):
             self._retry_one_deferred_load_burst()
             self._retry_one_deferred_store_burst()
 
-            # 4) Retry handing off stalled assembled rows.
+            # 4) Retry handing off stalled assembled load rows. Loads only: a
+            # store parks DRAM write data in the same row_bufs (step 3 sends it).
             for tx in list(self._active_txs.values()):
-                if tx.cur_row < tx.rows:
+                if not tx.is_store and tx.cur_row < tx.rows:
                     buf_entry = tx.row_bufs[tx.cur_row]
                     if len(buf_entry) == 1 and isinstance(buf_entry[0], (bytes, bytearray)):
                         assembled = buf_entry[0]
                         self.backend_to_body_complete_row_load(tx, tx.cur_row, assembled)
         finally:
             self._in_tick = False
+
+    def next_wake(self, now: int) -> Optional[int]:
+        """Asleep with no transaction queued or active and no burst in
+        flight. Starting a load or store wakes it."""
+        if (self._tx_queue.is_empty() and not self._active_txs and not self._pending_sram_reads
+                and not self._dram_ready_heap and self._dram_pending.is_empty()):
+            return None
+        return now + 1
 
     def get_stats(self) -> Dict[str, Any]:
         """
@@ -516,5 +575,3 @@ class Backend(Clocked):
         }
 
     # Backwards-compatible stats API used by some tests.
-    def backend_to_driver_get_stats(self) -> Dict[str, Any]:
-        return self.get_stats()

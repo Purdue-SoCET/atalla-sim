@@ -1,24 +1,10 @@
-import os
-import sys
+import pytest
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..//..", "src")))
-
+from base.testing import build_sim
 from base.eventq import EventQueue
-from base.clock_domain import ClockDomain
-from base.core import Core
 from base.sim import Sim
 
 from vector_core.vector_core import VectorCore
-
-
-def build_sim():
-    eq = EventQueue()
-    clk = ClockDomain(eq, period=1.0)
-    core = Core(eq)
-    core.add_clock_domain(clk)
-    sim = Sim()
-    sim.init(eq, core)
-    return eq, clk, sim
 
 
 def _run_core_until(
@@ -145,10 +131,16 @@ def _run_core_with_systolic(
 def test_vector_core_sim_compute_writeback():
     eq, clk, sim = build_sim()
     vc = VectorCore(veggie_size=128, lane_count=4, fu_latencies={"alu": 1}, dtype="fp16")
-    vc.load_vreg(1, [1, 2, 3, 4, 5, 6, 7, 8])
-    vc.load_vreg(2, [8, 7, 6, 5, 4, 3, 2, 1])
+    vc.write_vreg(1, [1, 2, 3, 4, 5, 6, 7, 8])
+    vc.write_vreg(2, [8, 7, 6, 5, 4, 3, 2, 1])
 
-    assert vc.enqueue_compute(op="add", dst=3, src0=1, src1=2)
+    assert vc.enqueue_scheduler_instruction({
+        "unit": "datapath",
+        "op": "add",
+        "dst": 3,
+        "src0": 1,
+        "src1": 2,
+    })
 
     _run_core_until(
         sim,
@@ -162,7 +154,7 @@ def test_vector_core_sim_compute_writeback():
         ),
     )
 
-    assert vc.dump_vreg(3) == [9, 9, 9, 9, 9, 9, 9, 9]
+    assert vc.read_vreg(3) == [9, 9, 9, 9, 9, 9, 9, 9]
     assert vc.last_wb["meta"]["op"] == "add"
 
 
@@ -170,7 +162,7 @@ def test_vector_core_sim_vlsu_store_then_load_round_trip():
     eq, clk, sim = build_sim()
     vc = VectorCore(veggie_size=128, lane_count=4, vls_count=1, fu_latencies={"alu": 1}, dtype="fp16")
     src_vec = [11, 22, 33, 44, 55, 66, 77, 88]
-    vc.load_vreg(6, src_vec)
+    vc.write_vreg(6, src_vec)
     memory = {}
 
     assert vc.enqueue_memory({"kind": "store", "vls": 0, "src": 6, "addr": 0x1000, "dtype": "fp16"})
@@ -190,7 +182,7 @@ def test_vector_core_sim_vlsu_store_then_load_round_trip():
     )
 
     assert memory[0x1000] == src_vec
-    assert vc.dump_vreg(7) == src_vec
+    assert vc.read_vreg(7) == src_vec
 
 
 def test_vector_core_sim_gsau_round_trip_with_rd_queue():
@@ -198,8 +190,8 @@ def test_vector_core_sim_gsau_round_trip_with_rd_queue():
     vc = VectorCore(veggie_size=128, lane_count=4, fu_latencies={"alu": 1}, dtype="fp16")
     src0 = [1, 2, 3, 4, 5, 6, 7, 8]
     src1 = [9, 8, 7, 6, 5, 4, 3, 2]
-    vc.load_vreg(20, src0)
-    vc.load_vreg(21, src1)
+    vc.write_vreg(20, src0)
+    vc.write_vreg(21, src1)
 
     # Weight stream does not allocate rd queue entry.
     assert vc.enqueue_scheduler_instruction(
@@ -217,7 +209,7 @@ def test_vector_core_sim_gsau_round_trip_with_rd_queue():
         sim,
         eq,
         vc,
-        done_cb=lambda: (vc.dump_vreg(30) == [x * 2 for x in src0]) and (vc.dump_vreg(31) == [x * 2 for x in src1]),
+        done_cb=lambda: (vc.read_vreg(30) == [x * 2 for x in src0]) and (vc.read_vreg(31) == [x * 2 for x in src1]),
         transform_cb=lambda req: [float(x) * 2.0 for x in req["vdata"]],
     )
 
@@ -227,6 +219,4 @@ def test_vector_core_sim_gsau_round_trip_with_rd_queue():
 
 
 if __name__ == "__main__":
-    test_vector_core_sim_compute_writeback()
-    test_vector_core_sim_vlsu_store_then_load_round_trip()
-    test_vector_core_sim_gsau_round_trip_with_rd_queue()
+    raise SystemExit(pytest.main([__file__]))

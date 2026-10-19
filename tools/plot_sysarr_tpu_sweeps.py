@@ -3,7 +3,6 @@
 import argparse
 import csv
 import math
-import sys
 from pathlib import Path
 from typing import Dict, List
 
