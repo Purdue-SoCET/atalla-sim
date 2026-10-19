@@ -4,17 +4,17 @@ This is the cache the RTL's `rtl/modules/scheduler/dcache/` sets out to be:
 write-back, write-allocate, set-associative, with miss status holding
 registers so that hits are served while misses are outstanding. It is not a
 transcription of that RTL: the RTL's known bugs are left out, and the
-geometry is configurable. The RTL's
-structure and latencies are the defaults, and with one request at a time the
-model takes the RTL's cycles:
+geometry is configurable. The RTL's structure is the default, with the SRAM
+latencies PCACTI recommends for its macro as built at 800 MHz (read 1,
+write 4; the RTL instance still sets read 2). With one request at a time:
 
-    load hit          response 4 cycles after the request is taken
-    store hit         response 9 cycles after (lookup 4, SRAM write 5)
-    load miss         filled 28 cycles after the miss (36 with a dirty victim)
+    load hit          response 2 cycles after the request is taken
+    store hit         response 6 cycles after (lookup 2, SRAM write 4)
+    load miss         filled 24 cycles after the miss (32 with a dirty victim)
 
 Structure
 ---------
-One SRAM holds the tags, state and data of every set (`sram_bank`, read 2 /
+One SRAM holds the tags, state and data of every set (`sram_bank`, read 1 /
 write 4 by default). Two state machines share it:
 
   * the **lookup** FSM takes a request, reads its set, and in the following
@@ -93,7 +93,7 @@ class DCacheConfig:
     line_bytes: int = 64          # BLOCK_SIZE 16 words
     mshrs: int = 8                # MSHR_BUFFER_LEN
     targets_per_mshr: int = 8     # requests one entry can hold
-    sram_read_latency: int = 2    # lockup_free_cache.sv sram_bank params
+    sram_read_latency: int = 1    # PCACTI, lockup_free_cache.sv's macro as built
     sram_write_latency: int = 4
     beat_bytes: int = 8           # 64-bit memory interface
     first_beat_wait: int = 0      # memory timing (outside the scheduler)

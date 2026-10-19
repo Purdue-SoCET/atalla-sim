@@ -178,7 +178,7 @@ so the cache can work as designed:
 
 So packets without memory ops keep issuing under a miss, loads that hit are
 answered under a miss, and several misses can be outstanding. The cache has
-one fill engine, so fills complete one after another, 28 cycles apart.
+one fill engine, so fills complete one after another, 24 cycles apart.
 
 ### Values
 
@@ -368,16 +368,17 @@ what they claim* below.
 
 | kernel | cycles |
 |---|---:|
-| `add`, `relu`, `sigmoid` | 2,172 / 2,105 / 441 |
-| `layernorm_param`, `maxpool` | 4,034 / 1,415 |
-| `gemm`, `gemm_tiled` | 2,584 / 1,397 |
-| `gemms`, `gemms_function`, `gemms_pipelined`, `…_loop_unroll` | 9,552 / 8,679 / 8,661 / 8,829 |
-| `conv`, `conv_tiled`, `conv_pipelined`, `conv_unrolled_pipelined` | 3,160 / 1,604 / 3,181 / 3,195 |
-| `softmax`, `attention`, `flash_attention` | 2,694 / 65,654 / 20,795 |
+| `add`, `relu`, `sigmoid` | 2,106 / 2,038 / 395 |
+| `layernorm_param`, `maxpool` | 4,007 / 1,360 |
+| `gemm`, `gemm_tiled` | 2,502 / 1,341 |
+| `gemms`, `gemms_function`, `gemms_pipelined`, `…_loop_unroll` | 9,398 / 8,503 / 8,503 / 8,698 |
+| `conv`, `conv_tiled`, `conv_pipelined`, `conv_unrolled_pipelined` | 3,061 / 1,537 / 3,084 / 3,100 |
+| `softmax`, `attention`, `flash_attention` | 2,656 / 63,573 / 20,654 |
 
 Cycle counts are with the default platform: the MEISSA array, 16 lanes,
-DRAM latency 6, 8-byte DRAM requests, and a cold instruction cache fetching
-over the shared DRAM channel. Against the functional sim's own sequential fp32
+DRAM latency 6, 8-byte DRAM requests, PCACTI's SRAM latencies at 800 MHz
+(scratchpad read 2 / write 1, data cache 1 / 4, transpose 1 / 1), and a
+cold instruction cache fetching over the shared DRAM channel. Against the functional sim's own sequential fp32
 sums, `softmax`'s outputs differ by at most 2 BF16 steps.
 
 **C programs.** They go straight from the compiler to atalla-sim:
@@ -456,23 +457,23 @@ bits, otherwise `lui.s` then `addi.s`.
 status holding registers. It is what the RTL's `rtl/modules/scheduler/dcache/`
 sets out to be, without its known bugs, and its geometry is configurable (`DCacheConfig`):
 
-| parameter | default (the RTL's) |
+| parameter | default |
 |---|---|
-| size, ways, line | 4 KB, 4, 64 B (16 sets) |
-| MSHRs, targets per MSHR | 8, 8 |
-| SRAM read / write latency | 2 / 4 (`sram_bank`) |
+| size, ways, line | 4 KB, 4, 64 B (16 sets), the RTL's |
+| MSHRs, targets per MSHR | 8, 8, the RTL's |
+| SRAM read / write latency | 1 / 4 (`sram_bank`): PCACTI's for the RTL's single 16 × 2144 b macro at 800 MHz; the RTL instance sets 2 / 4 |
 | memory | 64-bit beats; on the platform, bursts on the shared DRAM channel (see Platform); alone, first-beat and write latency are parameters, 0 by default |
 
 - **Policy:** write-back, write-allocate; an invalid way, else tree
   pseudo-LRU.
 - **Lookups** take one request at a time over a valid/ready port. Answers:
-  load hit in 4 cycles, store hit in 9, store miss at once, load miss
+  load hit in 2 cycles, store hit in 6, store miss at once, load miss
   `miss` then `fill` with the data, `retry` when no MSHR or target slot is
   free.
 - **Fills** serve the MSHRs oldest first: read the set, invalidate the
   chosen way, burst the line in, write back a dirty victim, write the line
-  with the MSHR's stores applied in order, answer its loads. 28 cycles from
-  the miss, 36 with a dirty victim.
+  with the MSHR's stores applied in order, answer its loads. 24 cycles from
+  the miss, 32 with a dirty victim.
 - Lookups have priority on the SRAM, but a fill gets it in the cycle a
   lookup's read completes, so it can't be starved.
 

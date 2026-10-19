@@ -39,7 +39,7 @@ def _baseline() -> Dict[str, int]:
         "spad_num_banks": 32,
         "spad_bank_size": 128,
         "spad_read_latency": 2,
-        "spad_write_latency": 2,
+        "spad_write_latency": 1,
         "spad_frontend_queue_size": 4,
         "backend_dram_latency": 24,
         "backend_dram_q_depth": 16,

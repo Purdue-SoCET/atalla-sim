@@ -65,10 +65,11 @@ layer; callers compute `base_sp` and `base_dram` themselves.
 
 Matched to the RTL scratchpad (atalla `transpose_integration`, b1ba35ff) and
 checked against a Questa run of it by `tests/memory/test_scratchpad_rtl_timing.py`
-— every bank enable and every response cycle. Per pad:
+— every bank enable and every response cycle. Per pad, with the default bank
+latencies (read 2, write 1):
 
 ```
-  accept ──2──► bank enable ──3──► done ──2──► data at the requester
+  accept ──2──► bank enable ──2──► done ──2──► data at the requester
   (head)        (scpad_cntrl)      (sram_bank)       (rxbar, tail)
 ```
 
@@ -76,15 +77,24 @@ checked against a Questa run of it by `tests/memory/test_scratchpad_rtl_timing.p
 |---|---|---|
 | requests accepted | one a cycle, from the frontend or the backend | same; the first caller of the cycle wins (the RTL grants the backend) |
 | stall | either controller FIFO full (32 deep) stalls both directions | same; `spad_frontend_queue_size` sets the depth |
-| uncontended read | data 7 cycles after acceptance | same |
-| reads back to back | one row every 3 cycles | same |
-| writes back to back | one row every 3 cycles, alongside reads | same |
+| uncontended read | data 2 + read latency + 2 cycles after acceptance | same: 6 |
+| reads back to back | one row every read latency cycles | same: 2 |
+| writes back to back | one row every write latency cycles, alongside reads | same: 1 |
 | write lands | on the enable's edge, 2 after acceptance | same |
 
-The 3-cycle row interval is `sram_bank`'s: an access holds a bank busy until its
-done (latency 2 + 1), and the bank ignores enables while busy. The shared model
-is `memory/sram_bank.py`. There is no crossbar any more: the RTL's `wxbar` and
-`rxbar` are FIFO pass-throughs, so the model has none and no swizzle.
+The row interval is `sram_bank`'s: an access holds a bank busy until its
+done, and the bank ignores enables while busy. The shared model is
+`memory/sram_bank.py`.
+
+**Bank latencies.** The defaults, read 2 and write 1, are PCACTI's
+recommendation for `body.sv`'s 8T 4096 × 16 array at 800 MHz in FreePDK45
+(VTG cells). The RTL instance still sets 2 / 2. `sram_bank.sv` also takes
+one cycle more than its setting for anything above 1 (a setting of 2
+behaves as 3); the model takes the setting, so the RTL replay runs it at
+3 / 3. Set them with `spad_read_latency` / `spad_write_latency`.
+
+There is no crossbar any more: the RTL's `wxbar` and `rxbar` are FIFO
+pass-throughs, so the model has none and no swizzle.
 
 The intended size is 4 pads x 0.5 MB = 2 MB, which is what the platform builds.
 The RTL's `scpad_params.svh` on `transpose_integration` has `SCPAD_SIZE_BYTES`

@@ -33,5 +33,6 @@ def test_refused_requests_are_not_lost():
         spad.tick(cycle)
         cycle += 1
     assert [spad.read_row_now(s, tile_id=0) for s in range(6)] == rows
-    # one write enable every 3 cycles, each 2 after its acceptance
+    # one row every 3 cycles: with one queue slot, a row is accepted the cycle
+    # after the previous one reaches the banks, 2 after its acceptance
     assert cycle == 2 + 3 * 5 + 1

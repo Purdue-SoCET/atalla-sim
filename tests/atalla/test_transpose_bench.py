@@ -2,9 +2,9 @@
 
 The expected counts are built from the unit's own costs, which match the RTL
 cycle for cycle (test_transpose_rtl_trace.py), not read back off a run:
-9 cycles per row pushed (accept, 3 in the Clos network, 5 until the bank's
-write done) and 8 per column popped (POPPING, 3 until read done, 3 in the
-network, DONE). A pop always drains all 32 columns, so it costs 256 cycles
+5 cycles per row pushed (accept, 3 in the Clos network, 1 until the bank's
+write done) and 6 per column popped (POPPING, 1 until read done, 3 in the
+network, DONE). A pop always drains all 32 columns, so it costs 192 cycles
 whatever the tile height.
 Every bench also checks the transposed data, so these are correctness tests
 too.
@@ -15,18 +15,20 @@ from atalla.transpose_bench import run_spad_bench, run_vrf_bench
 from vector_core.transpose import (
     CLOS_LATENCY, SRAM_READ_LATENCY, SRAM_WRITE_LATENCY, bank_done_delay)
 
-#: A row's cost in the transpose unit (9), and a full tile's 32 columns (256);
+#: A row's cost in the transpose unit (5), and a full tile's 32 columns (192);
 #: see push_cycles / column_cycles in tests/vector_core/test_transpose_unit.py.
 PUSH = 1 + CLOS_LATENCY + bank_done_delay(SRAM_WRITE_LATENCY)
 DRAIN = 32 * (1 + bank_done_delay(SRAM_READ_LATENCY) + CLOS_LATENCY + 1)
-#: Spad bench, overlapped. Lead: the first load's 7-cycle scratchpad read,
+#: Spad bench, overlapped. Lead: the first load's 6-cycle scratchpad read,
 #: a cycle for the VLSU to write the row back, a cycle to issue the push.
 #: Tail: the last column's store is issued the cycle after its writeback and
 #: reaches the banks 2 cycles after the pad accepts it.
-LOAD_LEAD = 9
+LOAD_LEAD = 8
 STORE_TAIL = 3
-#: A pad direction takes one row every 3 cycles (sram_bank read/write 2).
-ROW_INTERVAL = 3
+#: A pad reads one row every 2 cycles and writes one every cycle (sram_bank
+#: read 2, write 1).
+READ_INTERVAL = 2
+WRITE_INTERVAL = 1
 
 
 @pytest.mark.parametrize("rows", [1, 8, 32])
@@ -43,8 +45,8 @@ def test_vrf_bench_costs_the_unit_and_nothing_more(rows):
 
 @pytest.mark.parametrize("rows", [1, 8, 32])
 def test_spad_bench_hides_loads_and_stores_under_the_unit(rows):
-    """Loads arrive every 3 cycles and stores leave every 3 -- one row per
-    sram_bank access -- both faster than the unit's 9 a row and 8 a column,
+    """Loads arrive every 2 cycles and stores leave every cycle -- one row per
+    sram_bank access -- both faster than the unit's 5 a row and 6 a column,
     so with overlap only the first load and the last store show."""
     r = run_spad_bench(rows, load_window=4)
     assert r.cycles == LOAD_LEAD + PUSH * rows + DRAIN + STORE_TAIL
@@ -52,12 +54,12 @@ def test_spad_bench_hides_loads_and_stores_under_the_unit(rows):
 
 @pytest.mark.parametrize("rows", [1, 8, 32])
 def test_spad_bench_serialized_adds_every_phase(rows):
-    """One phase at a time: a row loaded every 3 cycles (3M + 6, the last
-    one's read latency included), the transpose, then 32 column stores at
-    one every 3 cycles."""
+    """One phase at a time: a row loaded every 2 cycles, the last one's lead
+    included (2M + 6); the transpose; then 32 column stores at one a cycle,
+    the last one's tail included (31 + 3)."""
     r = run_spad_bench(rows, overlap=False)
-    load = ROW_INTERVAL * rows + 6
-    store = ROW_INTERVAL * 32
+    load = READ_INTERVAL * (rows - 1) + LOAD_LEAD
+    store = WRITE_INTERVAL * 31 + STORE_TAIL
     assert r.cycles == load + PUSH * rows + DRAIN + store
     lo, hi = r.phases["load"]
     assert hi - lo + 1 == load

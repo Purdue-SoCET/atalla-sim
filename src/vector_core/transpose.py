@@ -26,20 +26,20 @@ The FSM, one push and one column at a time, as the RTL has it
                   with two latches between them. It leaves the third stage on
                   the edge that ends the wait, which is the write enable's edge
                   for a row and the edge into DONE for a column.
-    BUSY_WRITE /  wait for the bank's done flag. sram_bank raises it one cycle
-    WAIT_SRAM     after the enable for a latency of 0 or 1, and latency + 1
-                  cycles after for anything longer.
+    BUSY_WRITE /  wait for the bank's done flag. sram_bank raises it latency
+    WAIT_SRAM     cycles after the enable (one cycle for a latency of 0 or 1).
     DONE          holds valid_out until the consumer takes the column. After
                   the last column the unit returns to IDLE; one pop request
                   drains the whole tile.
 
-    push    = 1 + clos_latency + done(write_latency)   = 1 + 3 + 5 =  9 cycles
-    column  = 1 + done(read_latency) + clos_latency + 1 = 1 + 3 + 3 + 1 = 8
-    drain   = 1 (IDLE sees the pop) + 32 columns          = 257 cycles
+    push    = 1 + clos_latency + done(write_latency)   = 1 + 3 + 1 =  5 cycles
+    column  = 1 + done(read_latency) + clos_latency + 1 = 1 + 1 + 3 + 1 = 6
+    drain   = 1 (IDLE sees the pop) + 32 columns          = 193 cycles
 
-The bank latencies are sram_bank's defaults (read 2, write 4): the unit
-instantiates its banks without overriding them. Whether that is intended is
-an open question for the RTL; the sim matches it.
+The bank latencies are PCACTI's recommendation for its 32 x 16 banks at
+800 MHz: read 1, write 1. transpose_unit.sv sets neither, so today its banks
+inherit sram_bank's defaults, read 2 and write 4; the RTL replay in
+tests/vector_core/ runs the model with those (3 / 5, see memory/sram_bank.py).
 
 `count` is one counter shared by the two directions, as in the RTL: a pop
 rewinds it, so the next tile starts at row 0 while rows M..N-1 still hold the
@@ -68,9 +68,9 @@ Time = float
 
 #: Cycles the FSM spends in WAIT_CLOS_WRITE / WAIT_CLOS_READ.
 CLOS_LATENCY = 3
-#: sram_bank parameter defaults, which transpose_unit.sv does not override.
-SRAM_READ_LATENCY = 2
-SRAM_WRITE_LATENCY = 4
+#: PCACTI's bank latencies (transpose_unit.sv doesn't set them yet).
+SRAM_READ_LATENCY = 1
+SRAM_WRITE_LATENCY = 1
 #: Banks, and therefore the tile edge and the vector length.
 TRANSPOSE_VEC_LEN = 32
 

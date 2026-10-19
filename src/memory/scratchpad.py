@@ -6,7 +6,7 @@ pad the RTL is
     frontend --+
                +-- head --> wxbar --> scpad_cntrl --> 32 x sram_bank --> rxbar --> tail
     backend  --+   (1/cycle,   (FIFO)   (read FIFO,      (read 2,          (FIFO)
-                    backend             write FIFO,       write 2)
+                    backend             write FIFO,       write 1)
                     first)              32 deep each)
 
 and there is no crossbar: wxbar and rxbar are FIFO pass-throughs, so lane i
@@ -21,17 +21,21 @@ when its data comes back -- without modelling each FIFO:
     accepted.
   * Reads and writes are separate channels (scpad_cntrl's two FIFOs), each a
     row-wide sram_bank: one enable when the channel is not busy, then busy
-    until done -- done_delay(2) = 3 cycles -- so each direction does at most
-    one row every 3 cycles, and the two run side by side.
+    until done -- the latency, 2 cycles for a read and 1 for a write by
+    default -- so a pad reads at most one row every 2 cycles and writes one
+    every cycle, the two side by side.
   * The banks are read and written on the enable's edge; a read and a write
     of one row on the same edge read the old row.
-  * Read data reaches the requester EGRESS_CYCLES (2) after done: 5 cycles
-    after the enable, 7 after acceptance for an uncontended read.
+  * Read data reaches the requester EGRESS_CYCLES (2) after done: 4 cycles
+    after the enable, 6 after acceptance for an uncontended read.
 
-Measured against a Questa run of the RTL scratchpad -- single reads and
-writes, back-to-back streams of each, interleaved traffic, read-after-write,
-and backend DMA loads and stores -- this reproduces every accept, bank enable
-and response cycle; tests/memory/test_scratchpad_rtl_timing.py replays them.
+The latencies are PCACTI's recommendation for body.sv's 8T array at
+800 MHz (read 2, write 1); the RTL instance still sets 2 / 2. Measured
+against a Questa run of that RTL scratchpad -- single reads and writes,
+back-to-back streams of each, interleaved traffic, read-after-write, and
+backend DMA loads and stores -- this reproduces every accept, bank enable
+and response cycle; tests/memory/test_scratchpad_rtl_timing.py replays them,
+with 3 / 3 for the RTL's 2 / 2 (memory/sram_bank.py says why).
 What it approximates: when the frontend and the backend both offer a request
 in one cycle, the RTL grants the backend; here the first caller of the cycle
 wins (the frontend's bridge runs earlier in the cycle). Queue capacity counts
@@ -114,7 +118,7 @@ class Scratchpad(Clocked):
         num_banks: int = 32,
         bank_size: int = 32,
         read_latency: int = 2,
-        write_latency: int = 2,
+        write_latency: int = 1,
         elem_bytes: int = 2,
         queue_depth: int = QUEUE_DEPTH,
         num_tiles: int = 2,

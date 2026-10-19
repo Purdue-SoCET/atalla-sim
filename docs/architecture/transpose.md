@@ -55,32 +55,34 @@ The RTL handles one row or one column at a time, and every step waits on a
 counter or a bank's done flag:
 
 ```
-  push   IDLE (accept) -> WAIT_CLOS_WRITE x3 -> BUSY_WRITE x5 -> IDLE         9
-  pop    IDLE (pop seen) -> POPPING -> WAIT_SRAM x3 -> WAIT_CLOS_READ x3 -> DONE
+  push   IDLE (accept) -> WAIT_CLOS_WRITE x3 -> BUSY_WRITE x1 -> IDLE         5
+  pop    IDLE (pop seen) -> POPPING -> WAIT_SRAM x1 -> WAIT_CLOS_READ x3 -> DONE
                               ^                                            |
-                              +----------- next column, once taken --------+   8
+                              +----------- next column, once taken --------+   6
 ```
 
 | step | cycles | why |
 |---|---|---|
 | accept | 1 | a push is taken in IDLE (`ready_in = state == IDLE`) |
 | `WAIT_CLOS_*` | 3 | `lat_count` 0..2: the vector crosses the 3-stage Clos pipe; it leaves on the write enable's edge |
-| `BUSY_WRITE` | 5 | wait for the banks' write done |
+| `BUSY_WRITE` | 1 | wait for the banks' write done |
 | `POPPING` | 1 | read enable |
-| `WAIT_SRAM` | 3 | wait for the banks' read done |
+| `WAIT_SRAM` | 1 | wait for the banks' read done |
 | `DONE` | 1+ | `valid_out` held until the consumer takes the column |
 
 The bank waits come from `sram_bank.sv` — modelled once, in
-`memory/sram_bank.py`, and shared with the scratchpad — which raises done one
-cycle after the enable for a latency of 0 or 1, and `latency + 1` cycles after
-for anything longer. `transpose_unit.sv` instantiates its banks without overriding the
-defaults — read 2, write 4 — hence 3 and 5. Those defaults are the model's too;
-whether the RTL means them is an open question for the RTL.
+`memory/sram_bank.py`, and shared with the scratchpad — which raises done
+`latency` cycles after the enable (one cycle for 0 or 1). The model's
+latencies, read 1 and write 1, are PCACTI's recommendation for the 32 × 16
+banks at 800 MHz. `transpose_unit.sv` doesn't set them yet, so its banks
+inherit `sram_bank`'s defaults, read 2 and write 4 — which `sram_bank.sv`
+runs as 3 and 5, one more than the setting; the RTL replay runs the model
+at 3 / 5.
 
-So a row costs **9** cycles, a column **8**, and one pop drains the tile:
-1 cycle for IDLE to see the pop, then 32 columns — **257** cycles to the end of
-the last `DONE`, the last column handed over 256 cycles after the pop is
-taken. An M x 32 tile is 9M + 257 cycles in the unit. All three latencies are
+So a row costs **5** cycles, a column **6**, and one pop drains the tile:
+1 cycle for IDLE to see the pop, then 32 columns — **193** cycles to the end
+of the last `DONE`, the last column handed over 192 cycles after the pop is
+taken. An M x 32 tile is 5M + 193 cycles in the unit. All three latencies are
 constructor parameters; the tests' `push_cycles` and `column_cycles`
 (`tests/vector_core/test_transpose_unit.py`) give the costs for whatever they
 are set to.
@@ -138,7 +140,7 @@ vc.enqueue_scheduler_instruction(
 
 One slot per packet, like the GSAU. Its ready is the RTL's `ready_in`: idle.
 A push is refused while the unit is busy and stays in its packet, so the
-scheduler backpressures naturally — pushes issue every 9 cycles at best. A pop is
+scheduler backpressures naturally — pushes issue every 5 cycles at best. A pop is
 one instruction for the whole tile — the unit drains all VEC_LEN columns off
 a single request, so there is no per-column handshake to issue against; the
 destinations ride along and come back attached to each column's writeback.
@@ -178,7 +180,7 @@ That testbench asserts `pop_req` once per column. The RTL drains the whole
 tile off one request, so the per-column requests are redundant, and the one
 still high when the FSM returns to IDLE starts a second, unchecked drain — 63
 of the 64 tests do the whole drain twice. The data checks still pass; the
-next test just waits ~257 cycles for the extra drain.
+next test just waits ~257 cycles (at the RTL's latencies) for the extra drain.
 
 ## What the model leaves out
 

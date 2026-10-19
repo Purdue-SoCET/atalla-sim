@@ -195,7 +195,7 @@ class SysArrTPUExperimentConfig:
     spad_num_banks: Optional[int] = None      # None: one bank per lane of the tile
     spad_bank_size: Optional[int] = None      # None: max(128, 4 * tile)
     spad_read_latency: int = 2
-    spad_write_latency: int = 2
+    spad_write_latency: int = 1
     spad_frontend_queue_size: int = 4
     backend_dram_latency: int = 24
     backend_dram_q_depth: int = 16

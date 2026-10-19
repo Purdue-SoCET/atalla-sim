@@ -46,27 +46,27 @@ python tools/run_kernel.py relu.c --golden
 4 × 32 BF16 tile. The report, annotated:
 
 ```
-relu.c: 830 cycles
+relu.c: 768 cycles
 
 where the cycles went:                       every cycle in exactly one bucket
-  frontend:icache             313   37.7%    the instruction cache starts empty
-  halt:drain                  188   22.7%    waiting for the last stores at the end
-  frontend:refill              96   11.6%    refetching after a taken branch
-  issue                        86   10.4%    a packet issued
-  stall:hazard:scalar_load     74    8.9%    the next packet waited on a load's result
+  frontend:icache             318   41.4%    the instruction cache starts empty
+  halt:drain                  154   20.1%    waiting for the last stores at the end
+  frontend:refill              98   12.8%    refetching after a taken branch
+  issue                        86   11.2%    a packet issued
+  stall:hazard:scalar_load     52    6.8%    the next packet waited on a load's result
   ...
 
 issue: 86 packets, slots 28.5% full          how much of each 4-slot packet was used
 
 unit busy:                                   cycles each unit had work
-  dram_channel        312   37.6%
-  dcache              304   36.6%
-  sdma0               118   14.2%
+  dram_channel        312   40.6%
+  dcache              235   30.6%
+  sdma0               105   13.7%
   ...
 
-DRAM: 2496 bytes in 312 bursts, 3.01 B/cycle of 8 peak
-  icache      216 bursts     1728 bytes  waited 11 cycles
-  scpad0       64 bursts      512 bytes  waited 77 cycles    contention for the shared channel
+DRAM: 2496 bytes in 312 bursts, 3.25 B/cycle of 8 peak
+  icache      216 bursts     1728 bytes  waited 12 cycles
+  scpad0       64 bursts      512 bytes  waited 68 cycles    contention for the shared channel
 
 reference result: PASS -- matches the numpy reference
 against the functional sim (lanes reduction order):

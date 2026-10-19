@@ -223,30 +223,30 @@ def base(reg, addr):
 
 def test_load_hit_latency():
     """A load in EX in cycle e goes straight to the cache (the queue is empty):
-    the hit answers in e+4, so x5 is in the EX/WB latch in e+5."""
+    the hit answers in e+2, so x5 is in the EX/WB latch in e+3."""
     c = core_for(program(base(1, 0x1000)[0], base(1, 0x1000)[1], lw(5, 1, 8), HALT),
                  data=DATA)
     c.dcache.warm([0x1000])
     c.run_until_done()
     e = issue_cycles(c)[40] + 1
-    assert writes_to(c, 5) == [(e + 5, 0x102)]
+    assert writes_to(c, 5) == [(e + 3, 0x102)]
 
 
 def test_load_miss_latency():
-    """A miss evaluated in e+4 fills 28 cycles later; the load writes back
+    """A miss evaluated in e+2 fills 24 cycles later; the load writes back
     from the fill cycle."""
     c = core_for(program(base(1, 0x1000)[0], base(1, 0x1000)[1], lw(5, 1, 8), HALT),
                  data=DATA)
     c.run_until_done()
     e = issue_cycles(c)[40] + 1
-    assert writes_to(c, 5) == [(e + 4 + 28 + 1, 0x102)]
+    assert writes_to(c, 5) == [(e + 2 + 24 + 1, 0x102)]
 
 
 def test_misses_do_not_block_issue():
     """Two loads that miss to different lines, then independent ALU work: the
     ALU packets issue back to back while both misses are outstanding. The
     second miss's lookup overlaps the first fill, so its fill starts the
-    cycle after the first's and completes exactly 28 later; a blocking LSU
+    cycle after the first's and completes exactly 24 later; a blocking LSU
     would only start the second lookup after the first fill."""
     prog = program(base(1, 0x1000)[0], base(1, 0x1000)[1],
                    base(2, 0x2000)[0], base(2, 0x2000)[1],
@@ -260,7 +260,7 @@ def test_misses_do_not_block_issue():
     assert alu[-1] < writes_to(c, 5)[0][0]           # all before the first fill
     assert c.dcache.stats["max_mshrs"] == 2
     first, second = writes_to(c, 5)[0][0], writes_to(c, 6)[0][0]
-    assert second - first == 28
+    assert second - first == 24
     assert (c.scalar_reg(5), c.scalar_reg(6)) == (0x100, 0x200)
 
 

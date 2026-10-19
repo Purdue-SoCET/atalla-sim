@@ -88,41 +88,40 @@ def test_pushed_rows_pop_back_as_columns():
     assert [e["data"] for e in drv.columns] == transposed(rows, N)
 
 
-def test_a_row_costs_9_cycles_and_a_column_8():
-    """The RTL's numbers, with its bank latencies (read 2, write 4):
-    push   = accept + 3 in the network + 5 until the bank's write done
-    column = POPPING + 3 until read done + 3 in the network + DONE.
+def test_a_row_costs_5_cycles_and_a_column_6():
+    """With PCACTI's bank latencies (read 1, write 1):
+    push   = accept + 3 in the network + 1 until the bank's write done
+    column = POPPING + 1 until read done + 3 in the network + DONE.
     A column is taken in the cycle it reaches DONE, so a full drain hands the
-    last one over 32 * 8 cycles after the pop is taken."""
+    last one over 32 * 6 cycles after the pop is taken."""
     unit = TransposeUnit()
-    assert (SRAM_READ_LATENCY, SRAM_WRITE_LATENCY, CLOS_LATENCY) == (2, 4, 3)
-    assert push_cycles(unit) == 1 + 3 + 5 == 9
-    assert column_cycles(unit) == 1 + 3 + 3 + 1 == 8
+    assert (SRAM_READ_LATENCY, SRAM_WRITE_LATENCY, CLOS_LATENCY) == (1, 1, 3)
+    assert push_cycles(unit) == 1 + 3 + 1 == 5
+    assert column_cycles(unit) == 1 + 1 + 3 + 1 == 6
     drv = Driver(unit)
 
     for row in tile(N):
-        assert drv.push(row) == 9
+        assert drv.push(row) == 5
 
-    assert drv.drain() == N * 8
+    assert drv.drain() == N * 6
 
 
 def test_latencies_are_parameters():
     unit = TransposeUnit(vec_len=4, clos_latency=4, sram_read_latency=1,
                          sram_write_latency=6)
-    assert push_cycles(unit) == 1 + 4 + 7
+    assert push_cycles(unit) == 1 + 4 + 6
     assert column_cycles(unit) == 1 + 1 + 4 + 1
     drv = Driver(unit)
-    assert drv.push([1.0, 2.0, 3.0, 4.0]) == 12
+    assert drv.push([1.0, 2.0, 3.0, 4.0]) == 11
     for row in tile(3, 4):
         drv.push(row)
     assert drv.drain() == 4 * 7
 
 
-@pytest.mark.parametrize("latency,delay", [(0, 1), (1, 1), (2, 3), (4, 5)])
+@pytest.mark.parametrize("latency,delay", [(0, 1), (1, 1), (2, 2), (4, 4)])
 def test_bank_done_follows_sram_bank(latency, delay):
-    """sram_bank raises done one cycle after the enable for a latency of 0 or
-    1, and latency + 1 cycles after for anything longer -- so 1 -> 2 costs
-    two extra cycles, not one."""
+    """sram_bank raises done `latency` cycles after the enable, and one cycle
+    after for a latency of 0."""
     assert bank_done_delay(latency) == delay
 
 
@@ -248,20 +247,20 @@ def _walk(unit, cycles, start=0):
 
 
 def test_the_fsm_walks_the_states_the_doc_names():
-    unit = TransposeUnit(vec_len=4)
+    unit = TransposeUnit(vec_len=4, sram_read_latency=2, sram_write_latency=4)
     assert unit.state == IDLE
     assert unit.push([1.0] * 4)
 
     # 3 cycles in the network, the write enable on the last, then BUSY_WRITE
-    # until the bank says done (5 cycles for a latency of 4).
-    assert _walk(unit, 9) == \
-        [WAIT_CLOS_WRITE] * 3 + [BUSY_WRITE] * 5 + [IDLE]
+    # until the bank says done (4 cycles for a latency of 4).
+    assert _walk(unit, 8) == \
+        [WAIT_CLOS_WRITE] * 3 + [BUSY_WRITE] * 4 + [IDLE]
 
     assert unit.pop()
-    # POPPING enables the read, WAIT_SRAM waits for done (3 cycles for a
+    # POPPING enables the read, WAIT_SRAM waits for done (2 cycles for a
     # latency of 2), the column crosses the network, and DONE holds it.
-    assert _walk(unit, 9, start=9) == \
-        [POPPING] + [WAIT_SRAM] * 3 + [WAIT_CLOS_READ] * 3 + [DONE] * 2
+    assert _walk(unit, 9, start=8) == \
+        [POPPING] + [WAIT_SRAM] * 2 + [WAIT_CLOS_READ] * 3 + [DONE] * 3
 
 
 def test_busy_write_lasts_until_the_bank_is_done():

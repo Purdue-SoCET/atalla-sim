@@ -59,7 +59,8 @@ def observed(unit):
 def test_every_cycle_of_the_rtl_testbench_matches():
     trace = load_trace()
     assert len(trace) > 40_000, "the whole testbench, not an excerpt"
-    unit = TransposeUnit()
+    # The RTL's banks inherit sram_bank's 2 / 4, which it runs as 3 / 5.
+    unit = TransposeUnit(sram_read_latency=3, sram_write_latency=5)
     columns = 0
     for rtl in trace:
         cyc = rtl["cycle"]

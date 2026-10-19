@@ -32,8 +32,9 @@ def load_trace():
 
 
 def _replay(trace):
-    spad = Scratchpad(num_banks=32, bank_size=64, read_latency=2,
-                      write_latency=2, elem_bytes=2, num_tiles=1)
+    # The RTL sets 2 / 2, which sram_bank.sv runs as 3 / 3.
+    spad = Scratchpad(num_banks=32, bank_size=64, read_latency=3,
+                      write_latency=3, elem_bytes=2, num_tiles=1)
     seen = {"read": [], "write": [], "fe_res": [], "be_res": []}
     spad.trace_hook = lambda e: seen[e["kind"]].append(e["cycle"])
     be_slot = 0

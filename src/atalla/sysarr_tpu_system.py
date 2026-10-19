@@ -579,7 +579,7 @@ def build_tpu_platform(
     spad_bank_size: int = SPAD_BANK_SIZE,
     spad_num_tiles: int = SPAD_NUM_PADS,
     spad_read_latency: int = 2,
-    spad_write_latency: int = 2,
+    spad_write_latency: int = 1,
     spad_frontend_queue_size: int = 32,
     dram_block_bytes: int = 256,
     backend_dram_latency: Optional[int] = None,
@@ -593,9 +593,10 @@ def build_tpu_platform(
 ) -> TPUPlatform:
     """Build the TPU platform.
 
-    The scratchpad defaults are the RTL's: sram_bank read and write latency 2
-    (scratchpad body.sv), 32-deep controller queues (scpad_cntrl.sv), and no
-    crossbar. spad_frontend_queue_size sets that queue depth.
+    The scratchpad defaults are the RTL's structure -- 32-deep controller
+    queues (scpad_cntrl.sv) and no crossbar -- with PCACTI's sram_bank
+    latencies for body.sv's array, read 2 and write 1.
+    spad_frontend_queue_size sets that queue depth.
     """
     eq, clk, sim = build_sim()
     vc = VectorCore(

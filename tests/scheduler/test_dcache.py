@@ -1,17 +1,17 @@
 """The scalar core's lockup-free data cache (src/scheduler/dcache.py).
 
-Cycle expectations, default config (read 2 / write 4, 8 beats, memory free):
+Cycle expectations, default config (read 1 / write 4, 8 beats, memory free):
 a request taken in cycle a reads its set at the edge ending a; the read's
-done is visible in a+3 and the lookup evaluates in a+4. A load hit answers in
-a+4. A store hit writes at the end of a+4 and answers when the write's done
-is visible, a+9. A miss evaluated in t starts its fill in t+1:
+done is visible in a+1 and the lookup evaluates in a+2. A load hit answers in
+a+2. A store hit writes at the end of a+2 and answers when the write's done
+is visible, a+6. A miss evaluated in t starts its fill in t+1:
 
-    t+1        read the set           t+2..t+4   wait (done in t+4)
-    t+5..t+7   pick a way             t+8        invalidate it
-    t+9..t+13  wait (done in t+13)    t+14..t+21 8 beats from memory
+    t+1        read the set           t+2        its done
+    t+3..t+5   pick a way             t+6        invalidate it
+    t+7..t+10  wait (done in t+10)    t+11..t+18 8 beats from memory
     [8 cycles writing back a dirty victim]
-    t+22       write the line         t+23..t+27 wait
-    t+28       answer the loads
+    t+19       write the line         t+20..t+23 wait
+    t+24       answer the loads
 """
 import random
 
@@ -125,14 +125,14 @@ def test_plru_never_picks_the_last_used():
 # single requests: the RTL's latencies
 # ---------------------------------------------------------------------------
 
-def test_load_hit_in_4():
+def test_load_hit_in_2():
     c = make()
     c.warm([0x48])
     d = Driver(c)
     d.push(DCacheReq("ld", 0x48))
     d.drain()
     assert d.taken[0][0] == 0
-    assert d.at("ld") == 4
+    assert d.at("ld") == 2
     assert d.got("ld") == DCacheResp_("ld", 0x48, False, HIT, mem_of(0x48))
 
 
@@ -141,24 +141,24 @@ def DCacheResp_(*a):
     return DCacheResp(*a)
 
 
-def test_store_hit_in_9_and_visible_after():
+def test_store_hit_in_6_and_visible_after():
     c = make()
     c.warm([0x50])
     d = Driver(c)
     d.push(DCacheReq("st", 0x50, True, 0xAAAA0001), DCacheReq("ld", 0x50))
     d.drain()
-    assert (d.at("st"), d.got("st").kind) == (9, HIT)
-    # the load is taken in 10, once the lookup is idle and the SRAM free
-    assert d.taken[1][0] == 10
-    assert (d.at("ld"), d.got("ld").data) == (14, 0xAAAA0001)
+    assert (d.at("st"), d.got("st").kind) == (6, HIT)
+    # the load is taken in 7, once the lookup is idle and the SRAM free
+    assert d.taken[1][0] == 7
+    assert (d.at("ld"), d.got("ld").data) == (9, 0xAAAA0001)
 
 
-def test_load_miss_filled_28_after_the_miss():
+def test_load_miss_filled_24_after_the_miss():
     c = make()
     d = Driver(c)
     d.push(DCacheReq("ld", 0x48))
     d.drain()
-    assert d.at("ld") == 4 + 28
+    assert d.at("ld") == 2 + 24
     assert d.got("ld") == DCacheResp_("ld", 0x48, False, FILL, mem_of(0x48))
     d.push(DCacheReq("ld2", 0x7C))           # same line: now a hit
     d.drain()
@@ -170,7 +170,7 @@ def test_store_miss_is_answered_at_once_and_allocates():
     d = Driver(c)
     d.push(DCacheReq("st", 0x454, True, 0xBBBB0002))
     d.run(cycles=5)
-    assert (d.at("st"), d.got("st").kind) == (4, STORE_ACK)
+    assert (d.at("st"), d.got("st").kind) == (2, STORE_ACK)
     d.drain()
     d.push(DCacheReq("ld", 0x454), DCacheReq("ld2", 0x450))
     d.drain()
@@ -188,7 +188,7 @@ def test_memory_port_during_a_fill():
         d.step()
         if c.out_mem:
             reads.append((d.cycle - 1, c.out_mem))
-    assert reads == [(t, ("read", 0x40, t - 18)) for t in range(18, 26)]
+    assert reads == [(t, ("read", 0x40, t - 13)) for t in range(13, 21)]
 
 
 def test_dirty_victim_costs_8_more_and_reaches_memory():
@@ -205,8 +205,8 @@ def test_dirty_victim_costs_8_more_and_reaches_memory():
     start = d.cycle
     d.push(DCacheReq("ld", 0x40 + cfg.ways * stride))
     d.drain()
-    t = start + 4                                # the miss is evaluated here
-    assert d.at("ld") == t + 28 + 8
+    t = start + 2                                # the miss is evaluated here
+    assert d.at("ld") == t + 24 + 8
     assert c.memory.read(victim_addr) == 0x1000 + victim
     assert c.stats["writebacks"] == 1 and c.stats["evictions"] == 1
 
@@ -217,7 +217,7 @@ def test_memory_latency_parameters():
     d = Driver(c)
     d.push(DCacheReq("ld", 0x48))
     d.drain()
-    assert d.at("ld") == 4 + 28 + 5
+    assert d.at("ld") == 2 + 24 + 5
 
 
 # ---------------------------------------------------------------------------
@@ -232,11 +232,11 @@ def test_hit_under_miss():
     d.drain()
     assert d.got("hit").kind == HIT and d.got("hit").data == mem_of(0x844)
     assert d.at("hit") < d.at("miss")
-    # In 5 the hit and the fill's set read both want the SRAM; the lookup has
-    # priority, so the hit is taken in 5 and answers in 9, and the fill reads
-    # in 8, when the hit's read is done: 3 cycles late.
-    assert d.taken[1][0] == 5 and d.at("hit") == 9
-    assert d.at("miss") == 4 + 28 + 3
+    # In 3 the hit and the fill's set read both want the SRAM; the lookup has
+    # priority, so the hit is taken in 3 and answers in 5, and the fill reads
+    # in 4, when the hit's read is done: 1 cycle late.
+    assert d.taken[1][0] == 3 and d.at("hit") == 5
+    assert d.at("miss") == 2 + 24 + 1
 
 
 def test_two_misses_overlap_and_fill_in_order():

@@ -326,5 +326,5 @@ def test_transpose_pushes_rows_and_pops_columns():
     assert (st["transpose_pushes"], st["transpose_pops"]) == (32, 32)
     t = {p.pc: cy for cy, p in plat.core.issued}
     first_push = min(cy for pc, cy in t.items() if pc >= 20 * (len(pk) - 64))
-    # 32 pushes at 9 cycles and a 257-cycle drain, at least
-    assert plat.cycle - first_push >= 32 * 9 + 32 * 8
+    # 32 pushes at 5 cycles and a 193-cycle drain, at least
+    assert plat.cycle - first_push >= 32 * 5 + 32 * 6

@@ -2,11 +2,13 @@
 
 rtl/modules/common/memory/sram_bank.sv (atalla, transpose_integration
 b1ba35ff). The scratchpad pads, the transpose unit, the systolic-array
-buffers and the dcache all instantiate it, each with its own latencies:
+buffers and the dcache all instantiate it, each with its own latencies.
+The defaults here are the ones PCACTI recommends at 800 MHz in FreePDK45
+(the VTG column, each memory in its current shape):
 
-    scratchpad (body.sv)              read 2, write 2
-    transpose unit                    read 2, write 4   (defaults, not overridden)
-    dcache                            read 2, write 4
+    scratchpad (body.sv, 8T)          read 2, write 1
+    transpose unit                    read 1, write 1
+    dcache (one 16 x 2144 b macro)    read 1, write 4
     systolic-array in/out/skew        read 1, write 1
 
 What the bank does, per direction (read: ren/rdone, write: wen/wdone):
@@ -17,12 +19,18 @@ What the bank does, per direction (read: ren/rdone, write: wen/wdone):
     same edge read the old value.
   * The latency only times the done pulse. An enable taken while idle makes
     the channel busy and raises done `done_delay(latency)` cycles later:
-    one cycle for a latency of 0 or 1, latency + 1 for anything longer.
+    `latency` cycles, and one for a latency of 0 or 1.
   * While busy the channel ignores further enables -- it does not queue
     them, and it is not pipelined. A channel takes at most one access every
     done_delay(latency) cycles; the caller must wait for !busy (the RTL
     scratchpad's controller and the transpose FSM both do).
   * Reads and writes are independent: each has its own busy and done.
+
+Where the RTL is wrong this does what was meant: sram_bank.sv loads its
+counter with LATENCY - 1 and raises done one edge after it reaches zero, so
+a latency of N >= 2 takes N + 1 cycles (a setting of 2 behaves as 3). Here
+it takes N. To reproduce a trace of today's RTL, pass N + 1 for a setting of
+N >= 2 (the RTL replays in tests/ do).
 
 SramChannel is one direction, cycle by cycle, for models that tick every
 cycle (the transpose FSM). Event-driven models use its deadline form,
@@ -33,7 +41,7 @@ cycle (the transpose FSM). Event-driven models use its deadline form,
 
 def done_delay(latency: int) -> int:
     """Cycles from an enable to its done pulse being visible."""
-    return 1 if int(latency) <= 1 else int(latency) + 1
+    return max(1, int(latency))
 
 
 class SramChannel:
@@ -52,7 +60,7 @@ class SramChannel:
         done = False
         if taken:
             self.busy = True
-            self.cnt = self.latency - 1 if self.latency > 1 else 0
+            self.cnt = self.latency - 2 if self.latency > 1 else 0
             if self.latency <= 1:
                 done, self.busy = True, False
         elif self.busy:
