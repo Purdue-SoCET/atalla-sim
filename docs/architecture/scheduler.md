@@ -188,7 +188,8 @@ document and the assembler, and otherwise the functional sim:
 | | model | RTL |
 |---|---|---|
 | load/store address | `rs1 + imm` | `imm` |
-| `jal`, `jalr` offset | bytes | × 4 |
+| branch, `jal` offset | instructions from the packet: `pc + imm × 5` | `pc + imm × 4` |
+| `jalr` offset | bytes: `rs1 + imm` | `rs1 + imm × 4` |
 | branch increment | unsigned 0..127 | sign-extended |
 | `blt`/`bge`/`bgt`/`ble` | signed (the functional sim compares unsigned) | signed |
 | scalar BF16 values | fp32 layout, BF16 in the upper half | lower half |
@@ -385,7 +386,7 @@ sums, `softmax`'s outputs differ by at most 2 BF16 steps.
 
     C --atalla_cc -p -S--> packetized assembly --src/scheduler/assembler.py--> image
 
-`third_party/aihw-ppci-compiler` (branch `atalla-shaunak`) packetizes: its
+`third_party/aihw-ppci-compiler` (branch `atalla-arch`) packetizes: its
 output is already four-slot packets, padded with `nop`, a packet per label,
 within the scheduler's slot limits. The assembler only encodes and lays out
 what it is given (a `jal x1, main; halt.s` bootstrap first, `li.s` expanded),
@@ -403,11 +404,10 @@ Against the functional sim (`tests/scheduler/test_kernels.py` lists each case):
 
 | | programs |
 |---|---|
-| identical | add, relu, maxpool, maxpool_2x2, softmax, conv_*, gemm_tiled_pipelined, gemm_tiled_pipelined_unrolled, scalar_sum_loop, sqrt_perfect_square |
-| differ: a DMA race | scpad_load_roundtrip: its vector load reads the scratchpad before its DMA has filled it (the functional sim has no timing, so it never races) |
+| identical | relu, maxpool, maxpool_2x2, softmax, layernorm, conv_*, gemm_tiled_pipelined, gemm_tiled_pipelined_unrolled, scalar_sum_loop, sqrt_perfect_square |
+| differ: a missing DMA dependency | add, scpad_load_roundtrip: a vector load reads the scratchpad before its DMA has filled it (the functional sim has no timing, so its DMAs are always done) |
 | differ: `vector_load` on a DRAM address | 9 unit tests: only the functional sim allows it; the hardware's `vreg.ld` reads the scratchpad |
 | differ: `num_cols` | gemm_tiled_baseline, in a vector register only (DRAM matches): `vreg.ld`/`vreg.st` move 32 lanes where the functional sim moves `num_cols + 1` |
-| differ: misaligned `sw.s` | layernorm (stack only): aligned down here, written at the byte address there |
 
 ### Which kernels compute what they claim
 
@@ -418,8 +418,8 @@ wrong: both simulators then run the same wrong program.
 
 | kernel | result | problem |
 |---|---|---|
-| C `add`, `scalar_sum_loop`, `sqrt_perfect_square` | correct | |
-| C `scpad_load_roundtrip` | a race, from a compiler bug | the kernel passes the same address variable to `scpad_load` and `vector_load`, which is all C can say. But a `vreg.ld` waits for a DMA only by reading the register the DMA holds (its `rs1`, which the RTL's decode 2 marks busy until the DMA is done), and the compiler doesn't model that: `scpad_load` returns nothing in its IR, the address is put in a new register for the load, and the packetizer assumes a fixed 13-cycle DMA. The load reads stale data unless the DMA finishes first, as it did with 32-byte bursts. `relu` loads its zero vector the same way, harmlessly |
+| C `scalar_sum_loop`, `sqrt_perfect_square` | correct | |
+| C `add`, `scpad_load_roundtrip` | wrong: a missing dependency (compiler) | the kernel passes the same address variable to `scpad_load` and `vector_load`, which is all C can say. But a `vreg.ld` waits for a DMA only by reading the register the DMA holds (its `rs1`, which the RTL's decode 2 marks busy until the DMA is done), and the compiler doesn't model that: `scpad_load` returns nothing in its IR, the address is put in a new register for the load, and the packetizer assumes a fixed 13-cycle DMA. The load reads stale data unless the DMA finishes first, as it does with 32-byte DRAM requests (`add` then passes) but not with the RTL's 8. `relu` loads its zero vector the same way, harmlessly |
 | C `relu`, `maxpool` | correct, by luck | they rely on a masked op leaving its masked-off lanes holding the destination's old value, which the intrinsics don't define; it works because the compiler happens to pick the kept value's register as the destination. `maxpool` also reads its zero vector before loading the scratchpad, and pools vertically only (2×1). `relu` writes −0.0 for negative inputs |
 | C `make_mask_eq_vector` | passes without testing anything | it compares a vector with itself, loaded from a DRAM address with no DMA (and from row 1: the second argument of `vector_load` is a row offset, not a row count) |
 | C `softmax`, `layernorm`, `maxpool_2x2` | wrong | known compiler bugs (reductions write lane 0 only; masked-op merge) |

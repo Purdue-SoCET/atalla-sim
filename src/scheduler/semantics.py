@@ -16,8 +16,10 @@ sim. The disagreements:
     functional sim keeps registers unsigned and compares unsigned.)
   * A branch's increment, [13:7], is unsigned 0..127, as the assembler
     encodes it. (scalar_control_unit.sv sign-extends it.)
-  * jal jumps to pc + imm and jalr to rs1 + imm, byte offsets, as the
-    assembler encodes them. (control.sv shifts both immediates left by 2.)
+  * Branches and jal count their offset in instructions (5 bytes) from the
+    packet's address: pc + imm * 5. (control.sv shifts by 2, counting 4-byte
+    steps, which can't reach code placed at 5-byte boundaries.) jalr jumps
+    to rs1 + imm, a byte offset. (control.sv shifts it left by 2.)
   * Scalar BF16 values live as fp32 bit patterns (BF16 in the upper half),
     and lhw.s / shw.s move the upper half of a register to and from a whole
     word, as in the functional sim. (The RTL keeps BF16 in the lower half
@@ -39,7 +41,7 @@ from typing import Optional
 import numpy as np
 
 from scheduler.control import ScalarOp
-from scheduler.isa import PACKET_BYTE_W, get_bits, sign_extend
+from scheduler.isa import INST_BYTES, PACKET_BYTE_W, get_bits, sign_extend
 
 MASK32 = 0xFFFFFFFF
 
@@ -172,8 +174,13 @@ class ControlOutcome:
 
 
 def branch_offset(word: int) -> int:
-    """BR-type: a signed 10-bit word offset, {[14], [39:31]}, in bytes."""
-    return sign_extend(((get_bits(word, 14, 14) << 9) | get_bits(word, 39, 31)) << 2, 12)
+    """BR-type: a signed 10-bit instruction count, {[14], [39:31]}, in bytes."""
+    return sign_extend((get_bits(word, 14, 14) << 9) | get_bits(word, 39, 31), 10) * INST_BYTES
+
+
+def jal_offset(word: int) -> int:
+    """MI-type jal: a signed 25-bit instruction count, [39:15], in bytes."""
+    return sign_extend(get_bits(word, 39, 15), 25) * INST_BYTES
 
 
 def branch_increment(word: int) -> int:
@@ -191,8 +198,7 @@ def control_outcome(op: ScalarOp, pc: int, rs1: int, rs2: int) -> ControlOutcome
         return ControlOutcome(taken, target, op.rs1,
                               u32(rs1 + branch_increment(op.word)))
     if m == "jal":
-        return ControlOutcome(True, u32(pc + sign_extend(get_bits(op.word, 39, 15), 25)),
-                              op.rd, fall)
+        return ControlOutcome(True, u32(pc + jal_offset(op.word)), op.rd, fall)
     if m == "jalr":
         return ControlOutcome(True, u32(rs1 + op.imm), op.rd, fall)
     raise ValueError("%s is not a control op" % m)

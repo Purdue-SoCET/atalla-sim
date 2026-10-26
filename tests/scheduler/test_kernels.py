@@ -92,13 +92,13 @@ _DRAM_SHORTCUT = "vreg.ld/st on a DRAM address: only the functional sim allows i
 #: vreg.ld/st move all 32 lanes where the functional sim moves num_cols + 1, so
 #: a register loaded from a 4-wide tile holds different lanes 4..31.
 _NUM_COLS = "vreg.ld/st move 32 lanes; the functional sim moves num_cols + 1"
-#: sw.s to an address that is not a multiple of 4: the data cache aligns it
-#: down (word-addressed memory), the functional sim writes at the byte address.
-#: A compiler bug: the vector load doesn't wait for the DMA that fills its
-#: scratchpad. Only a read of the DMA's rs1 waits for it, and the compiler
-#: puts the address in a different register. Correct only when the DMA wins.
-_DMA_RACE = "vector_load doesn't wait for its scpad_load (no shared register)"
-_MISALIGNED = "misaligned sw.s on the stack: aligned down here, not in the functional sim"
+#: A missing dependency (compiler): the vector load doesn't wait for the DMA
+#: that fills its scratchpad. Only a read of the DMA's rs1 waits for it, and
+#: the compiler puts the address in a different register, so the load reads
+#: stale data unless the DMA has already finished (add.c passes with 32-byte
+#: DRAM requests, fails with the RTL's 8).
+_DMA_DEPENDENCY = ("missing dependency: vector_load doesn't wait for its scpad_load "
+                   "(they share no register)")
 
 DIFFERS_FROM_FUNCTIONAL_SIM = {
     **{n: _DRAM_SHORTCUT for n in (
@@ -106,8 +106,7 @@ DIFFERS_FROM_FUNCTIONAL_SIM = {
         "make_mask_gt_scalar", "scpad_store_roundtrip", "vec_op_masked_add_scalar_lane0",
         "vec_op_masked_mul_vector_lane0", "vector_add_lane0", "vector_store_roundtrip")},
     "gemm_tiled_baseline": _NUM_COLS,
-    "layernorm": _MISALIGNED,
-    "scpad_load_roundtrip": _DMA_RACE,
+    **{n: _DMA_DEPENDENCY for n in ("add", "scpad_load_roundtrip")},
 }
 
 #: Why a program misses its reference result (besides the compiler's own
@@ -120,7 +119,7 @@ MISSES_REFERENCE = {
                                   "gemm_tiled_pipelined_unrolled")},
     **{n: _DRAM_SHORTCUT for n in DIFFERS_FROM_FUNCTIONAL_SIM
        if DIFFERS_FROM_FUNCTIONAL_SIM[n] == _DRAM_SHORTCUT and n != "make_mask_eq_vector"},
-    "scpad_load_roundtrip": _DMA_RACE,
+    **{n: _DMA_DEPENDENCY for n in ("add", "scpad_load_roundtrip")},
 }
 
 _built = {}

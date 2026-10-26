@@ -38,6 +38,10 @@ PACKET_SIZE = 4
 PACKET_W = INST_W * PACKET_SIZE
 #: Bytes the PC advances per packet. RTL: PACKET_BYTE_W.
 PACKET_BYTE_W = PACKET_W // 8
+#: Bytes per instruction, and the unit of branch and jal offsets: they count
+#: instructions from the packet's address, so every instruction is reachable
+#: wherever the code is placed (packets need only 5-byte alignment).
+INST_BYTES = INST_W // 8
 #: Opcode field width. RTL: OP_W.
 OP_W = 7
 
@@ -192,15 +196,15 @@ def decode_instruction(instr: int) -> Dict:
     decoded = {"opcode": opcode, "mnemonic": mnemonic, "type": instr_type}
 
     if instr_type == "BR":
-        # The branch immediate is split: bit 14 is its top bit, bits 39:31 the
-        # rest, and the whole thing is shifted left by 2 (packet-aligned).
+        # The branch immediate is split: bit 14 is its top (sign) bit, bits
+        # 39:31 the rest. It counts instructions; "imm" is the byte offset.
         imm1 = get_bits(instr, 14, 14)
         imm9 = get_bits(instr, 39, 31)
         decoded.update({
             "incr_imm": get_bits(instr, 13, 7),
             "rs1": get_bits(instr, 22, 15),
             "rs2": get_bits(instr, 30, 23),
-            "imm": sign_extend(((imm1 << 9) | imm9) << 2, 12),
+            "imm": sign_extend((imm1 << 9) | imm9, 10) * INST_BYTES,
         })
         return decoded
 

@@ -13,7 +13,7 @@ from scheduler.core import SchedulerCore
 from scheduler.decode1 import SCALAR, SCPAD, VECTOR, classify
 from scheduler.decode2 import (
     DecodedPacket, PacketContractError, Scoreboard, contract_violations)
-from scheduler.isa import INST_W, OPCODES, decode_instruction
+from scheduler.isa import INST_BYTES, INST_W, OPCODES, decode_instruction
 
 OP = {m: op for op, (m, _) in OPCODES.items()}
 
@@ -97,7 +97,7 @@ def test_the_rtl_bit_slices_agree_with_the_isa_layout():
                     assert (d.mask_write(), d.rs1) == (f["vmd"], f["rs1"]), m
                 elif f["type"] == "BR":
                     assert (d.rs1, d.rs2, d.rd) == (f["rs1"], f["rs2"], f["rs1"]), m
-                    assert (d.imm * 4, d.incr7 & 0x7F) == (f["imm"], f["incr_imm"]), m
+                    assert (d.imm * INST_BYTES, d.incr7 & 0x7F) == (f["imm"], f["incr_imm"]), m
                 else:
                     for k in ("rd", "rs1", "rs2", "imm"):
                         if k in f:

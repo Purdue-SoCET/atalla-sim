@@ -3,7 +3,7 @@
     C source --atalla_cc -p -S--> packetized assembly --assembler--> program image
                                   (third_party/aihw-ppci-compiler)  (src/scheduler/assembler.py)
 
-The compiler (branch atalla-shaunak) packetizes; atalla-sim only assembles and
+The compiler (branch atalla-arch) packetizes; atalla-sim only assembles and
 runs what it was given. Two sets of C programs come with the compiler:
 
     test_validation_kernels/*.c   kernels (add, relu, softmax, conv, gemm, ...).

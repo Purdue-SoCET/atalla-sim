@@ -25,7 +25,7 @@ Python 3.9 or newer. Two submodules live in `third_party/`:
 
 | submodule | what it is | without it |
 |---|---|---|
-| `aihw-ppci-compiler` (branch `atalla-shaunak`) | the C compiler, which packs instructions into VLIW packets, and the C kernels with their test inputs | C programs can't be built |
+| `aihw-ppci-compiler` (branch `atalla-arch`) | the C compiler, which packs instructions into VLIW packets, and the C kernels with their test inputs | C programs can't be built |
 | `atalla-functional-sim` | an instruction-level simulator (no timing), the reference for values, and the hand-written assembly kernels | no `--golden` checks, no assembly kernels |
 
 Both are private Purdue-SoCET repositories: you need access and an SSH key on
