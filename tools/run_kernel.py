@@ -8,6 +8,7 @@ array, the four scratchpad pads with their DMA backends, and DRAM
 
     tools/run_kernel.py gemm                 # build kernels/build_gemm.py, run it
     tools/run_kernel.py path/to/prog.in      # an already assembled program
+    tools/run_kernel.py path/to/prog.elf     # a linked program from the compiler
     tools/run_kernel.py softmax --golden     # also run the functional sim and compare
     tools/run_kernel.py gemm -- --rows 16    # arguments after -- go to the build script
     tools/run_kernel.py gemm --perf-json gemm.json --timeline   # the monitor's report
@@ -24,6 +25,12 @@ harness (tools/c_kernels.py). It runs with the C loader's stack registers set.
     tools/run_kernel.py add.c                  # run, check against numpy
     tools/run_kernel.py relu.c --golden        # also compare with the functional sim
     tools/run_kernel.py add.c --save add.in    # keep the assembled image
+    tools/run_kernel.py relu.c --elf           # compile and link to an ELF, load that
+
+An ELF (src/scheduler/elf.py) runs with its code and data where its layout
+put them, called through `jal x1, main; halt.s` at address 0, with the C
+loader's stack registers. A .c program with --elf also gets its inputs and
+reference result from the compiler's harness.
     tools/run_kernel.py gemm --activity gemm.html   # which blocks work when
 """
 
@@ -40,7 +47,8 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from scheduler import golden                                     # noqa: E402
 from scheduler.core import load_program_text                      # noqa: E402
-from atalla.atalla_platform import build_atalla_platform           # noqa: E402
+from scheduler.elf import ElfError, load_elf                       # noqa: E402
+from atalla.atalla_platform import build_atalla_platform, c_entry_sregs  # noqa: E402
 from scheduler.assembler import to_in_text                        # noqa: E402
 from memory.dram import DRAM_BURST_BYTES                          # noqa: E402
 import c_kernels                                                  # noqa: E402
@@ -99,8 +107,11 @@ def main() -> None:
         i = argv.index("--")
         argv, extra = argv[:i], argv[i + 1:]
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("kernel", help="a kernel name (kernels/build_<name>.py), a .c program "
-                                   "or a .in file")
+    ap.add_argument("kernel", help="a kernel name (kernels/build_<name>.py), a .c program, "
+                                   "a .in file or a .elf file")
+    ap.add_argument("--elf", action="store_true",
+                    help="for a .c program: compile and link it to an ELF and run that, "
+                         "instead of assembling the compiler's assembly")
     ap.add_argument("--golden", action="store_true",
                     help="also run the functional sim and compare the final state")
     ap.add_argument("--limit", type=int, default=5_000_000, help="cycle limit")
@@ -130,16 +141,30 @@ def main() -> None:
 
     init_sregs = None
     c_path = None
+    describe_pc = None
+    if args.elf and not args.kernel.endswith(".c"):
+        sys.exit("--elf is for a .c program; a .elf file is loaded as it is")
     if args.kernel.endswith(".c"):
         if extra:
             sys.exit("a C program takes no build arguments (its inputs come from the "
                      "compiler's harness)")
         c_path = find_c(args.kernel)
         try:
-            program, data, init_sregs = c_kernels.build(c_path)
+            program, data, init_sregs = c_kernels.build(c_path, elf=args.elf)
         except (c_kernels.CompileError, ValueError) as exc:
             sys.exit(str(exc))
         instr = program.instr
+        describe_pc = getattr(program, "describe", None)
+    elif args.kernel.endswith(".elf"):
+        if extra:
+            sys.exit("an ELF takes no build arguments")
+        try:
+            program = load_elf(args.kernel)
+        except (OSError, ElfError) as exc:
+            sys.exit("%s: %s" % (args.kernel, exc))
+        instr, data = program.instr, program.data
+        init_sregs = c_entry_sregs(data)
+        describe_pc = program.describe
     else:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(args.kernel)
@@ -155,7 +180,7 @@ def main() -> None:
                                  burst_bytes=args.burst_bytes,
                                  activity=bool(args.activity), warm_icache=args.warm_icache,
                                  perf_timeline=args.timeline, init_sregs=init_sregs,
-                                 strict=False)
+                                 describe_pc=describe_pc, strict=False)
     t = time.time()
     cycles = plat.run_until_done(limit=args.limit)
     c = plat.core

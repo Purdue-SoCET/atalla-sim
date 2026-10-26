@@ -28,7 +28,7 @@ starts cold.
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from atalla.sysarr_tpu_system import (
     PHASE_BACKEND, PHASE_CORE, PHASE_HARNESS, PHASE_SPAD, PHASE_SYSARR, PHASE_VLS,
@@ -100,6 +100,8 @@ class AtallaPlatform:
     root: CompositeClocked
     perf: Optional[PerfMonitor] = None
     activity: Optional[ActivityProbe] = None
+    #: Names a pc for messages, e.g. "main_block3+20" (ElfProgram.describe).
+    describe_pc: Optional[Callable[[int], str]] = None
     cycle: int = 0
 
     def tick(self) -> None:
@@ -110,7 +112,11 @@ class AtallaPlatform:
         start = self.cycle
         while not self.core.done:
             if self.cycle - start >= limit:
-                raise RuntimeError("no halt after %d cycles (pc %#x)" % (limit, self.core.pc))
+                pc = self.core.pc
+                where = "%#x" % pc
+                if self.describe_pc is not None and self.describe_pc(pc) != where:
+                    where += ", %s" % self.describe_pc(pc)
+                raise RuntimeError("no halt after %d cycles (pc %s)" % (limit, where))
             self.tick()
         return self.cycle - start
 
@@ -121,6 +127,7 @@ def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]
                           warm_icache: bool = False, perf: bool = True,
                           perf_timeline: bool = False, activity: bool = False,
                           init_sregs: Optional[Dict[int, int]] = None,
+                          describe_pc: Optional[Callable[[int], str]] = None,
                           **core_kw) -> AtallaPlatform:
     """`program` and `data` as load_program_text returns them; `data` words
     go into DRAM. `systolic_array` is "meissa" (the RTL's) or "tpu"; extra
@@ -129,7 +136,8 @@ def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]
     the per-cycle timeline too. `activity` attaches an ActivityProbe
     (atalla/activity.py) as platform.activity, which records every block's
     state each cycle for tools/activity_view.py. `init_sregs` presets scalar
-    registers, as a loader would (c_entry_sregs for compiled C)."""
+    registers, as a loader would (c_entry_sregs for compiled C).
+    `describe_pc` names a pc in error messages (ElfProgram.describe)."""
     parts = build_tpu_platform(dtype="bf16", lane_count=lane_count,
                                systolic_array=systolic_array,
                                backend_dram_latency=dram_latency,
@@ -163,7 +171,8 @@ def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]
                    phase=PHASE_BACKEND)
     plat = AtallaPlatform(core=core, vc=vc, spad=parts.spad, sa=parts.sa, dram=dram,
                           backends=backends, vls_bridges=parts.vls_bridges,
-                          sysarr_bridge=sysarr_bridge, ports=ports, root=root)
+                          sysarr_bridge=sysarr_bridge, ports=ports, root=root,
+                          describe_pc=describe_pc)
     if perf or activity:
         # Last in every cycle: it observes and changes nothing.
         plat.perf = PerfMonitor(plat, timeline=perf_timeline or activity)

@@ -400,6 +400,33 @@ are in `tools/c_kernels.py`. It runs with the C loader's stack registers set
 (`c_entry_sregs`: `x2` and `x33` above the data, as the functional sim's
 loader does).
 
+**Linked programs (ELF).** `atalla_cc kernel.c -o kernel.elf` compiles and
+links with the compiler's memory layout: code from `0x1000`, data (globals)
+from `0x80000`. `src/scheduler/elf.py` loads it into the same program image:
+
+    C --atalla_cc -p--> ELF --src/scheduler/elf.py--> image + data + symbols
+
+- It checks the header (ELF32, little-endian, machine `0x270F`; the linker
+  writes type REL, with no program headers and entry 0, and EXEC is accepted
+  too) and loads every allocated section at its address: executable ones as
+  packets (5-byte little-endian instructions, slot 0 at the lowest address),
+  the others into DRAM as 32-bit words.
+- Every function and label must start a packet. The startup packets
+  `jal x1, main; halt.s` go at address 0, as for the assembly path, and the
+  stack registers come from `c_entry_sregs`.
+- The symbol table names pcs in messages: a run that doesn't halt reports
+  `pc 0x10a4, main_block2`.
+
+`tools/run_kernel.py kernel.elf` runs a linked program; `relu.c --elf`
+compiles, links and loads one, with the harness's inputs and reference.
+Cycle counts differ slightly from the assembly path because the code sits
+at `0x1004`, not 40, and lines up differently with the icache.
+
+Some kernels seed their inputs inside the layout's code region (`relu`'s at
+`0x1000`). atalla-sim keeps the program apart from DRAM, so they still run,
+but in a single memory, as on the RTL testbench, the inputs would overwrite
+the code: `c_kernels.build(..., elf=True)` warns (`ElfLayoutWarning`).
+
 Against the functional sim (`tests/scheduler/test_kernels.py` lists each case):
 
 | | programs |

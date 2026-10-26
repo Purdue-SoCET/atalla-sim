@@ -85,6 +85,8 @@ What `run_kernel.py` runs:
 python tools/run_kernel.py relu.c                 # a C program, compiled on the fly
 python tools/run_kernel.py gemm                   # an assembly kernel from the functional sim
 python tools/run_kernel.py prog.in                # an already assembled program
+python tools/run_kernel.py prog.elf               # a program the compiler linked
+python tools/run_kernel.py relu.c --elf           # compile and link it, then load the ELF
 python tools/run_kernel.py relu.c --save relu.in  # keep the program image that ran
 python tools/run_kernel.py relu.c --perf-json relu.json --timeline   # the report as JSON
 ```
