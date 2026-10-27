@@ -4,7 +4,9 @@ A load (driver_to_backend_start_load) copies `rows` rows of `cols` elements
 from DRAM into the pad; a store does the reverse. Each row is cut into
 burst-sized DRAM requests; at most dram_q_depth bursts are in flight, each
 returns dram_latency cycles after it launched, and backends that share a
-SharedDRAMBurstChannel launch one burst a cycle between them. Finished rows
+SharedDRAMBurstChannel launch one burst a cycle between them. Shared through
+a RamulatorDRAM instead (memory/ramulator.py), a burst returns when Ramulator
+completes it, and dram_latency is unused. Finished rows
 are written to the pad through the send_sram_write callback the scratchpad
 installs; stores read rows back through request_sram_read.
 Statistics: get_stats().
@@ -164,10 +166,22 @@ class Backend(Clocked):
         if not self._dram_bus_available():
             self.total_backend_stalls += 1
             return False
+        reference_cycle = self._tick if self._in_tick else (self._tick + 1)
+        channel = self.shared_burst_channel
+        if getattr(channel, "models_latency", False):
+            # The channel times the burst (memory/ramulator.py) and says when it is done.
+            if not channel.send(reference_cycle, req.dram_addr, req.length, req.is_write,
+                                lambda cycle, req=req: self._dram_done(req, cycle)):
+                self.total_backend_stalls += 1
+                return False
+            self._dram_pending.enqueue(req)
+            self.last_op_tick = self._tick
+            channel.reserve(self._tick)
+            self.total_dram_bursts_issued += 1
+            return True
         if not self._dram_pending.enqueue(req):
             self.total_backend_stalls += 1
             return False
-        reference_cycle = self._tick if self._in_tick else (self._tick + 1)
         req.due_cycle = reference_cycle + self.dram_latency - 1
         self.last_op_tick = self._tick
         if self.shared_burst_channel is not None:
@@ -178,6 +192,12 @@ class Backend(Clocked):
         )
         self.total_dram_bursts_issued += 1
         return True
+
+    def _dram_done(self, req: DRAMOperation, cycle: int) -> None:
+        """A burst the channel timed completed in `cycle`: handle it next cycle."""
+        req.due_cycle = int(cycle) + 1
+        heapq.heappush(self._dram_ready_heap, (req.due_cycle, req.tx_id, req.row, req.subidx, req))
+        self.wake()
 
     def attach_dram(self, dram: DRAM) -> DRAM:
         self.dram = dram

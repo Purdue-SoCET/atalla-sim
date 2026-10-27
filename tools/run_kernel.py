@@ -32,6 +32,7 @@ put them, called through `jal x1, main; halt.s` at address 0, with the C
 loader's stack registers. A .c program with --elf also gets its inputs and
 reference result from the compiler's harness.
     tools/run_kernel.py gemm --activity gemm.html   # which blocks work when
+    tools/run_kernel.py gemm --dram ramulator       # DRAM timed by Ramulator 2 (make ramulator)
 """
 
 import argparse
@@ -51,6 +52,7 @@ from scheduler.elf import ElfError, load_elf                       # noqa: E402
 from atalla.atalla_platform import build_atalla_platform, c_entry_sregs  # noqa: E402
 from scheduler.assembler import to_in_text                        # noqa: E402
 from memory.dram import DRAM_BURST_BYTES                          # noqa: E402
+from memory.ramulator import RamulatorDRAM                        # noqa: E402
 import c_kernels                                                  # noqa: E402
 
 SIM = golden.SUBMODULE_PATH
@@ -117,6 +119,9 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=5_000_000, help="cycle limit")
     ap.add_argument("--dram-latency", type=int, default=6,
                     help="cycles from a DRAM request launching to its data returning")
+    ap.add_argument("--dram", choices=["fixed", "ramulator"], default="fixed",
+                    help="DRAM timing: a fixed --dram-latency, or Ramulator 2's DDR4 model "
+                         "(the RTL controller's DDR4-1600J; build it with `make ramulator`)")
     ap.add_argument("--lanes", type=int, default=16, help="vector lanes (must divide 32)")
     ap.add_argument("--array", choices=["meissa", "tpu"], default="meissa",
                     help="the systolic array: MEISSA (the RTL's) or the TPU-style array")
@@ -175,12 +180,19 @@ def main() -> None:
         Path(args.save).write_text(to_in_text(instr, data))
         print("program image written to %s" % args.save)
 
+    dram_channel = None
+    if args.dram == "ramulator":
+        try:
+            dram_channel = RamulatorDRAM()
+        except RuntimeError as exc:
+            sys.exit(str(exc))
     plat = build_atalla_platform(instr, data, dram_latency=args.dram_latency,
                                  lane_count=args.lanes, systolic_array=args.array,
                                  burst_bytes=args.burst_bytes,
                                  activity=bool(args.activity), warm_icache=args.warm_icache,
                                  perf_timeline=args.timeline, init_sregs=init_sregs,
-                                 describe_pc=describe_pc, strict=False)
+                                 describe_pc=describe_pc, dram_channel=dram_channel,
+                                 strict=False)
     t = time.time()
     cycles = plat.run_until_done(limit=args.limit)
     c = plat.core
@@ -188,12 +200,17 @@ def main() -> None:
     print()
     print(plat.perf.summary())
     print()
+    if dram_channel is not None:
+        print(dram_channel.summary(through=plat.cycle - 1))
+        print()
     if args.perf_json:
         plat.perf.to_json(args.perf_json, timeline=args.timeline)
         print("performance report written to %s" % args.perf_json)
     if args.activity:
         meta = dict(program=Path(args.kernel).name, array=args.array, lanes=args.lanes,
-                    burst_bytes=args.burst_bytes, dram_latency=args.dram_latency)
+                    burst_bytes=args.burst_bytes, dram=args.dram)
+        if args.dram == "fixed":
+            meta["dram_latency"] = args.dram_latency
         if args.activity.endswith(".html"):
             import activity_view
             Path(args.activity).write_text(activity_view.render(plat.activity.trace(meta)))

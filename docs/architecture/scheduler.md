@@ -298,6 +298,34 @@ DMA, and they behind it. The icache starts cold (`warm_icache=True` for
 tests that time something else). The ports' `stats` count bursts, bytes,
 cycles busy and cycles lost to contention.
 
+**DRAM timing from Ramulator 2.** With `--dram ramulator`
+(`dram_channel=RamulatorDRAM()` from Python; `src/memory/ramulator.py`), the
+channel is Ramulator 2's DDR4 controller instead of a fixed latency. A burst
+completes when Ramulator says so: a read when its data returns, a write when
+its WR command issues. The masters see it the next cycle. Bank and row state,
+refresh, FR-FCFS scheduling and the 32-entry read and write queues all count.
+The data still lives in atalla-sim's DRAM, so results are the same and only
+the timing changes. The configuration is the RTL DDR controller's
+(`rtl/include/ddr_cntrl/dram_pkg.vh`):
+
+| | RTL controller | Ramulator 2 (`ramulator_config()`) |
+|---|---|---|
+| parts | x8 | `DDR4_4Gb_x8`, 64-bit channel |
+| ranks, bank groups, banks | 2, 4, 4 (1 + 2 + 2 bits) | 2, 4, 4 |
+| rows, columns | 15, 10 bits | 32K, 1K |
+| CL-RCD-RP | 10-10-10 | `DDR4_1600J`: 10-10-10, tCK 1.25 ns |
+| clock | | 800 MHz memory clock, one memory cycle a core cycle |
+| address mapping | `{rank, row, bank, BG[1], col[9:3], BG[0], col[2:0]}` | `RoBaRaCoCh` (Ramulator has no mapper like the RTL's) |
+
+Every burst is one 64-byte DDR4 transaction, however few bytes it carries.
+With the default 8-byte bursts, a stream of row hits in one bank group moves
+8 bytes every tCCD_L (5 cycles), so DRAM peaks near 1.6 bytes a cycle
+instead of the fixed channel's 8: `relu.c` takes 1,740 cycles instead of 664.
+`--burst-bytes 64` asks for whole transactions. `ramulator_config()` takes
+other Ramulator presets, mappers and timing overrides (`nCL=12`, ...). The
+model sleeps while nothing is in flight and runs the cycles it skipped before
+its next request, so refresh lands where it would if every cycle had ticked.
+
 ## Performance monitor
 
 `build_atalla_platform` attaches a `PerfMonitor` (`src/atalla/perf_monitor.py`)

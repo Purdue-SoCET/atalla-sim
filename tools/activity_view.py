@@ -463,7 +463,8 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
   if (m.array) bits.push("array " + m.array);
   if (m.lanes) bits.push(m.lanes + " lanes");
   if (m.burst_bytes) bits.push(m.burst_bytes + "-byte DRAM requests");
-  if (m.dram_latency !== undefined) bits.push("DRAM latency " + m.dram_latency);
+  if (m.dram === "ramulator") bits.push("DRAM timed by Ramulator 2");
+  else if (m.dram_latency !== undefined) bits.push("DRAM latency " + m.dram_latency);
   document.getElementById("sub").textContent = bits.join(" · ");
   document.getElementById("pctnote").textContent =
     "Percentages: the share of the run's " + N.toLocaleString() +
@@ -471,7 +472,9 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
   document.getElementById("diff").textContent =
     "Drawn as the model builds the chip: " + count("spad") + " scratchpads, one per vector load/store unit; " +
     count("lane") + " lanes; a transpose unit beside the GSAU; separate EX2 and EX4 units. " +
-    "DRAM is a fixed-latency model (no DDR4 controller or Ramulator2). Dashed: not in the model." +
+    (m.dram === "ramulator" ? "DRAM is timed by Ramulator 2's DDR4 controller model. "
+                            : "DRAM is a fixed-latency model (no DDR4 controller). ") +
+    "Dashed: not in the model." +
     (unplaced.length ? " Also recorded, not drawn:" : "");
   paint();
 })();

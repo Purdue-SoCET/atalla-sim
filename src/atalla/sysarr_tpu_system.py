@@ -430,6 +430,7 @@ PHASE_VLS = 20         # VLS <-> scratchpad frontends
 PHASE_SYSARR = 30      # GSAU <-> systolic array
 PHASE_SPAD = 40        # scratchpad internals (frontends, crossbars, banks)
 PHASE_BACKEND = 50     # scratchpad backends / DRAM
+PHASE_DRAM = 55        # a DRAM model that runs after its masters (memory/ramulator.py)
 PHASE_HARNESS = 90     # experiment harness, observes everything above
 
 
@@ -499,9 +500,10 @@ def _build_shared_dram_backends(
     dram_q_depth: int,
     dram_burst_bytes: int,
     delay_cycles: int,
+    channel=None,
 ) -> List[Backend]:
     backends: List[Backend] = []
-    shared_burst_channel = SharedDRAMBurstChannel()
+    shared_burst_channel = channel if channel is not None else SharedDRAMBurstChannel()
     for tile_id in range(len(spad.tiles)):
         backend_obj = Backend(
             dram_latency=int(dram_latency),
@@ -586,6 +588,7 @@ def build_tpu_platform(
     backend_dram_q_depth: int = 16,
     backend_dram_burst_bytes: int = DRAM_BURST_BYTES,
     backend_delay_cycles: int = 1,
+    dram_channel=None,
     mirror: bool = False,
     vls_bridge_cls: Callable[..., Any] = VLSFrontendBridge,
     vls_bridge_kwargs: Optional[Dict[str, Any]] = None,
@@ -596,7 +599,9 @@ def build_tpu_platform(
     The scratchpad defaults are the RTL's structure -- 32-deep controller
     queues (scpad_cntrl.sv) and no crossbar -- with PCACTI's sram_bank
     latencies for body.sv's array, read 2 and write 1.
-    spad_frontend_queue_size sets that queue depth.
+    spad_frontend_queue_size sets that queue depth. `dram_channel` replaces
+    the backends' fixed-latency SharedDRAMBurstChannel, e.g. with a
+    RamulatorDRAM (memory/ramulator.py), which then ticks after them.
     """
     eq, clk, sim = build_sim()
     vc = VectorCore(
@@ -626,6 +631,7 @@ def build_tpu_platform(
             dram_q_depth=int(backend_dram_q_depth),
             dram_burst_bytes=int(backend_dram_burst_bytes),
             delay_cycles=int(backend_delay_cycles),
+            channel=dram_channel,
         )
         backend = backends[0]
 
@@ -655,6 +661,8 @@ def build_tpu_platform(
     # 0, 1 and 2 are all idle -- already unfair at two pads, worse at four.
     if backends:
         root.add_child(RoundRobinBackendTicker(backends), phase=PHASE_BACKEND)
+    if getattr(dram_channel, "models_latency", False):
+        root.add_child(dram_channel, phase=PHASE_DRAM)
 
     return TPUPlatform(
         eq=eq,

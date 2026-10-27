@@ -24,14 +24,16 @@ timing; the scheduler only routes, arbitrates and waits on their readiness.
 Memory is sim_ram_rr's arrangement: the icache, the dcache and the four
 scratchpad backends are six masters on one DRAM channel, one burst launch a
 cycle, round robin (memory/bus.py for the caches' ports). The icache
-starts cold.
+starts cold. The channel answers each burst dram_latency cycles after it
+launches, or, given a RamulatorDRAM (memory/ramulator.py), when Ramulator 2's
+DDR4 model completes it.
 """
 
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 from atalla.sysarr_tpu_system import (
-    PHASE_BACKEND, PHASE_CORE, PHASE_HARNESS, PHASE_SPAD, PHASE_SYSARR, PHASE_VLS,
+    PHASE_BACKEND, PHASE_CORE, PHASE_DRAM, PHASE_HARNESS, PHASE_SPAD, PHASE_SYSARR, PHASE_VLS,
     GSAUTPUBridge, RoundRobinBackendTicker, build_tpu_platform)
 from atalla.activity import ActivityProbe
 from atalla.perf_monitor import PerfMonitor
@@ -102,6 +104,8 @@ class AtallaPlatform:
     activity: Optional[ActivityProbe] = None
     #: Names a pc for messages, e.g. "main_block3+20" (ElfProgram.describe).
     describe_pc: Optional[Callable[[int], str]] = None
+    #: The RamulatorDRAM timing DRAM, when there is one.
+    dram_channel: Any = None
     cycle: int = 0
 
     def tick(self) -> None:
@@ -128,6 +132,7 @@ def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]
                           perf_timeline: bool = False, activity: bool = False,
                           init_sregs: Optional[Dict[int, int]] = None,
                           describe_pc: Optional[Callable[[int], str]] = None,
+                          dram_channel: Any = None,
                           **core_kw) -> AtallaPlatform:
     """`program` and `data` as load_program_text returns them; `data` words
     go into DRAM. `systolic_array` is "meissa" (the RTL's) or "tpu"; extra
@@ -137,11 +142,13 @@ def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]
     (atalla/activity.py) as platform.activity, which records every block's
     state each cycle for tools/activity_view.py. `init_sregs` presets scalar
     registers, as a loader would (c_entry_sregs for compiled C).
-    `describe_pc` names a pc in error messages (ElfProgram.describe)."""
+    `describe_pc` names a pc in error messages (ElfProgram.describe).
+    `dram_channel` (a RamulatorDRAM) times DRAM instead of `dram_latency`."""
     parts = build_tpu_platform(dtype="bf16", lane_count=lane_count,
                                systolic_array=systolic_array,
                                backend_dram_latency=dram_latency,
-                               backend_dram_burst_bytes=burst_bytes)
+                               backend_dram_burst_bytes=burst_bytes,
+                               dram_channel=dram_channel)
     vc, dram, backends = parts.vc, parts.dram, parts.backends
     for addr, word in (data or {}).items():
         dram.write(int(addr), (int(word) & MASK32).to_bytes(4, "little"))
@@ -169,10 +176,12 @@ def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]
     # sim_ram_rr's order: icache, dcache, scratchpads 0-3.
     root.add_child(RoundRobinBackendTicker([ports["icache"], ports["dcache"], *backends]),
                    phase=PHASE_BACKEND)
+    if dram_channel is not None:
+        root.add_child(dram_channel, phase=PHASE_DRAM)
     plat = AtallaPlatform(core=core, vc=vc, spad=parts.spad, sa=parts.sa, dram=dram,
                           backends=backends, vls_bridges=parts.vls_bridges,
                           sysarr_bridge=sysarr_bridge, ports=ports, root=root,
-                          describe_pc=describe_pc)
+                          describe_pc=describe_pc, dram_channel=dram_channel)
     if perf or activity:
         # Last in every cycle: it observes and changes nothing.
         plat.perf = PerfMonitor(plat, timeline=perf_timeline or activity)
