@@ -13,7 +13,7 @@ import pytest
 
 from scheduler import assembler as A
 from scheduler.core import load_program_text
-from scheduler.isa import INST_W, PACKET_BYTE_W, PACKET_SIZE, decode_instruction
+from scheduler.isa import INST_BYTES, INST_W, PACKET_BYTE_W, PACKET_SIZE, decode_instruction
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 import c_kernels  # noqa: E402
@@ -58,7 +58,8 @@ def test_every_field_decodes_back(line, fields):
 def test_main_is_called_and_halts_on_return():
     prog = A.assemble(program(["addi_s x1, x0, 1"]))
     jal, halt = decode_instruction(slots(prog.instr[0])[0]), decode_instruction(slots(prog.instr[20])[0])
-    assert (jal["mnemonic"], jal["rd"], jal["imm"]) == ("jal", 1, prog.labels["main"])
+    # jal's immediate counts instructions: main is 40 bytes on, 8 instructions.
+    assert (jal["mnemonic"], jal["rd"], jal["imm"] * INST_BYTES) == ("jal", 1, prog.labels["main"])
     assert halt["mnemonic"] == "halt.s"
     assert prog.labels["main"] == A.BOOTSTRAP_PACKETS * PACKET_BYTE_W
 
@@ -68,7 +69,7 @@ def test_branches_and_jumps_are_offsets_from_their_packet():
     main = prog.labels["main"]
     br = decode_instruction(slots(prog.instr[main])[0])
     j = decode_instruction(slots(prog.instr[main + PACKET_BYTE_W])[0])
-    assert br["imm"] == 0 and j["imm"] == -PACKET_BYTE_W
+    assert br["imm"] == 0 and j["imm"] * INST_BYTES == -PACKET_BYTE_W
 
 
 def test_a_branch_out_of_range_is_an_error():

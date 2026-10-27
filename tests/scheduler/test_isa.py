@@ -74,14 +74,14 @@ def test_immediates_sign_extend():
     assert decode_instruction(instr)["imm"] == -1
 
 
-def test_branch_immediate_is_split_and_packet_aligned():
-    """The BR immediate is bit 14 as its top bit, bits 39:31 below it, shifted
-    left by two."""
+def test_branch_immediate_is_split_and_counts_instructions():
+    """The BR immediate is bit 14 as its top bit, bits 39:31 below it, counting
+    5-byte instructions; decode reports it in bytes."""
     beq = next(op for op, (m, t) in OPCODES.items() if t == "BR" and m.startswith("beq"))
     instr = beq | (1 << 14) | (0b000000001 << 31)
     d = decode_instruction(instr)
     assert d["type"] == "BR"
-    assert d["imm"] == sign_extend(((1 << 9) | 1) << 2, 12)
+    assert d["imm"] == sign_extend((1 << 9) | 1, 10) * 5
 
 
 def test_get_bits_is_inclusive():

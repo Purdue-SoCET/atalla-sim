@@ -121,5 +121,24 @@ def test_vlsu_writeback_callback_consumes_completed_load():
     assert vls.outstanding_loads(1) == 0
 
 
+def test_vlsu_moves_only_num_cols_plus_one_lanes():
+    # The RTL frontend's valid_mask: lane i moves when i <= num_cols (vl = num_cols + 1).
+    eq, clk, sim = build_sim()
+    vls = VLSU(scratchpad_count=1, read_vreg_cb=lambda vs: [1, 2, 3, 4, 5, 6])
+    clk.add_clocked(vls)
+    clk.schedule_next(0.0)
+
+    assert vls.enqueue_issue({"kind": "store", "scratchpad": 0, "vs": 2, "addr": 0, "vl": 4})
+    sim.run(until=1.0)
+    assert vls.pop_request()["data"] == [1, 2, 3, 4]
+
+    assert vls.enqueue_issue({"kind": "load", "scratchpad": 0, "vd": 3, "addr": 0, "vl": 2})
+    sim.run(until=2.0)
+    _ = vls.pop_request()
+    assert vls.push_response({"scratchpad": 0, "data": [9, 8, 7, 6]})
+    sim.run(until=3.0)
+    assert vls.pop_writeback()["data"] == [9, 8, 0, 0]
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))

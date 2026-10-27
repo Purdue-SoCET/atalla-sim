@@ -13,6 +13,15 @@ from typing import Callable, Dict, List, Optional
 Time = float
 
 
+def _masked_lanes(data, vl: Optional[int]):
+    """A load's data with the lanes past `vl` read as 0 (the banks the
+    frontend's valid_mask leaves unread return 0)."""
+    if vl is None:
+        return data
+    data = list(data)
+    return data[:int(vl)] + [0] * max(0, len(data) - int(vl))
+
+
 class VectorLoadStoreUnit(Clocked):
     """
     Vector Load Store Unit (VLSU) model.
@@ -25,6 +34,10 @@ class VectorLoadStoreUnit(Clocked):
       registers for outstanding loads.
     - Stores are pass-through requests (no destination tracking required).
     - Scratchpad responses are matched to destination registers by FIFO order.
+    - `vl` (num_cols + 1) is the lanes moved, as the scratchpad frontend's
+      valid_mask (lane i <= num_cols) does: a store writes lanes 0..vl-1 and
+      leaves the rest of the row alone; a load reads them and returns 0 in
+      the others. Without `vl`, every lane moves.
     """
 
     def __init__(
@@ -179,6 +192,8 @@ class VectorLoadStoreUnit(Clocked):
                 if self.read_vreg_cb is None:
                     raise RuntimeError("store requires read_vreg_cb when data is not inline")
                 store_data = self.read_vreg_cb(op["vs"])
+            if op.get("vl") is not None:
+                store_data = list(store_data)[:int(op["vl"])]
 
             req = {
                 "kind": "store",
@@ -218,7 +233,7 @@ class VectorLoadStoreUnit(Clocked):
         wb = {
             "scratchpad": spad,
             "vd": dst_tag["vd"],
-            "data": rsp["data"],
+            "data": _masked_lanes(rsp["data"], dst_tag.get("vl")),
             "mask": dst_tag.get("mask"),
             "vl": dst_tag.get("vl"),
             "eew": dst_tag.get("eew"),

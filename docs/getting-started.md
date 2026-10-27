@@ -25,7 +25,7 @@ Python 3.9 or newer. Two submodules live in `third_party/`:
 
 | submodule | what it is | without it |
 |---|---|---|
-| `aihw-ppci-compiler` (branch `atalla-shaunak`) | the C compiler, which packs instructions into VLIW packets, and the C kernels with their test inputs | C programs can't be built |
+| `aihw-ppci-compiler` (branch `atalla-arch`) | the C compiler, which packs instructions into VLIW packets, and the C kernels with their test inputs | C programs can't be built |
 | `atalla-functional-sim` | an instruction-level simulator (no timing), the reference for values, and the hand-written assembly kernels | no `--golden` checks, no assembly kernels |
 
 Both are private Purdue-SoCET repositories: you need access and an SSH key on
@@ -85,6 +85,8 @@ What `run_kernel.py` runs:
 python tools/run_kernel.py relu.c                 # a C program, compiled on the fly
 python tools/run_kernel.py gemm                   # an assembly kernel from the functional sim
 python tools/run_kernel.py prog.in                # an already assembled program
+python tools/run_kernel.py prog.elf               # a program the compiler linked
+python tools/run_kernel.py relu.c --elf           # compile and link it, then load the ELF
 python tools/run_kernel.py relu.c --save relu.in  # keep the program image that ran
 python tools/run_kernel.py relu.c --perf-json relu.json --timeline   # the report as JSON
 ```

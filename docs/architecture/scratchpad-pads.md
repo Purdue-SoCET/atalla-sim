@@ -51,6 +51,10 @@ Each pad has its **own local slot space**, `0 .. bank_size-1`. The bridge passes
 `tile_id=frontend_id` on every access, so a VLSU only ever sees its own pad — slot
 0 of pad 0 and slot 0 of pad 3 are different storage.
 
+A `vreg.ld`/`vreg.st` moves lanes `0 .. num_cols` of its row, as the RTL
+frontend's `valid_mask` does: a store leaves the row's other lanes as they
+were, and a load returns 0 in the register's other lanes.
+
 Backends build their own addresses, unchanged:
 
 ```python

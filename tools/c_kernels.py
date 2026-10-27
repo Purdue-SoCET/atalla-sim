@@ -2,8 +2,10 @@
 
     C source --atalla_cc -p -S--> packetized assembly --assembler--> program image
                                   (third_party/aihw-ppci-compiler)  (src/scheduler/assembler.py)
+    C source --atalla_cc -p ----> linked ELF ----------load_elf----> program image + data
+                                                                    (src/scheduler/elf.py)
 
-The compiler (branch atalla-shaunak) packetizes; atalla-sim only assembles and
+The compiler (branch atalla-arch) packetizes; atalla-sim only assembles and
 runs what it was given. Two sets of C programs come with the compiler:
 
     test_validation_kernels/*.c   kernels (add, relu, softmax, conv, gemm, ...).
@@ -15,6 +17,7 @@ runs what it was given. Two sets of C programs come with the compiler:
 
     from c_kernels import build, check
     program, data, regs = build(path_to_c)       # compile + assemble + inputs
+    program, data, regs = build(path_to_c, elf=True)   # compile + link + load
     plat = build_atalla_platform(program.instr, data, init_sregs=regs)
     plat.run_until_done()
     ok, message = check(path_to_c, plat)         # the reference result
@@ -23,6 +26,13 @@ To add a kernel: put the .c file in test_validation_kernels/ and give it a
 seed and validate function in the compiler's run_kernel_validation.py
 (KERNEL_REGISTRY). To add a unit test: a .c file in test_validation/ with an
 `EXPECT_X10:` line. Nothing here changes.
+
+The ELF path places the code where the compiler's layout puts it (from
+0x1000) and adds the program's own data (globals, from 0x80000). The kernels'
+inputs are seeded at addresses they choose, and some fall inside that code:
+relu's at 0x1000. atalla-sim keeps the program apart from DRAM, so the kernel
+still runs, but on the RTL's single memory the inputs would overwrite the
+code; build() warns when that happens (ElfLayoutWarning).
 """
 
 import importlib.util
@@ -30,6 +40,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import warnings
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -39,6 +50,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from atalla.atalla_platform import c_entry_sregs           # noqa: E402
 from scheduler import golden                                # noqa: E402
 from scheduler.assembler import Program, assemble           # noqa: E402
+from scheduler.elf import ElfProgram, load_elf, overlaps    # noqa: E402
 
 COMPILER = ROOT / "third_party" / "aihw-ppci-compiler"
 KERNELS = COMPILER / "test_validation_kernels"
@@ -47,6 +59,10 @@ UNIT_TESTS = COMPILER / "test_validation"
 
 class CompileError(RuntimeError):
     pass
+
+
+class ElfLayoutWarning(UserWarning):
+    """A kernel's inputs land on its own code or data (fine here, not on the RTL)."""
 
 
 def compile_c(c_path: Path) -> str:
@@ -64,6 +80,23 @@ def compile_c(c_path: Path) -> str:
             raise CompileError("atalla_cc failed on %s:\n%s"
                                % (c_path.name, (p.stderr or p.stdout)[-3000:]))
         return out.read_text()
+
+
+def compile_elf(c_path: Path) -> bytes:
+    """atalla_cc -p -o kernel.elf: compiled and linked with the compiler's own
+    driver and memory layout, as bytes."""
+    if not (COMPILER / "ppci").is_dir():
+        raise CompileError("the compiler submodule isn't checked out: %s" % COMPILER)
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / (c_path.stem + ".elf")
+        env = dict(os.environ, PYTHONPATH=str(COMPILER))
+        p = subprocess.run([sys.executable, str(COMPILER / "atalla_cc"), "-O", "2", "-p",
+                            str(c_path), "-o", str(out)],
+                           cwd=str(COMPILER), env=env, capture_output=True, text=True)
+        if p.returncode != 0 or not out.exists():
+            raise CompileError("atalla_cc failed on %s:\n%s"
+                               % (c_path.name, (p.stderr or p.stdout)[-3000:]))
+        return out.read_bytes()
 
 
 # -- the compiler's validation harness ----------------------------------------------------
@@ -123,11 +156,33 @@ def inputs(c_path: Path) -> Dict[int, int]:
     return words
 
 
-def build(c_path: Path) -> Tuple[Program, Dict[int, int], Dict[int, int]]:
-    """Compile and assemble; returns (program, DRAM data, initial registers)."""
-    program = assemble(compile_c(c_path))
-    data = inputs(c_path)
+def build(c_path: Path, elf: bool = False) -> Tuple[Program, Dict[int, int], Dict[int, int]]:
+    """Compile and assemble (or, with `elf`, compile, link and load the ELF);
+    returns (program, DRAM data, initial registers)."""
+    if not elf:
+        program = assemble(compile_c(c_path))
+        data = inputs(c_path)
+        return program, data, c_entry_sregs(data)
+    program = load_elf(compile_elf(c_path))
+    seeds = inputs(c_path)
+    _warn_layout(c_path, program, seeds)
+    data = {**program.data, **seeds}
     return program, data, c_entry_sregs(data)
+
+
+def _warn_layout(c_path: Path, program: ElfProgram, seeds: Dict[int, int]) -> None:
+    on_code = overlaps(program.code, seeds)
+    if on_code:
+        warnings.warn("%s: %d input words inside the code (%s), from %#x: they would "
+                      "overwrite it in a single memory" % (
+                          c_path.name, len(on_code),
+                          ", ".join("%#x..%#x" % r for r in program.code), on_code[0]),
+                      ElfLayoutWarning, stacklevel=3)
+    on_data = sorted(set(seeds) & set(program.data))
+    if on_data:
+        warnings.warn("%s: %d input words replace the program's own data, from %#x"
+                      % (c_path.name, len(on_data), on_data[0]), ElfLayoutWarning,
+                      stacklevel=3)
 
 
 # -- checking -----------------------------------------------------------------------------

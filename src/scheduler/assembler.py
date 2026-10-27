@@ -30,7 +30,8 @@ What it does besides encoding, and why:
 
 Encoding is decode's inverse: each instruction's operands, in order, fill its
 type's fields in scheduler/isa.py's FIELDS. Memory operands are `imm(xN)`;
-branch and jal targets are labels, encoded as byte offsets from the packet.
+branch and jal targets are labels (or byte offsets), encoded as instruction
+counts from the packet: the byte offset divided by 5.
 To support a new instruction: add it to isa.OPCODES (and FIELDS, for a new
 type); nothing here needs to change unless its assembly syntax is unusual.
 """
@@ -39,7 +40,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from scheduler.isa import FIELDS, INST_W, OPCODES, PACKET_BYTE_W, PACKET_SIZE
+from scheduler.isa import FIELDS, INST_BYTES, INST_W, OPCODES, PACKET_BYTE_W, PACKET_SIZE
 
 #: mnemonic -> (opcode, type)
 _BY_NAME = {name: (op, kind) for op, (name, kind) in OPCODES.items()}
@@ -199,6 +200,17 @@ def _target(text: str, pc: int, labels: Dict[str, int], ins: Instr) -> int:
         raise AssemblyError("line %d: %s: unknown label %r" % (ins.line, ins.mnemonic, text))
 
 
+def _instructions(off: int, bits: int, ins: Instr) -> int:
+    """A byte offset as the signed instruction count a branch or jal holds."""
+    count, rest = divmod(off, INST_BYTES)
+    if rest or not _fits(count, bits):
+        raise AssemblyError("line %d: %s: offset %d bytes out of range or not a whole "
+                            "number of instructions (+-%d bytes, in steps of %d)"
+                            % (ins.line, ins.mnemonic, off, (1 << (bits - 1)) * INST_BYTES,
+                               INST_BYTES))
+    return count
+
+
 def encode(ins: Instr, pc: int = 0, labels: Optional[Dict[str, int]] = None) -> int:
     """One instruction to its 40-bit word. `pc` is its packet's address and
     `labels` label addresses, for branch and jal targets."""
@@ -210,14 +222,10 @@ def encode(ins: Instr, pc: int = 0, labels: Optional[Dict[str, int]] = None) -> 
     ops = list(ins.ops)
 
     if kind == "BR":
-        # rs1, rs2, target[, incr]: the offset is in words, {[14], [39:31]}.
+        # rs1, rs2, target[, incr]: the offset counts instructions, {[14], [39:31]}.
         if len(ops) not in (3, 4):
             raise AssemblyError("line %d: %s takes rs1, rs2, label" % (ins.line, ins.mnemonic))
-        off = _target(ops[2], pc, labels, ins)
-        if off % 4 or not _fits(off, 12):
-            raise AssemblyError("line %d: %s: branch offset %d out of range (+-2048 bytes)"
-                                % (ins.line, ins.mnemonic, off))
-        v = (off >> 2) & 0x3FF
+        v = _instructions(_target(ops[2], pc, labels, ins), 10, ins) & 0x3FF
         word |= (v >> 9) << 14 | (v & 0x1FF) << 31
         word |= _reg(ops[0], ins) << 15 | _reg(ops[1], ins) << 23
         if len(ops) == 4:
@@ -234,7 +242,8 @@ def encode(ins: Instr, pc: int = 0, labels: Optional[Dict[str, int]] = None) -> 
     if ins.mnemonic in ("halt.s", "nop.s") and not ops:
         return word
     if ins.mnemonic == "jal":
-        ops = [ops[0], str(_target(ops[1], pc, labels, ins))] if len(ops) == 2 else ops
+        ops = ([ops[0], str(_instructions(_target(ops[1], pc, labels, ins), 25, ins))]
+               if len(ops) == 2 else ops)
     if len(ops) != len(layout):
         raise AssemblyError("line %d: %s takes %d operands (%s), got %d"
                             % (ins.line, ins.mnemonic, len(layout),
