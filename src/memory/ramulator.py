@@ -100,7 +100,9 @@ def ramulator_available() -> bool:
 #: configs/ddr4_config.yaml -- DDR4 8Gb x16, DDR4-3200W, one channel, 2 ranks,
 #: RoBaRaCoCh, FR-FCFS, all-bank refresh, open rows, 256 read and 64 write
 #: queue entries -- ticked twice per 800 MHz cycle (ramulator_sv_wrapper.sv
-#: step 7), so DDR4-3200's 1600 MHz memory clock runs at its own speed.
+#: step 7: clock_ratio 2, whatever the DRAM's own clock), so DDR4-3200's
+#: 1600 MHz memory clock runs at its own speed. clock_ratio None takes the
+#: ratio from tCK and the 800 MHz core clock instead.
 #: Reads to a 64-byte block already being read share its one DRAM read
 #: (ramulator_dpi.cpp's coalescing); writes go one by one.
 #:
@@ -118,17 +120,17 @@ def ramulator_available() -> bool:
 DRAM_CONFIGS: Dict[str, Dict] = {
     "rtl": dict(org="DDR4_8Gb_x16", preset="DDR4_3200W", ranks=2, channels=1,
                 mapper="RoBaRaCoCh", row_policy="Open", read_buffer=256,
-                write_buffer=64, coalesce_bytes=64),
+                write_buffer=64, coalesce_bytes=64, clock_ratio=2),
     "ddr4-1600": dict(org="DDR4_4Gb_x8", preset="DDR4_1600J", ranks=2, channels=1,
                       mapper="RoBaRaCoCh", row_policy="Open", read_buffer=32,
-                      write_buffer=32, coalesce_bytes=0),
+                      write_buffer=32, coalesce_bytes=0, clock_ratio=None),
 }
 DRAM_CONFIGS["ddr_cntrl"] = dict(DRAM_CONFIGS["ddr4-1600"], nCL=11, nCWL=10, nRAS=45,
                                  nRC=55, nRFC=172, nREFI=250)
 
 #: Fields that are not Ramulator's DDR4 values.
 _FIELDS = ("org", "preset", "ranks", "channels", "mapper", "row_policy",
-           "read_buffer", "write_buffer", "coalesce_bytes")
+           "read_buffer", "write_buffer", "coalesce_bytes", "clock_ratio")
 
 
 def dram_params(config: str = "rtl", **overrides) -> Dict:
@@ -191,7 +193,9 @@ class RamulatorDRAM(Clocked):
         self.tx_bytes = lib.atr_tx_bytes(self._h)
         self.tck_ns = lib.atr_tck_ns(self._h)
         #: Memory cycles per core cycle.
-        self.ratio = Fraction(1000 / float(core_mhz) / self.tck_ns).limit_denominator(1000)
+        fixed = self.params.get("clock_ratio")
+        self.ratio = (Fraction(fixed).limit_denominator(1000) if fixed is not None else
+                      Fraction(1000 / float(core_mhz) / self.tck_ns).limit_denominator(1000))
         self.last_issue_tick = -1
         self._cycle = -1          # last core cycle Ramulator has run
         self._next_tag = 0

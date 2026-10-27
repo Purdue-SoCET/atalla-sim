@@ -319,7 +319,11 @@ and it still packs 256-bit beats onto the 64-bit bus; the model takes each
 burst and beat once, as intended. `--no-axi` sends each 8-byte request
 straight to the DRAM model instead, one a cycle for all masters; `--axi` with
 `--dram fixed` puts a DRAM that answers in `--dram-latency` cycles behind the
-bus (`--dram-latency 0` measures the bus alone). Sizes are in `AXIParams`.
+bus (`--dram-latency 0` measures the bus alone). Sizes are in `AXIParams`,
+including the wrapper's 8,192 burst slots. With the bus, the performance
+summary gives each master's AXI bursts and bytes and the read and write
+paths' bytes a cycle against their 8 each, and the activity view draws the
+two paths in place of the shared channel.
 
 **DRAM timing from Ramulator 2.** With `--dram ramulator`
 (`dram_channel=RamulatorDRAM()` from Python; `src/memory/ramulator.py`), the
@@ -348,9 +352,11 @@ it, or any of Ramulator's DDR4 values, can be changed with
 | `relu.c`, `--no-axi` | 894 | 1,740 | 6,481 |
 
 (`relu.c` takes 664 cycles with the fixed channel, 728 with the fixed DRAM
-behind the bus, and 613 with an ideal one.) The clock ratio follows
-from tCK and the 800 MHz core clock, so another preset (`preset=DDR4_2400R`)
-or `tCK_ps` changes it too.
+behind the bus, and 613 with an ideal one.) `clock_ratio` is the memory
+cycles run per core cycle: 2 in `rtl`, as the wrapper ticks Ramulator twice a
+clock whatever the standard; `clock_ratio=None` takes it from tCK and the
+800 MHz core clock instead, as `ddr4-1600` does, so another preset
+(`preset=DDR4_2400R`) or `tCK_ps` changes it too.
 
 Every request is one 64-byte DDR4 transaction, however few bytes it carries:
 with the 8-byte requests the masters make, a stream of row hits in one bank
@@ -372,6 +378,44 @@ The controller sets no tRRD, tCCD, tFAW, tWTR or tRTP; `ddr_cntrl` uses
 DDR4-1600J's. The model sleeps while nothing is in flight and runs the cycles
 it skipped before its next request, so refresh lands where it would if every
 cycle had ticked.
+
+**Checked against the RTL.** `tools/memory_bench.py` runs the DRAM subsystem
+report's measurements (Spring 2026) on the model. Tables 3 and 4 follow the
+wrapper's own bench, `tb/unit/memory/ramulator_wrapper/test_sdma.sv` on
+`memory_FA26`: a 1024×1024 int16 matrix read through the wrapper in 32-byte
+beats, one AR offered a cycle, row-major and then tile-major, in single-beat
+reads (table 3) or 2-beat bursts, one per 64-byte tile row (table 4), with
+the branch's `configs/ddr4_*.yaml`. Every one of the 20 DDR4 rows lands
+within 0.2% of the report's cycles, and the stall percentages agree to
+0.1 points:
+
+| config | single-beat row-major | tile-major | 2-beat bursts row-major | tile-major |
+|---|---|---|---|---|
+| DDR4 1ch 128b | 207,760 / 207,824 | 137,945 / 138,126 | 70,972 / 70,802 | 69,516 / 69,578 |
+| DDR4 1ch 256b | 241,824 / 242,003 | 190,437 / 190,603 | 103,993 / 104,017 | 86,981 / 87,037 |
+| DDR4 1ch 512b | 258,944 / 259,211 | 258,948 / 259,510 | 121,181 / 121,273 | 121,166 / 121,262 |
+| DDR4 2ch 128b | 104,138 / 104,145 | 90,605 / 90,679 | 65,737 / 65,737 | 65,647 / 65,647 |
+| DDR4 4ch 128b | 65,917 / 65,924 | 66,291 / 66,299 | 65,562 / 65,562 | 65,686 / 65,686 |
+
+(model / report, cycles.) What is left is Ramulator 2.1 against the 2.0 the
+wrapper links, and where the bench's write phase leaves refresh. The
+saturated burst rows show the wrapper's 8,192 burst slots at work: the bench
+offers its 32,768 bursts faster than one beat a cycle drains them, so once
+the slots fill a burst goes in every other cycle, and 25% of the cycles
+stall in both. The HBM3 rows are left out: their `HBM3_8Gb` preset is
+Ramulator 2.0's, which 2.1 replaced.
+
+Table 1 (the bus with a zero-latency DRAM) was measured on the earlier,
+two-scratchpad interconnect, and no bench for it is in the repository. Today's
+bus, driven as fast as its masters can with `axi_tb.sv`'s burst lengths,
+reads at 7.99 B/cycle (100%: one R beat a cycle) and writes at 6.04 B/cycle
+(76%: 2-3 idle cycles between bursts), against the report's 3.28 and 2.23
+for the old design.
+
+```bash
+python tools/memory_bench.py all                        # about five minutes
+python tools/memory_bench.py table4 --config "DDR4 2ch 128b"
+```
 
 ## Performance monitor
 

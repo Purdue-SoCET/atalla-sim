@@ -201,3 +201,16 @@ def _platform_cycles(mode):
 
 def test_event_and_legacy_scheduling_agree():
     assert _platform_cycles("event") == _platform_cycles("legacy")
+
+
+def test_the_wrapper_holds_a_limited_number_of_bursts():
+    """N_BURST_SLOTS: a burst is taken only while a slot is free; a slot frees
+    when its last beat goes out."""
+    bus, dram = make(latency=0, burst_slots=2, ar_depth=8)
+    p = bus.port("sp0")
+    for k in range(4):
+        p.read(0, 0x100 * k, 4, lambda i, c: None)
+    run(bus, dram, 3)
+    assert bus.stats["ar"] == 2 and len(p.reads) == 2
+    run(bus, dram, 40, 3)
+    assert bus.stats["ar"] == 4 and bus.idle

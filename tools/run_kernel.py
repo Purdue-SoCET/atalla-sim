@@ -236,7 +236,7 @@ def main() -> None:
         print("performance report written to %s" % args.perf_json)
     if args.activity:
         meta = dict(program=Path(args.kernel).name, array=args.array, lanes=args.lanes,
-                    burst_bytes=args.burst_bytes, dram=args.dram)
+                    burst_bytes=args.burst_bytes, dram=args.dram, axi=plat.axi is not None)
         if args.dram == "fixed":
             meta["dram_latency"] = args.dram_latency
         if args.activity.endswith(".html"):

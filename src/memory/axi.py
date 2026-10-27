@@ -8,9 +8,9 @@ A read is one AR of up to 16 beats of 8 bytes; a write is one AW and its W
 beats. The bus has a read path and a write path that run side by side:
 
     read   AR FIFO per master (4) -> round-robin arbiter, one AR a cycle ->
-           wrapper: every beat goes to the DRAM model at once -> beats come
-           back in AR order, one a cycle on the shared R channel, oldest
-           burst first (single-beat reads fill the gaps)
+           wrapper (8192 burst slots): every beat goes to the DRAM model at
+           once -> beats come back in AR order, one a cycle on the shared R
+           channel, oldest burst first (single-beat reads fill the gaps)
     write  AW FIFO (3) and W FIFO (31 beats) per master -> round-robin
            arbiter, held for a whole burst -> driver, one burst at a time ->
            wrapper: one 8-byte DRAM write per beat -> B when the last beat
@@ -59,6 +59,11 @@ class AXIParams:
     w_depth: int = 31          # W FIFO per master: NUM_U_WRITES * 8, one never used
     driver_beats: int = 4      # the write driver's beat FIFO
     drain_per_cycle: int = 8   # DRAM completions the wrapper takes a cycle
+    burst_slots: int = 8192    # wrapper's N_BURST_SLOTS: read bursts taken, not yet returned
+    single_depth: int = 8192   # wrapper's SR_DEPTH: single-beat data waiting for R
+    #: Bytes a beat carries: the bus's 64 bits. The wrapper's own benchmark
+    #: (tb/unit/memory/ramulator_wrapper/test_sdma.sv) drives it with 32.
+    beat_bytes: int = BEAT_BYTES
 
 
 @dataclass(eq=False)
@@ -182,11 +187,11 @@ class AXIBus(Clocked):
 
     # -- read path ----------------------------------------------------------------------
     def _beat_addr(self, r: _Read, i: int) -> int:
-        return r.addr + i * BEAT_BYTES
+        return r.addr + i * self.params.beat_bytes
 
     def _send_read_beat(self, r: _Read, cycle: int) -> bool:
         i = r.sent
-        ok = self.dram.send(cycle, self._beat_addr(r, i), BEAT_BYTES, False,
+        ok = self.dram.send(cycle, self._beat_addr(r, i), self.params.beat_bytes, False,
                             lambda c, r=r, i=i: self._arrive(r, i),
                             coalesce=r.beats > 1)
         if ok:
@@ -236,7 +241,9 @@ class AXIBus(Clocked):
             start = 0 if self._r_last is None else self._r_last + 1
             sel = next((start + k) % n for k in range(n) if req[(start + k) % n])
         r = self.ports[sel].reads[0]
-        if self._send_read_beat(r, cycle):
+        room = (len(self._bursts) < self.params.burst_slots if r.beats > 1
+                else len(self._single) < self.params.single_depth)
+        if room and self._send_read_beat(r, cycle):
             self.ports[sel].reads.popleft()
             self._r_last, self._r_locked = sel, None
             self.stats["ar"] += 1
@@ -263,8 +270,8 @@ class AXIBus(Clocked):
         w_fire = False
         if self._d_fifo and (self._d_aw_sent or self._d_aw):
             i = self._d_fifo[0]
-            ok = self.dram.send(cycle, b.addr + i * BEAT_BYTES, BEAT_BYTES, True,
-                                lambda c: None)
+            ok = self.dram.send(cycle, b.addr + i * self.params.beat_bytes,
+                                self.params.beat_bytes, True, lambda c: None)
             if ok:
                 w_fire = True
                 self.last_issue_tick = cycle
@@ -331,8 +338,8 @@ class AXIBus(Clocked):
         s, cyc = self.stats, max(1, cycles)
         lines = ["AXI bus: %d read bursts, %d write bursts" % (s["ar"], s["aw"]),
                  "  R %d beats (%.2f B/cycle), W %d beats (%.2f B/cycle), of 8 each"
-                 % (s["r_beats"], BEAT_BYTES * s["r_beats"] / cyc, s["w_beats"],
-                    BEAT_BYTES * s["w_beats"] / cyc)]
+                 % (s["r_beats"], self.params.beat_bytes * s["r_beats"] / cyc, s["w_beats"],
+                    self.params.beat_bytes * s["w_beats"] / cyc)]
         if s["dram_refused"]:
             lines.append("  %d requests the DRAM refused for a full queue" % s["dram_refused"])
         full = {p.name: p.stats["ar_full"] + p.stats["aw_full"] for p in self.ports}
