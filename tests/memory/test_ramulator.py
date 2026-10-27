@@ -1,8 +1,10 @@
 """memory/ramulator.py: DRAM timed by Ramulator 2's DDR4 model.
 
 Skipped unless `make ramulator` has built the library. The expected
-latencies come from the default configuration, DDR4-1600J (CL-RCD-RP
-10-10-10, a 4-cycle burst, tCCD_L 5) at one memory cycle a core cycle.
+latencies come from the configurations' timings:
+  "rtl"       DDR4-3200W (CL-RCD 20-20, a 4-cycle burst) at two memory
+              cycles a core cycle
+  "ddr4-1600" DDR4-1600J (CL-RCD-RP 10-10-10, tCCD_L 5) at one
 """
 import gzip
 import os
@@ -15,7 +17,7 @@ import pytest
 from memory.backend import Backend
 from memory.bus import BusMaster
 from memory.dram import DRAM
-from memory.ramulator import RamulatorDRAM, ramulator_available, ramulator_config
+from memory.ramulator import DRAM_CONFIGS, RamulatorDRAM, ramulator_available, ramulator_config
 
 pytestmark = pytest.mark.skipif(not ramulator_available(), reason="needs `make ramulator`")
 
@@ -31,19 +33,49 @@ def run(ram, cycles, start=0, masters=()):
         ram.tick(float(c))
 
 
-def test_a_lone_read_opens_its_row():
-    """ACT at 0, RD tRCD = 10 later, data CL + burst = 14 after that."""
-    ram, done = RamulatorDRAM(), []
+def lone_read(*args, **kw):
+    ram, done = RamulatorDRAM(*args, **kw), []
     assert ram.send(0, 0x1000, 8, False, done.append)
-    run(ram, 40)
-    assert done == [24]
+    run(ram, 60)
     assert ram.idle
+    return done
+
+
+def test_a_lone_read_opens_its_row():
+    """ACT, RD tRCD later, data CL + burst after that, and one memory cycle
+    to arrive: 1 + 10 + 14 = 25 memory cycles at DDR4-1600 (core cycle 24);
+    1 + 20 + 24 = 45 at DDR4-3200, two a core cycle (core cycle 22)."""
+    assert lone_read("ddr4-1600") == [24]
+    assert lone_read("rtl") == [22]
+
+
+def test_the_rtl_config_is_memory_fa26s():
+    ram = RamulatorDRAM("rtl")
+    assert ram.ratio == 2 and ram.tx_bytes == 64
+    assert ram.params["org"] == "DDR4_8Gb_x16" and ram.params["preset"] == "DDR4_3200W"
+    taken = sum(ram.send(0, 0x40 * k, 8, False, lambda c: None) for k in range(300))
+    assert taken == 256                      # read_buffer_size
+
+
+def test_reads_in_one_block_share_one_dram_read():
+    """The wrapper's coalescing: reads to a 64-byte block already being read
+    complete with it; writes are never merged."""
+    ram, done = RamulatorDRAM("rtl"), []
+    for c in range(8):
+        assert ram.send(c, 0x1000 + 8 * c, 8, False, done.append)
+        run(ram, 1, c)
+    run(ram, 60, 8)
+    assert done == [22] * 8
+    assert ram.stats["reads"] == 1 and ram.stats["coalesced"] == 7
+    for c in range(4):
+        ram.send(100 + c, 0x2000 + 8 * c, 8, True, lambda c: None)
+    assert ram.stats["writes"] == 4
 
 
 def test_reads_in_one_row_follow_every_tccd():
-    """Row hits in one bank group: one RD every tCCD_L = 5 cycles, however
-    few bytes each moves -- each is a full 64-byte DDR4 burst."""
-    ram, done = RamulatorDRAM(), []
+    """Without merging, row hits in one bank group: one RD every tCCD_L = 5
+    cycles, however few bytes each moves -- each is a full 64-byte burst."""
+    ram, done = RamulatorDRAM("ddr4-1600"), []
     for c in range(8):
         assert ram.send(c, 0x1000 + 8 * c, 8, False, done.append)
         run(ram, 1, c)
@@ -55,22 +87,23 @@ def test_reads_in_one_row_follow_every_tccd():
 
 
 def test_a_full_read_queue_refuses():
-    ram = RamulatorDRAM()
+    ram = RamulatorDRAM("ddr4-1600")
     taken = sum(ram.send(0, 0x40 * k, 8, False, lambda c: None) for k in range(40))
     assert taken == 32 and ram.stats["refused"] == 8
 
 
 def test_a_burst_larger_than_a_transaction_is_an_error():
     with pytest.raises(ValueError, match="64-byte"):
-        RamulatorDRAM().send(0, 0, 128, False, lambda c: None)
+        RamulatorDRAM().send(0, 0, 128, True, lambda c: None)
 
 
-def test_sleeping_catches_up_refresh():
+@pytest.mark.parametrize("config", ["rtl", "ddr4-1600"])
+def test_sleeping_catches_up_refresh(config):
     """Asleep while idle, it runs the skipped memory cycles before the next
     request, so a request after a refresh is timed as if every cycle had
-    ticked (tREFI is 6240 cycles)."""
+    ticked (tREFI is 7.8 us, 6240 core cycles)."""
     def first_done(tick_every_cycle):
-        ram, done = RamulatorDRAM(), []
+        ram, done = RamulatorDRAM(config), []
         for c in range(13000):
             if c in (6300, 12500):
                 ram.send(c, 0x2000 + 8 * c, 8, False, done.append)
@@ -81,26 +114,24 @@ def test_sleeping_catches_up_refresh():
     assert first_done(True) == first_done(False)
 
 
-def test_config_overrides_reach_the_controller():
-    """A slower CL makes the lone read slower by as much."""
-    ram, done = RamulatorDRAM(ramulator_config(nCL=12)), []
-    ram.send(0, 0, 8, False, done.append)
-    run(ram, 40)
-    assert done == [26]
+def test_any_value_can_be_overridden():
+    """A slower CL makes the lone read slower by as much; a field of the
+    config itself changes as well."""
+    assert lone_read("ddr4-1600", nCL=12) == [26]
+    assert lone_read("rtl", nCL=24) == [24]
+    assert lone_read("rtl", coalesce_bytes=0) == [22]
+    assert RamulatorDRAM("rtl", read_buffer=64).params["read_buffer"] == 64
 
 
-def test_the_rtl_timings_fold_additive_latency_into_cl():
-    """The RTL waits tRL = tAL + tCL = 11 after RD: one cycle more than the spec."""
-    ram, done = RamulatorDRAM(ramulator_config(timings="rtl", nREFI=6240)), []
-    ram.send(0, 0, 8, False, done.append)
-    run(ram, 40)
-    assert done == [25]
+def test_the_ddr_cntrl_timings_fold_additive_latency_into_cl():
+    """The controller waits tRL = tAL + tCL = 11 after RD: one cycle more than the spec."""
+    assert lone_read("ddr_cntrl", nREFI=6240) == [25]
 
 
-def test_the_rtl_refresh_interval_dominates():
+def test_the_ddr_cntrl_refresh_interval_dominates():
     """nREFI 250 with nRFC 172: reads wait behind refreshes most of the time."""
-    def mean_latency(cfg):
-        ram, done, sent = RamulatorDRAM(cfg), [], []
+    def mean_latency(config):
+        ram, done, sent = RamulatorDRAM(config), [], []
         for c in range(0, 5000, 50):
             sent.append(c)
             ram.send(c, 0x40 * c, 8, False, done.append)
@@ -108,12 +139,12 @@ def test_the_rtl_refresh_interval_dominates():
         run(ram, 400, 5000)
         return sum(d - s for d, s in zip(done, sent)) / len(sent)
 
-    assert mean_latency(ramulator_config(timings="rtl")) > 2 * mean_latency(ramulator_config())
+    assert mean_latency("ddr_cntrl") > 2 * mean_latency("ddr4-1600")
 
 
-def test_unknown_timing_sets_and_parameters_are_refused():
-    with pytest.raises(ValueError, match="spec, rtl"):
-        ramulator_config(timings="fast")
+def test_unknown_configs_and_parameters_are_refused():
+    with pytest.raises(ValueError, match=", ".join(DRAM_CONFIGS)):
+        ramulator_config("fast")
     with pytest.raises(ValueError, match="bogus"):
         ramulator_config(bogus=1)
 
@@ -128,11 +159,11 @@ def test_a_backend_loads_a_tile_through_it():
     b.driver_to_backend_start_load(0, 0x1000, rows=2, cols=32)
     run(ram, 400, masters=[b])
     assert rows == [(0, bytes(range(64))), (1, bytes(range(64, 128)))]
-    assert ram.stats["reads"] == 16 and ram.idle
+    assert ram.stats["reads"] + ram.stats["coalesced"] == 16 and ram.idle
 
 
 def test_a_cache_port_reads_a_line_through_it():
-    ram = RamulatorDRAM()
+    ram = RamulatorDRAM("ddr4-1600")
     p = BusMaster("p", ram, burst_bytes=8)
     p.read(0x100, 16)
     run(ram, 24, masters=[p])

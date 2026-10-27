@@ -18,19 +18,18 @@ as with the fixed channel.
 The masters see a burst completed in cycle c from cycle c + 1. One burst
 launches per cycle in total, as on the fixed channel.
 
-The default configuration is the RTL DDR controller's
-(rtl/include/ddr_cntrl/dram_pkg.vh): DDR4 4Gb x8 parts on a 64-bit
-channel, 2 ranks of 4 bank groups of 4 banks, 15 row and 10 column bits,
-CL-RCD-RP 10-10-10 (DDR4-1600J: tCK 1.25 ns, one memory cycle per 800 MHz
-core cycle). Two timing sets (TIMING_SETS): "spec", DDR4-1600J as JEDEC
-gives it, and "rtl", the controller's own values where they leave the spec;
-any single timing can be overridden on top. The address mapping is Ramulator's RoBaRaCoCh,
-not the RTL address_mapper's {rank, row, bank, BG[1], col[9:3], BG[0],
-col[2:0]}, which Ramulator has no mapper for.
+The configuration is named (DRAM_CONFIGS) and every value in it can be
+overridden. The default, "rtl", is the memory_FA26 branch's: its AXI bus
+ends in a Ramulator wrapper running DDR4-3200W (8Gb x16, 2 ranks, one
+64-bit channel) at two memory cycles per 800 MHz core cycle, with 256 read
+and 64 write queue entries, and reads to a 64-byte block in flight merged
+into one. "ddr4-1600" and "ddr_cntrl" are the non-blocking DDR controller's
+organization at DDR4-1600J, by the spec and with dram_pkg.vh's own timings.
+The address mapping is Ramulator's RoBaRaCoCh.
 
-Every burst is one DDR4 transaction of 64 bytes (BL8 on 64 bits), however
-few bytes it carries: an 8-byte burst costs as much data-bus time as a
-64-byte one.
+Every DRAM request is one DDR4 transaction of 64 bytes (BL8 on 64 bits),
+however few bytes it carries: an 8-byte write costs as much data-bus time
+as a 64-byte one. Merged reads share theirs.
 
 Needs `make ramulator` (a C++20 compiler and CMake); ramulator_available()
 says whether it has been built.
@@ -91,35 +90,58 @@ def ramulator_available() -> bool:
     return _load() is not None
 
 
-#: Timings in memory cycles (tCK 1.25 ns) on top of the DDR4-1600J preset.
-#: "rtl" is rtl/include/ddr_cntrl/dram_pkg.vh where it differs from the spec:
+#: Named DRAM configurations. Every field can be overridden by name
+#: (ramulator_config(config, **overrides), run_kernel --dram-param), as can any
+#: Ramulator DDR4 timing or organization value (nCL=12, tCK_ps=625, ...).
+#:
+#: "rtl" is the memory_FA26 branch's memory system: the AXI bus's subordinate
+#: is the Ramulator wrapper (rtl/modules/memory/ramulator_wrapper), with
+#: configs/ddr4_config.yaml -- DDR4 8Gb x16, DDR4-3200W, one channel, 2 ranks,
+#: RoBaRaCoCh, FR-FCFS, all-bank refresh, open rows, 256 read and 64 write
+#: queue entries -- ticked twice per 800 MHz cycle (ramulator_sv_wrapper.sv
+#: step 7), so DDR4-3200's 1600 MHz memory clock runs at its own speed.
+#: Reads to a 64-byte block already being read share its one DRAM read
+#: (ramulator_dpi.cpp's coalescing); writes go one by one.
+#:
+#: "ddr4-1600" and "ddr_cntrl" are the non-blocking DDR controller's
+#: organization (rtl/include/ddr_cntrl/dram_pkg.vh on FA26_integration:
+#: 4Gb x8, 2 ranks of 4 x 4 banks, 15 row and 10 column bits) at
+#: DDR4-1600J, as JEDEC gives it and with the controller's own values:
 #:   nCL 11    the read FSM waits tRL = tAL + tCL = 1 + 10 (fsm_module.sv);
 #:             Ramulator has no additive latency, so AL is folded into CL.
-#:             DDR4 allows AL = 0, CL - 1 or CL - 2 only.
 #:   nCWL 10   the write path counts tCWL (nb_wdata_queue.sv); DDR4-1600 is 9
-#:   nRAS 45   spec 28 (35 ns): legal, rows stay open longer than needed
-#:   nRC 55    tRAS + tRP; spec 38
-#:   nRFC 172  spec 208 (260 ns for 4Gb): too short, refresh overlaps commands
-#:   nREFI 250 shortened in the RTL to watch refreshes; spec 6240 (7.8 us).
-#:             With nRFC 172 the device spends most of its time refreshing.
-#: The RTL sets no tRRD, tCCD, tFAW, tWTR or tRTP; those keep the spec values.
-TIMING_SETS: Dict[str, Dict[str, int]] = {
-    "spec": {},
-    "rtl": dict(nCL=11, nCWL=10, nRAS=45, nRC=55, nRFC=172, nREFI=250),
+#:   nRAS 45, nRC 55 (spec 28, 38): legal, rows stay open longer
+#:   nRFC 172  spec 208 (260 ns for 4Gb): too short
+#:   nREFI 250 shortened in the RTL to watch refreshes (spec 6240): with
+#:             nRFC 172 the device refreshes most of the time
+DRAM_CONFIGS: Dict[str, Dict] = {
+    "rtl": dict(org="DDR4_8Gb_x16", preset="DDR4_3200W", ranks=2, channels=1,
+                mapper="RoBaRaCoCh", row_policy="Open", read_buffer=256,
+                write_buffer=64, coalesce_bytes=64),
+    "ddr4-1600": dict(org="DDR4_4Gb_x8", preset="DDR4_1600J", ranks=2, channels=1,
+                      mapper="RoBaRaCoCh", row_policy="Open", read_buffer=32,
+                      write_buffer=32, coalesce_bytes=0),
 }
+DRAM_CONFIGS["ddr_cntrl"] = dict(DRAM_CONFIGS["ddr4-1600"], nCL=11, nCWL=10, nRAS=45,
+                                 nRC=55, nRFC=172, nREFI=250)
+
+#: Fields that are not Ramulator's DDR4 values.
+_FIELDS = ("org", "preset", "ranks", "channels", "mapper", "row_policy",
+           "read_buffer", "write_buffer", "coalesce_bytes")
 
 
-def ramulator_config(*, timings: str = "spec", preset: str = "DDR4_1600J",
-                     org: str = "DDR4_4Gb_x8", ranks: int = 2, channels: int = 1,
-                     mapper: str = "RoBaRaCoCh", row_policy: str = "Open",
-                     **overrides) -> str:
-    """A Ramulator 2 configuration, as the YAML its C++ side reads.
-    `timings` picks a TIMING_SETS entry, applied over the `preset`;
-    `overrides` (nCL=12, nREFI=6240, tCK_ps=1250, channel_width=64, ...) go
-    on top. The other keywords pick Ramulator components by name."""
-    if timings not in TIMING_SETS:
-        raise ValueError("timings: one of %s, not %r" % (", ".join(TIMING_SETS), timings))
-    dram_overrides = {**TIMING_SETS[timings], **overrides}
+def dram_params(config: str = "rtl", **overrides) -> Dict:
+    """DRAM_CONFIGS[config] with `overrides` on top."""
+    if config not in DRAM_CONFIGS:
+        raise ValueError("DRAM config: one of %s, not %r" % (", ".join(DRAM_CONFIGS), config))
+    return {**DRAM_CONFIGS[config], **overrides}
+
+
+def ramulator_config(config: str = "rtl", **overrides) -> str:
+    """The Ramulator 2 configuration for dram_params(config, **overrides),
+    as the YAML its C++ side reads."""
+    p = dram_params(config, **overrides)
+    dram_overrides = {k: v for k, v in p.items() if k not in _FIELDS}
     path = os.path.join(RAMULATOR_DIR, "python")
     if path not in sys.path:
         sys.path.insert(0, path)
@@ -128,15 +150,17 @@ def ramulator_config(*, timings: str = "spec", preset: str = "DDR4_1600J",
 
     def ctrl():
         return ramulator.controller.GenericDDR(
-            dram=ramulator.dram.DDR4(org_preset=org, timing_preset=preset,
-                                     rank=int(ranks), **dram_overrides),
+            dram=ramulator.dram.DDR4(org_preset=p["org"], timing_preset=p["preset"],
+                                     rank=int(p["ranks"]), **dram_overrides),
             scheduler=ramulator.scheduler.FRFCFS(),
             refresh_manager=ramulator.refresh_manager.AllBank(),
-            row_policy=getattr(ramulator.row_policy, row_policy)(),
-            addr_mapper=getattr(ramulator.addr_mapper, mapper)())
+            row_policy=getattr(ramulator.row_policy, p["row_policy"])(),
+            addr_mapper=getattr(ramulator.addr_mapper, p["mapper"])(),
+            read_buffer_size=int(p["read_buffer"]),
+            write_buffer_size=int(p["write_buffer"]))
 
     mem = ramulator.memory_system.GenericDRAM(
-        clock_ratio=1, controllers=[ctrl() for _ in range(int(channels))],
+        clock_ratio=1, controllers=[ctrl() for _ in range(int(p["channels"]))],
         channel_mapper=ramulator.channel_mapper.CacheLineInterleave())
     return dict_to_yaml({"frontend": ramulator.frontend.External(clock_ratio=1).to_config(),
                          "memory_system": mem.to_config()})
@@ -144,20 +168,23 @@ def ramulator_config(*, timings: str = "spec", preset: str = "DDR4_1600J",
 
 class RamulatorDRAM(Clocked):
     """The DRAM channel the DMA backends and cache ports share, timed by
-    Ramulator 2; see the module docstring. `config` is ramulator_config()'s
-    YAML (its defaults when None); `core_mhz` sets how many memory cycles
-    each core cycle runs."""
+    Ramulator 2; see the module docstring. `config` is a DRAM_CONFIGS name
+    and `overrides` change any of its fields or Ramulator's DDR4 values;
+    `core_mhz` sets how many memory cycles each core cycle runs (tCK and
+    core_mhz give the ratio: 2 for DDR4-3200 at 800 MHz)."""
 
     #: Masters check this to wait for on_done instead of counting dram_latency.
     models_latency = True
 
-    def __init__(self, config: Optional[str] = None, *, core_mhz: float = CORE_MHZ):
+    def __init__(self, config: str = "rtl", *, core_mhz: float = CORE_MHZ, **overrides):
         super().__init__()
         lib = _load()
         if lib is None:
             raise RuntimeError("Ramulator is not built: %s" % _load_error)
         self._lib = lib
-        self._h = lib.atr_create((config or ramulator_config()).encode())
+        self.config = config
+        self.params = dram_params(config, **overrides)
+        self._h = lib.atr_create(ramulator_config(config, **overrides).encode())
         if not self._h:
             raise ValueError("Ramulator config: %s" % lib.atr_last_error().decode())
         self.tx_bytes = lib.atr_tx_bytes(self._h)
@@ -168,8 +195,14 @@ class RamulatorDRAM(Clocked):
         self._cycle = -1          # last core cycle Ramulator has run
         self._next_tag = 0
         self._pending: Dict[int, Callable[[int], None]] = {}
+        #: coalesce_bytes > 0: block address -> its outstanding read's waiters.
+        self.coalesce_bytes = int(self.params["coalesce_bytes"])
+        if self.coalesce_bytes > self.tx_bytes:
+            raise ValueError("coalesce_bytes %d is more than a %d-byte DRAM transaction"
+                             % (self.coalesce_bytes, self.tx_bytes))
+        self._reading: Dict[int, list] = {}
         self._buf = (ctypes.c_int64 * 256)()
-        self.stats = dict(reads=0, writes=0, refused=0)
+        self.stats = dict(reads=0, writes=0, refused=0, coalesced=0)
 
     def __del__(self):
         h, self._h = getattr(self, "_h", None), None
@@ -191,6 +224,14 @@ class RamulatorDRAM(Clocked):
             raise ValueError("a %d-byte burst does not fit a %d-byte DRAM transaction"
                              % (nbytes, self.tx_bytes))
         self._run_to(int(tick) - 1)
+        block = None
+        if self.coalesce_bytes and not is_write:
+            block = int(addr) & ~(self.coalesce_bytes - 1)
+            if block in self._reading:
+                self._reading[block].append(on_done)
+                self.stats["coalesced"] += 1
+                return True
+            addr, nbytes = block, self.coalesce_bytes
         tag = self._next_tag
         ok = self._lib.atr_send(self._h, int(bool(is_write)), int(addr), int(nbytes), tag)
         if ok < 0:
@@ -199,10 +240,17 @@ class RamulatorDRAM(Clocked):
             self.stats["refused"] += 1
             return False
         self._next_tag += 1
+        if block is not None:
+            waiters = self._reading[block] = [on_done]
+            on_done = lambda cycle, block=block, waiters=waiters: self._read_done(block, cycle)
         self._pending[tag] = on_done
         self.stats["writes" if is_write else "reads"] += 1
         self.wake()
         return True
+
+    def _read_done(self, block: int, cycle: int) -> None:
+        for on_done in self._reading.pop(block):
+            on_done(cycle)
 
     # -- the memory clock ---------------------------------------------------------------
     def _mem_cycles(self, first: int, last: int) -> int:
@@ -267,10 +315,14 @@ class RamulatorDRAM(Clocked):
         s = self.controller_stats(through)
         reads = s.get("num_read_reqs_served", 0)
         rows = sum(s.get(k, 0) for k in ("row_hits", "row_misses", "row_conflicts"))
-        lines = ["DRAM (Ramulator 2, tCK %.3g ns, %s memory cycles a core cycle)"
-                 % (self.tck_ns, self.ratio)]
+        lines = ["DRAM (Ramulator 2, %s: %s %s, tCK %.3g ns, %s memory cycles a core cycle)"
+                 % (self.config, self.params["preset"], self.params["org"], self.tck_ns,
+                    self.ratio)]
         lines.append("  %d reads, %d writes, %d refused for a full queue"
                      % (self.stats["reads"], self.stats["writes"], self.stats["refused"]))
+        if self.stats["coalesced"]:
+            lines.append("  %d reads merged into a read of the same %d-byte block"
+                         % (self.stats["coalesced"], self.coalesce_bytes))
         if rows:
             lines.append("  row hits %.1f%%, misses %.1f%%, conflicts %.1f%%"
                          % tuple(100 * s.get(k, 0) / rows

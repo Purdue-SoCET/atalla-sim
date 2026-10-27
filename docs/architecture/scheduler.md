@@ -300,47 +300,53 @@ cycles busy and cycles lost to contention.
 
 **DRAM timing from Ramulator 2.** With `--dram ramulator`
 (`dram_channel=RamulatorDRAM()` from Python; `src/memory/ramulator.py`), the
-channel is Ramulator 2's DDR4 controller instead of a fixed latency. A burst
+channel is Ramulator 2's DDR4 controller instead of a fixed latency. A request
 completes when Ramulator says so: a read when its data returns, a write when
 its WR command issues. The masters see it the next cycle. Bank and row state,
-refresh, FR-FCFS scheduling and the 32-entry read and write queues all count.
-The data still lives in atalla-sim's DRAM, so results are the same and only
-the timing changes. The configuration is the RTL DDR controller's
-(`rtl/include/ddr_cntrl/dram_pkg.vh`):
+refresh, FR-FCFS scheduling and the controller's queues all count. The data
+still lives in atalla-sim's DRAM, so results are the same and only the timing
+changes.
 
-| | RTL controller | Ramulator 2 (`ramulator_config()`) |
-|---|---|---|
-| parts | x8 | `DDR4_4Gb_x8`, 64-bit channel |
-| ranks, bank groups, banks | 2, 4, 4 (1 + 2 + 2 bits) | 2, 4, 4 |
-| rows, columns | 15, 10 bits | 32K, 1K |
-| CL-RCD-RP | 10-10-10 | `DDR4_1600J`: 10-10-10, tCK 1.25 ns |
-| clock | tCK 1.25 ns | 800 MHz memory clock, one memory cycle a core cycle |
-| address mapping | `{rank, row, bank, BG[1], col[9:3], BG[0], col[2:0]}` | `RoBaRaCoCh` (Ramulator has no mapper like the RTL's) |
+The configuration is named (`--dram-config`, `DRAM_CONFIGS`), and any value in
+it, or any of Ramulator's DDR4 values, can be changed with
+`--dram-param NAME=VALUE` (`RamulatorDRAM(config, **overrides)` from Python):
 
-Every burst is one 64-byte DDR4 transaction, however few bytes it carries.
-With the default 8-byte bursts, a stream of row hits in one bank group moves
-8 bytes every tCCD_L (5 cycles), so DRAM peaks near 1.6 bytes a cycle
-instead of the fixed channel's 8: `relu.c` takes 1,740 cycles instead of 664.
-`--burst-bytes 64` asks for whole transactions.
-
-Two timing sets, picked with `--dram-timings` (`ramulator_config(timings=...)`):
-`spec` is DDR4-1600J as JEDEC gives it; `rtl` takes `dram_pkg.vh`'s values
-where they leave the spec. Any single value can go on top with
-`--dram-param NAME=VALUE` (`nREFI=6240`, `tCK_ps=1250`, ...).
-
-| | `spec` | `rtl` | |
+| | `rtl` (default) | `ddr4-1600` | `ddr_cntrl` |
 |---|---|---|---|
-| nCL | 10 | 11 | the RTL waits tRL = tAL + tCL; Ramulator has no AL, so it is folded into CL. DDR4 allows AL = 0, CL − 1 or CL − 2 only |
+| from | `memory_FA26`: the AXI bus's Ramulator wrapper (`rtl/modules/memory/ramulator_wrapper`, `configs/ddr4_config.yaml`) | the DDR controller's organization (`dram_pkg.vh`) | the same, with the controller's own timings |
+| `org` | `DDR4_8Gb_x16`, 64-bit channel | `DDR4_4Gb_x8` | `DDR4_4Gb_x8` |
+| `ranks`, `channels` | 2, 1 | 2, 1 | 2, 1 |
+| `preset` | `DDR4_3200W` (CL-RCD-RP 20-20-20, tCK 0.625 ns) | `DDR4_1600J` (10-10-10, tCK 1.25 ns) | `DDR4_1600J` and the values below |
+| memory cycles per 800 MHz cycle | 2 (`ramulator_sv_wrapper.sv` ticks twice a clock) | 1 | 1 |
+| `read_buffer`, `write_buffer` | 256, 64 | 32, 32 | 32, 32 |
+| `coalesce_bytes` | 64: a read to a 64-byte block already being read shares that read (`ramulator_dpi.cpp`) | 0 | 0 |
+| `mapper`, `row_policy` | `RoBaRaCoCh`, `Open` | same | same |
+| `relu.c` | 894 cycles | 1,740 | 6,481 |
+
+(`relu.c` takes 664 cycles with the fixed channel.) The clock ratio follows
+from tCK and the 800 MHz core clock, so another preset (`preset=DDR4_2400R`)
+or `tCK_ps` changes it too.
+
+Every request is one 64-byte DDR4 transaction, however few bytes it carries:
+with the 8-byte requests the masters make, a stream of row hits in one bank
+group moves 8 bytes every tCCD_L. `rtl`'s merged reads recover much of
+that: without them (`coalesce_bytes=0`) `relu.c` takes 1,448 cycles.
+
+`ddr_cntrl` takes `dram_pkg.vh`'s values where they leave DDR4-1600J:
+
+| | DDR4-1600J | `ddr_cntrl` | |
+|---|---|---|---|
+| nCL | 10 | 11 | the controller waits tRL = tAL + tCL; Ramulator has no AL, so it is folded into CL. DDR4 allows AL = 0, CL − 1 or CL − 2 only |
 | nCWL | 9 | 10 | 10 is DDR4-1866's |
 | nRAS | 28 | 45 | legal, slower |
 | nRC | 38 | 55 | tRAS + tRP |
 | nRFC | 208 | 172 | under the 260 ns a 4Gb part needs |
-| nREFI | 6240 | 250 | shortened in the RTL to watch refreshes: with nRFC 172 the device refreshes most of the time, and `relu.c` takes 6,481 cycles instead of 1,740 |
+| nREFI | 6240 | 250 | shortened in the RTL to watch refreshes: with nRFC 172 the device refreshes most of the time |
 
-The RTL sets no tRRD, tCCD, tFAW, tWTR or tRTP; both sets use DDR4-1600J's.
-`ramulator_config()` also takes other Ramulator presets and mappers. The
-model sleeps while nothing is in flight and runs the cycles it skipped before
-its next request, so refresh lands where it would if every cycle had ticked.
+The controller sets no tRRD, tCCD, tFAW, tWTR or tRTP; `ddr_cntrl` uses
+DDR4-1600J's. The model sleeps while nothing is in flight and runs the cycles
+it skipped before its next request, so refresh lands where it would if every
+cycle had ticked.
 
 ## Performance monitor
 
