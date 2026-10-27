@@ -89,9 +89,6 @@ C_PROGRAMS = (sorted(c_kernels.KERNELS.glob("*.c")) + sorted(c_kernels.UNIT_TEST
 #: sim special-cases that (src/components/scpad_ls.py, addresses >= 0x1000 read
 #: DRAM); the hardware's vreg.ld only reads the scratchpad. A compiler issue.
 _DRAM_SHORTCUT = "vreg.ld/st on a DRAM address: only the functional sim allows it"
-#: vreg.ld/st move all 32 lanes where the functional sim moves num_cols + 1, so
-#: a register loaded from a 4-wide tile holds different lanes 4..31.
-_NUM_COLS = "vreg.ld/st move 32 lanes; the functional sim moves num_cols + 1"
 #: A missing dependency (compiler): the vector load doesn't wait for the DMA
 #: that fills its scratchpad. Only a read of the DMA's rs1 waits for it, and
 #: the compiler puts the address in a different register, so the load reads
@@ -105,7 +102,6 @@ DIFFERS_FROM_FUNCTIONAL_SIM = {
         "gemm_passthrough_lane0", "load_weights_lane0_dot", "make_mask_eq_vector",
         "make_mask_gt_scalar", "scpad_store_roundtrip", "vec_op_masked_add_scalar_lane0",
         "vec_op_masked_mul_vector_lane0", "vector_add_lane0", "vector_store_roundtrip")},
-    "gemm_tiled_baseline": _NUM_COLS,
     **{n: _DMA_DEPENDENCY for n in ("add", "scpad_load_roundtrip")},
 }
 
