@@ -24,7 +24,8 @@ ends in a Ramulator wrapper running DDR4-3200W (8Gb x16, 2 ranks, one
 64-bit channel) at two memory cycles per 800 MHz core cycle, with 256 read
 and 64 write queue entries, and reads to a 64-byte block in flight merged
 into one. "ddr4-1600" and "ddr_cntrl" are the non-blocking DDR controller's
-organization at DDR4-1600J, by the spec and with dram_pkg.vh's own timings.
+organization at DDR4-1600J, by the spec and with dram_pkg.vh's own timings
+(branch ddr_cntrl_final).
 The address mapping is Ramulator's RoBaRaCoCh.
 
 Every DRAM request is one DDR4 transaction of 64 bytes (BL8 on 64 bits),
@@ -104,7 +105,7 @@ def ramulator_available() -> bool:
 #: (ramulator_dpi.cpp's coalescing); writes go one by one.
 #:
 #: "ddr4-1600" and "ddr_cntrl" are the non-blocking DDR controller's
-#: organization (rtl/include/ddr_cntrl/dram_pkg.vh on FA26_integration:
+#: organization (rtl/include/ddr_cntrl/dram_pkg.vh on ddr_cntrl_final:
 #: 4Gb x8, 2 ranks of 4 x 4 banks, 15 row and 10 column bits) at
 #: DDR4-1600J, as JEDEC gives it and with the controller's own values:
 #:   nCL 11    the read FSM waits tRL = tAL + tCL = 1 + 10 (fsm_module.sv);

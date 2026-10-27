@@ -133,7 +133,8 @@ def main() -> None:
     ap.add_argument("--dram-config", choices=list(DRAM_CONFIGS), default="rtl",
                     help="with --dram ramulator: rtl (memory_FA26's Ramulator wrapper, "
                          "DDR4-3200W), ddr4-1600 or ddr_cntrl (the DDR controller's "
-                         "dram_pkg.vh timings); src/memory/ramulator.py DRAM_CONFIGS")
+                         "dram_pkg.vh timings, branch ddr_cntrl_final); src/memory/ramulator.py "
+                         "DRAM_CONFIGS")
     ap.add_argument("--dram-param", metavar="NAME=VALUE", action="append", default=[],
                     help="with --dram ramulator: override one value of the config or of "
                          "Ramulator's DDR4 model, e.g. read_buffer=64, preset=DDR4_2400R, "

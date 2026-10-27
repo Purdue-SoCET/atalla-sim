@@ -336,7 +336,7 @@ it, or any of Ramulator's DDR4 values, can be changed with
 
 | | `rtl` (default) | `ddr4-1600` | `ddr_cntrl` |
 |---|---|---|---|
-| from | `memory_FA26`: the AXI bus's Ramulator wrapper (`rtl/modules/memory/ramulator_wrapper`, `configs/ddr4_config.yaml`) | the DDR controller's organization (`dram_pkg.vh`) | the same, with the controller's own timings |
+| from | `memory_FA26`: the AXI bus's Ramulator wrapper (`rtl/modules/memory/ramulator_wrapper`, `configs/ddr4_config.yaml`) | the DDR controller's organization (`ddr_cntrl_final`: `rtl/include/ddr_cntrl/dram_pkg.vh`) | the same, with the controller's own timings |
 | `org` | `DDR4_8Gb_x16`, 64-bit channel | `DDR4_4Gb_x8` | `DDR4_4Gb_x8` |
 | `ranks`, `channels` | 2, 1 | 2, 1 | 2, 1 |
 | `preset` | `DDR4_3200W` (CL-RCD-RP 20-20-20, tCK 0.625 ns) | `DDR4_1600J` (10-10-10, tCK 1.25 ns) | `DDR4_1600J` and the values below |
@@ -357,7 +357,7 @@ with the 8-byte requests the masters make, a stream of row hits in one bank
 group moves 8 bytes every tCCD_L. `rtl`'s merged reads recover much of
 that: without them (`coalesce_bytes=0`) `relu.c` takes 1,432 cycles.
 
-`ddr_cntrl` takes `dram_pkg.vh`'s values where they leave DDR4-1600J:
+`ddr_cntrl` takes `dram_pkg.vh`'s values (`ddr_cntrl_final`) where they leave DDR4-1600J:
 
 | | DDR4-1600J | `ddr_cntrl` | |
 |---|---|---|---|
