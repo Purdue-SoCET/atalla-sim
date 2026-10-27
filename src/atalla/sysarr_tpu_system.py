@@ -430,6 +430,7 @@ PHASE_VLS = 20         # VLS <-> scratchpad frontends
 PHASE_SYSARR = 30      # GSAU <-> systolic array
 PHASE_SPAD = 40        # scratchpad internals (frontends, crossbars, banks)
 PHASE_BACKEND = 50     # scratchpad backends / DRAM
+PHASE_AXI = 52         # the AXI bus between the DRAM masters and DRAM (memory/axi.py)
 PHASE_DRAM = 55        # a DRAM model that runs after its masters (memory/ramulator.py)
 PHASE_HARNESS = 90     # experiment harness, observes everything above
 

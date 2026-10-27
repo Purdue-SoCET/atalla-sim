@@ -140,6 +140,7 @@ what "active" means for each are in `src/atalla/activity.py`.
 | `--array meissa\|tpu` | `meissa` | the systolic array |
 | `--dram-latency N` | 6 | cycles from a DRAM request to its data |
 | `--dram fixed\|ramulator` | `fixed` | DRAM timing: `--dram-latency`, or Ramulator 2's DDR4 model (needs `make ramulator`) |
+| `--axi`, `--no-axi` | on with Ramulator | the `memory_FA26` AXI bus between the DRAM masters and DRAM |
 | `--dram-config rtl\|ddr4-1600\|ddr_cntrl` | `rtl` | with Ramulator: `memory_FA26`'s DDR4-3200W wrapper, or the DDR controller's DDR4-1600 (by the spec, or with its own timings) |
 | `--dram-param NAME=VALUE` | | with Ramulator: change one value of the config or of the DDR4 model, e.g. `read_buffer=64`, `preset=DDR4_2400R`, `nCL=22`; repeatable |
 | `--burst-bytes N` | 8 | bytes per DRAM request, for every DRAM master; 8 is the RTL's 64-bit interface |

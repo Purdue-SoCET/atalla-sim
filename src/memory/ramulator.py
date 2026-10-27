@@ -217,15 +217,16 @@ class RamulatorDRAM(Clocked):
         self.last_issue_tick = int(tick)
 
     def send(self, tick: int, addr: int, nbytes: int, is_write: bool,
-             on_done: Callable[[int], None]) -> bool:
+             on_done: Callable[[int], None], coalesce: bool = True) -> bool:
         """Offer a burst in cycle `tick`; False if the controller's queue is
-        full. on_done(c) runs in the cycle c it completes."""
+        full. on_done(c) runs in the cycle c it completes. `coalesce` False
+        keeps a read out of the merging (the wrapper's single-beat reads)."""
         if not 0 < nbytes <= self.tx_bytes:
             raise ValueError("a %d-byte burst does not fit a %d-byte DRAM transaction"
                              % (nbytes, self.tx_bytes))
         self._run_to(int(tick) - 1)
         block = None
-        if self.coalesce_bytes and not is_write:
+        if self.coalesce_bytes and coalesce and not is_write:
             block = int(addr) & ~(self.coalesce_bytes - 1)
             if block in self._reading:
                 self._reading[block].append(on_done)

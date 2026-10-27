@@ -6,7 +6,11 @@ burst-sized DRAM requests; at most dram_q_depth bursts are in flight, each
 returns dram_latency cycles after it launched, and backends that share a
 SharedDRAMBurstChannel launch one burst a cycle between them. Shared through
 a RamulatorDRAM instead (memory/ramulator.py), a burst returns when Ramulator
-completes it, and dram_latency is unused. Finished rows
+completes it, and dram_latency is unused. On an AXI port (memory/axi.py) each
+row is one AXI burst of 8-byte beats, as the RTL backend's per-row requests
+(num_request + 1 beats) become on the bus: loads send a read burst a cycle,
+up to the port's four outstanding, and stores a write burst per row, done
+when its B response comes back. Finished rows
 are written to the pad through the send_sram_write callback the scratchpad
 installs; stores read rows back through request_sram_read.
 Statistics: get_stats().
@@ -40,6 +44,8 @@ class DRAMOperation:
     data: Optional[bytes]
     remaining_cycles: int
     due_cycle: int = 0
+    #: A beat of an AXI read (memory/axi.py), not a burst on the shared channel.
+    axi: bool = False
 
 
 @dataclass(slots=True)
@@ -67,6 +73,8 @@ class BackendTransaction:
     #: (cols * elem_bytes); a tile cut out of a wider matrix uses the
     #: matrix's row width.
     dram_stride: int = 0
+    #: AXI: the next row to send a read burst for.
+    next_ar_row: int = 0
 
 
 @dataclass
@@ -150,6 +158,12 @@ class Backend(Clocked):
         self._tick = -1
         self._pending_sram_reads = deque()
         self._in_tick = False
+        self._axi_stores = deque()          # (tx, row, row bytes) waiting for the AW FIFO
+        self._axi_b: List[Tuple[int, int, int]] = []   # (cycle, tx_id, beats) B responses
+
+    @property
+    def _axi(self) -> bool:
+        return getattr(self.shared_burst_channel, "axi", False)
 
     def _dram_bus_available(self) -> bool:
         # Model a split-transaction DRAM-facing burst channel:
@@ -314,6 +328,9 @@ class Backend(Clocked):
         # The scratchpad hands over a whole row; only the tile's columns go to
         # DRAM, as a load reads only them. A narrower tile's last burst is short.
         row_bytes = row_bytes[: tx.cols * self.elem_bytes]
+        if self._axi:
+            self._axi_stores.append((tx, row_idx, row_bytes))
+            return
 
         # split row_bytes into sub-chunks of dram_burst_bytes
         subreqs = []
@@ -352,6 +369,8 @@ class Backend(Clocked):
         Enqueue DRAM read subrequests for tx.cur_row if dram queue has capacity.
         """
         r = tx.cur_row
+        if self._axi and tx.subreqs_per_row:
+            return          # _axi_issue sends whole rows
         # nothing to issue if 0 width
         if tx.subreqs_per_row == 0:
             # immediate "empty" row -> send empty sram write
@@ -473,7 +492,12 @@ class Backend(Clocked):
                     assembled = b"".join(tx.row_bufs[req.row])
                     expected = tx.cols * self.elem_bytes
                     assembled = assembled[:expected]
-                    self.backend_to_body_complete_row_load(tx, req.row, assembled)
+                    if req.row != tx.cur_row:
+                        # An earlier row is still waiting for the pad: this
+                        # one goes in after it (step 4 of tick).
+                        tx.row_bufs[req.row] = [assembled]
+                    else:
+                        self.backend_to_body_complete_row_load(tx, req.row, assembled)
                 else:
                     # Try to issue more subreqs if queue space is available
                     self.backend_to_dram_issue_row_load_subreqs(tx)
@@ -482,25 +506,26 @@ class Backend(Clocked):
                 self.dram.write(req.dram_addr, req.data)
             # DRAM write completed
             # Check for store transaction completion
-            tx = self._active_txs.get(req.tx_id)
-            if tx and tx.is_store:
-                tx.completed_subreqs += 1
-                all_buffered_chunks_drained = all(
-                    all(chunk is None for chunk in row_buf)
-                    for row_buf in tx.row_bufs
-                )
-                if (
-                    tx.completed_subreqs >= tx.total_subreqs
-                    and all_buffered_chunks_drained
-                    and tx.tx_id in self._active_txs
-                ):
-                    self.total_tx_completed += 1
-                    if tx.callback:
-                        try:
-                            tx.callback(tx.tx_id)
-                        except Exception:
-                            pass
-                    self._active_txs.pop(tx.tx_id, None)
+            self._store_progress(req.tx_id, 1)
+
+    def _store_progress(self, tx_id: int, n: int) -> None:
+        """`n` more of a store's bursts (or AXI beats) are written."""
+        tx = self._active_txs.get(tx_id)
+        if not (tx and tx.is_store):
+            return
+        tx.completed_subreqs += n
+        all_buffered_chunks_drained = all(
+            all(chunk is None for chunk in row_buf)
+            for row_buf in tx.row_bufs
+        )
+        if tx.completed_subreqs >= tx.total_subreqs and all_buffered_chunks_drained:
+            self.total_tx_completed += 1
+            if tx.callback:
+                try:
+                    tx.callback(tx.tx_id)
+                except Exception:
+                    pass
+            self._active_txs.pop(tx.tx_id, None)
 
     # ------ Clock tick ------
     def tick(self, time=None) -> None:
@@ -551,14 +576,17 @@ class Backend(Clocked):
             # 2) Progress only the bursts whose due cycle has arrived.
             while self._dram_ready_heap and self._dram_ready_heap[0][0] <= self._tick:
                 _due, _tx_id, _row, _subidx, req = heapq.heappop(self._dram_ready_heap)
-                if not self._dram_pending.remove(req):
+                if not self._dram_pending.remove(req) and not req.axi:
                     continue
                 self.dram_to_backend_on_response(req)
                 self.total_dram_bursts_completed += 1
 
             # 3) Retry any deferred DRAM load/store bursts once the serialized bus is free.
-            self._retry_one_deferred_load_burst()
-            self._retry_one_deferred_store_burst()
+            if self._axi:
+                self._axi_issue()
+            else:
+                self._retry_one_deferred_load_burst()
+                self._retry_one_deferred_store_burst()
 
             # 4) Retry handing off stalled assembled load rows. Loads only: a
             # store parks DRAM write data in the same row_bufs (step 3 sends it).
@@ -571,11 +599,64 @@ class Backend(Clocked):
         finally:
             self._in_tick = False
 
+    # ------ AXI port (memory/axi.py) ------
+    def _axi_issue(self) -> None:
+        """B responses due; then one request a cycle: the next row's read
+        burst, else the next stored row's write burst."""
+        port, now = self.shared_burst_channel, self._tick
+        while self._axi_b and self._axi_b[0][0] <= now:
+            _c, tx_id, beats = heapq.heappop(self._axi_b)
+            self._store_progress(tx_id, beats)
+        for tx in self._active_txs.values():
+            if tx.is_store or tx.next_ar_row >= tx.rows or not tx.subreqs_per_row:
+                continue
+            if not port.can_read():
+                self.total_backend_stalls += 1
+                break
+            r = tx.next_ar_row
+            tx.next_ar_row += 1
+            tx.issued_subreqs[r].update(range(tx.subreqs_per_row))
+            port.read(now, tx.base_dram + r * tx.dram_stride, tx.subreqs_per_row,
+                      lambda i, c, tx=tx, r=r: self._axi_beat(tx, r, i, c))
+            self.total_dram_bursts_issued += tx.subreqs_per_row
+            return
+        if self._axi_stores:
+            tx, r, row_bytes = self._axi_stores[0]
+            beats = tx.subreqs_per_row
+            if not port.can_write(beats):
+                self.total_backend_stalls += 1
+                return
+            self._axi_stores.popleft()
+            base = tx.base_dram + r * tx.dram_stride
+            chunks = [row_bytes[i * self.dram_burst_bytes:(i + 1) * self.dram_burst_bytes]
+                      for i in range(beats)]
+            port.write(now, base, beats,
+                       lambda i, c: self.dram.write(base + i * self.dram_burst_bytes, chunks[i])
+                       if self.dram is not None else None,
+                       lambda c, tx_id=tx.tx_id: self._axi_b_response(c, tx_id, beats))
+            self.total_dram_bursts_issued += beats
+
+    def _axi_beat(self, tx: BackendTransaction, row: int, i: int, cycle: int) -> None:
+        """Beat i of row `row`'s read burst is here from `cycle`."""
+        off = i * self.dram_burst_bytes
+        req = DRAMOperation(tx_id=tx.tx_id, row=row, subidx=i,
+                            dram_addr=tx.base_dram + row * tx.dram_stride + off,
+                            length=min(self.dram_burst_bytes, tx.cols * self.elem_bytes - off),
+                            is_write=False, data=None, remaining_cycles=0,
+                            due_cycle=int(cycle), axi=True)
+        heapq.heappush(self._dram_ready_heap, (req.due_cycle, req.tx_id, req.row, req.subidx, req))
+        self.wake()
+
+    def _axi_b_response(self, cycle: int, tx_id: int, beats: int) -> None:
+        heapq.heappush(self._axi_b, (int(cycle), tx_id, beats))
+        self.wake()
+
     def next_wake(self, now: int) -> Optional[int]:
         """Asleep with no transaction queued or active and no burst in
         flight. Starting a load or store wakes it."""
         if (self._tx_queue.is_empty() and not self._active_txs and not self._pending_sram_reads
-                and not self._dram_ready_heap and self._dram_pending.is_empty()):
+                and not self._dram_ready_heap and self._dram_pending.is_empty()
+                and not self._axi_stores and not self._axi_b):
             return None
         return now + 1
 

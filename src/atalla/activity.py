@@ -293,7 +293,8 @@ class ActivityProbe(Clocked):
         channel = p.backends[0].shared_burst_channel if p.backends else None
         s["channel"] = ACTIVE if channel is not None and channel.last_issue_tick == cycle else IDLE
         outstanding = (any(not be._dram_pending.is_empty() for be in p.backends)
-                       or any(port._due for port in p.ports.values()))
+                       or any(port._due for port in p.ports.values())
+                       or (p.axi is not None and not p.axi.idle))
         s["dram"] = ACTIVE if outstanding else IDLE
         return s
 

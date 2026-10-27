@@ -34,6 +34,8 @@ reference result from the compiler's harness.
     tools/run_kernel.py gemm --activity gemm.html   # which blocks work when
     tools/run_kernel.py gemm --dram ramulator       # DRAM timed by Ramulator 2 (make ramulator)
     tools/run_kernel.py gemm --dram ramulator --dram-config ddr_cntrl --dram-param nREFI=6240
+    tools/run_kernel.py gemm --dram ramulator --no-axi   # masters straight to the DRAM model
+    tools/run_kernel.py gemm --axi --dram-latency 0     # the bus alone, an ideal DRAM behind it
 """
 
 import argparse
@@ -123,6 +125,11 @@ def main() -> None:
     ap.add_argument("--dram", choices=["fixed", "ramulator"], default="fixed",
                     help="DRAM timing: a fixed --dram-latency, or Ramulator 2's DDR4 model "
                          "(build it with `make ramulator`)")
+    ap.add_argument("--axi", action=argparse.BooleanOptionalAction, default=None,
+                    help="the memory_FA26 AXI bus between the DRAM masters and DRAM "
+                         "(default: with --dram ramulator; --no-axi drives the DRAM "
+                         "directly, --axi with --dram fixed puts a fixed-latency DRAM "
+                         "behind the bus)")
     ap.add_argument("--dram-config", choices=list(DRAM_CONFIGS), default="rtl",
                     help="with --dram ramulator: rtl (memory_FA26's Ramulator wrapper, "
                          "DDR4-3200W), ddr4-1600 or ddr_cntrl (the DDR controller's "
@@ -209,7 +216,7 @@ def main() -> None:
                                  activity=bool(args.activity), warm_icache=args.warm_icache,
                                  perf_timeline=args.timeline, init_sregs=init_sregs,
                                  describe_pc=describe_pc, dram_channel=dram_channel,
-                                 strict=False)
+                                 axi=args.axi, strict=False)
     t = time.time()
     cycles = plat.run_until_done(limit=args.limit)
     c = plat.core
@@ -217,6 +224,9 @@ def main() -> None:
     print()
     print(plat.perf.summary())
     print()
+    if plat.axi is not None:
+        print(plat.axi.summary(cycles))
+        print()
     if dram_channel is not None:
         print(dram_channel.summary(through=plat.cycle - 1))
         print()

@@ -6,7 +6,8 @@ backends all reach one memory (sim_ram_rr.sv, in the testbench), which serves
 one requester at a time, round robin. Here the six masters share one
 SharedDRAMBurstChannel: one burst launches per cycle in total, of
 `burst_bytes`, and returns `dram_latency` cycles later (or when Ramulator
-completes it, with a RamulatorDRAM as the channel). The masters take
+completes it, with a RamulatorDRAM as the channel). On an AXI port
+(memory/axi.py) each burst is one AXI transaction instead. The masters take
 turns in a round-robin ticker, so a cache line fill waits behind the
 scratchpads' DMA bursts, and they behind it.
 
@@ -126,6 +127,40 @@ class BusMaster(Clocked):
             for b in range(first, first + n // self.beat_bytes):
                 self._read_arrival[b] = cycle + 1
 
+    def _axi_launch(self, cycle: int) -> None:
+        """On an AXI port (memory/axi.py) a burst is one AXI transaction of
+        8-byte beats; the port's FIFOs, not a shared slot, hold it back."""
+        kind, txn, addr, n, first = self._launch_q[0]
+        beats = n // self.beat_bytes
+        if kind == "r":
+            if not self.channel.can_read():
+                self.stats["contention_cycles"] += 1
+                return
+            self.channel.read(cycle, addr, beats,
+                              lambda i, c, txn=txn, first=first, beats=beats:
+                              self._axi_beat(txn, first + i, c, i == beats - 1))
+            self.stats["read_bursts"] += 1
+            self.stats["read_bytes"] += n
+        else:
+            if not self.channel.can_write(beats):
+                self.stats["contention_cycles"] += 1
+                return
+            self.channel.write(cycle, addr, beats, on_done=lambda c: self._axi_done())
+            self.stats["write_bursts"] += 1
+            self.stats["write_bytes"] += n
+            self._wq_bytes -= n
+        self._launch_q.popleft()
+        self._inflight += 1
+
+    def _axi_beat(self, txn: int, beat: int, cycle: int, last: bool) -> None:
+        if txn == self._read_txn:
+            self._read_arrival[beat] = cycle
+        if last:
+            self._inflight -= 1
+
+    def _axi_done(self) -> None:
+        self._inflight -= 1
+
     def tick(self, time: Optional[float] = None) -> None:
         cycle = self._consume_tick(time, attr_name="_tick")
         if cycle is None:
@@ -135,6 +170,9 @@ class BusMaster(Clocked):
         if self._launch_q or self._due or self._inflight:
             self.stats["busy_cycles"] += 1
         if not self._launch_q or len(self._due) + self._inflight >= self.max_outstanding:
+            return
+        if getattr(self.channel, "axi", False):
+            self._axi_launch(cycle)
             return
         if not self.channel.can_issue(cycle):
             self.stats["contention_cycles"] += 1

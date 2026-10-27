@@ -26,18 +26,21 @@ scratchpad backends are six masters on one DRAM channel, one burst launch a
 cycle, round robin (memory/bus.py for the caches' ports). The icache
 starts cold. The channel answers each burst dram_latency cycles after it
 launches, or, given a RamulatorDRAM (memory/ramulator.py), when Ramulator 2's
-DDR4 model completes it.
+DDR4 model completes it. With `axi`, the six masters reach DRAM through the
+memory_FA26 branch's AXI bus and Ramulator wrapper instead (memory/axi.py):
+a scratchpad row or a cache line is one AXI burst.
 """
 
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 from atalla.sysarr_tpu_system import (
-    PHASE_BACKEND, PHASE_CORE, PHASE_DRAM, PHASE_HARNESS, PHASE_SPAD, PHASE_SYSARR, PHASE_VLS,
+    PHASE_AXI, PHASE_BACKEND, PHASE_CORE, PHASE_DRAM, PHASE_HARNESS, PHASE_SPAD, PHASE_SYSARR, PHASE_VLS,
     GSAUTPUBridge, RoundRobinBackendTicker, build_tpu_platform)
 from atalla.activity import ActivityProbe
 from atalla.perf_monitor import PerfMonitor
 from base.sched import CompositeClocked
+from memory.axi import BEAT_BYTES, AXIBus, AXIParams, FixedLatencyDRAM
 from memory.backend import Backend
 from memory.bus import BusMaster
 from memory.dram import DRAM, DRAM_BURST_BYTES
@@ -104,8 +107,10 @@ class AtallaPlatform:
     activity: Optional[ActivityProbe] = None
     #: Names a pc for messages, e.g. "main_block3+20" (ElfProgram.describe).
     describe_pc: Optional[Callable[[int], str]] = None
-    #: The RamulatorDRAM timing DRAM, when there is one.
+    #: The DRAM model the masters or the AXI bus send to, when there is one.
     dram_channel: Any = None
+    #: The AXI bus (memory/axi.py), when the masters use one.
+    axi: Optional[AXIBus] = None
     cycle: int = 0
 
     def tick(self) -> None:
@@ -133,6 +138,8 @@ def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]
                           init_sregs: Optional[Dict[int, int]] = None,
                           describe_pc: Optional[Callable[[int], str]] = None,
                           dram_channel: Any = None,
+                          axi: Optional[bool] = None,
+                          axi_params: Optional[AXIParams] = None,
                           **core_kw) -> AtallaPlatform:
     """`program` and `data` as load_program_text returns them; `data` words
     go into DRAM. `systolic_array` is "meissa" (the RTL's) or "tpu"; extra
@@ -143,19 +150,36 @@ def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]
     state each cycle for tools/activity_view.py. `init_sregs` presets scalar
     registers, as a loader would (c_entry_sregs for compiled C).
     `describe_pc` names a pc in error messages (ElfProgram.describe).
-    `dram_channel` (a RamulatorDRAM) times DRAM instead of `dram_latency`."""
+    `dram_channel` (a RamulatorDRAM) times DRAM instead of `dram_latency`.
+    `axi` puts the AXI bus between the masters and DRAM (`axi_params` sizes
+    it); by default there is one exactly when `dram_channel` is given. With
+    no `dram_channel`, the bus's DRAM answers in `dram_latency` cycles, and
+    `burst_bytes` gives way to 8-byte beats."""
+    use_axi = (dram_channel is not None) if axi is None else bool(axi)
     parts = build_tpu_platform(dtype="bf16", lane_count=lane_count,
                                systolic_array=systolic_array,
                                backend_dram_latency=dram_latency,
-                               backend_dram_burst_bytes=burst_bytes,
-                               dram_channel=dram_channel)
+                               backend_dram_burst_bytes=BEAT_BYTES if use_axi else burst_bytes,
+                               dram_channel=None if use_axi else dram_channel)
     vc, dram, backends = parts.vc, parts.dram, parts.backends
     for addr, word in (data or {}).items():
         dram.write(int(addr), (int(word) & MASK32).to_bytes(4, "little"))
 
-    channel = backends[0].shared_burst_channel
-    ports = {name: BusMaster(name, channel, dram_latency=dram_latency, burst_bytes=burst_bytes)
-             for name in ("icache", "dcache")}
+    bus = None
+    if use_axi:
+        if dram_channel is None:
+            dram_channel = FixedLatencyDRAM(dram_latency)
+        bus = AXIBus(dram_channel, axi_params)
+        for i, backend in enumerate(backends):
+            backend.shared_burst_channel = bus.ports[i]
+        # a cache line is one burst
+        ports = {name: BusMaster(name, bus.port(name), burst_bytes=64)
+                 for name in ("icache", "dcache")}
+    else:
+        channel = backends[0].shared_burst_channel
+        ports = {name: BusMaster(name, channel, dram_latency=dram_latency,
+                                 burst_bytes=burst_bytes)
+                 for name in ("icache", "dcache")}
     core = SchedulerCore(program, vector_core=vc, backends=backends,
                          memory=DramWords(dram), icache_port=ports["icache"],
                          dcache_port=ports["dcache"], **core_kw)
@@ -176,12 +200,14 @@ def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]
     # sim_ram_rr's order: icache, dcache, scratchpads 0-3.
     root.add_child(RoundRobinBackendTicker([ports["icache"], ports["dcache"], *backends]),
                    phase=PHASE_BACKEND)
+    if bus is not None:
+        root.add_child(bus, phase=PHASE_AXI)
     if dram_channel is not None:
         root.add_child(dram_channel, phase=PHASE_DRAM)
     plat = AtallaPlatform(core=core, vc=vc, spad=parts.spad, sa=parts.sa, dram=dram,
                           backends=backends, vls_bridges=parts.vls_bridges,
                           sysarr_bridge=sysarr_bridge, ports=ports, root=root,
-                          describe_pc=describe_pc, dram_channel=dram_channel)
+                          describe_pc=describe_pc, dram_channel=dram_channel, axi=bus)
     if perf or activity:
         # Last in every cycle: it observes and changes nothing.
         plat.perf = PerfMonitor(plat, timeline=perf_timeline or activity)

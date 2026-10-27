@@ -298,6 +298,29 @@ DMA, and they behind it. The icache starts cold (`warm_icache=True` for
 tests that time something else). The ports' `stats` count bursts, bytes,
 cycles busy and cycles lost to contention.
 
+**The AXI bus.** With `--axi` (`axi=True`; the default with
+`--dram ramulator`), the six masters reach DRAM through the `memory_FA26`
+branch's AXI interconnect and the Ramulator wrapper at its end
+(`src/memory/axi.py`; `rtl/modules/memory/axi_bus`, `ramulator_wrapper`).
+A scratchpad row is one read or write burst of 8-byte beats (the backend's
+`num_request + 1` per-beat requests), a cache line one burst of 8:
+
+| | read | write |
+|---|---|---|
+| per master | 4 bursts queued | 3 bursts and 31 beats queued |
+| arbitration | round robin, one burst a cycle | round robin, a burst at a time, held to its last beat |
+| to DRAM | every beat at once; beats back one a cycle for all masters, oldest burst first | one 8-byte write a beat |
+| timing | the wrapper takes a burst the cycle after the master offers it; a beat the DRAM completes in cycle c is the master's in c + 2 | the first beat goes 4 cycles after the master offers the burst, then one a cycle; B one cycle after the last; 2 idle cycles before the next burst (3 for the same master alone) |
+
+B comes back when the wrapper has taken the beats, not when the DRAM has
+written them. The RTL's wrapper registers ARREADY and WREADY but takes an AR
+or W beat on VALID alone, so it can lose a refused AR and take W beats twice,
+and it still packs 256-bit beats onto the 64-bit bus; the model takes each
+burst and beat once, as intended. `--no-axi` sends each 8-byte request
+straight to the DRAM model instead, one a cycle for all masters; `--axi` with
+`--dram fixed` puts a DRAM that answers in `--dram-latency` cycles behind the
+bus (`--dram-latency 0` measures the bus alone). Sizes are in `AXIParams`.
+
 **DRAM timing from Ramulator 2.** With `--dram ramulator`
 (`dram_channel=RamulatorDRAM()` from Python; `src/memory/ramulator.py`), the
 channel is Ramulator 2's DDR4 controller instead of a fixed latency. A request
@@ -321,16 +344,18 @@ it, or any of Ramulator's DDR4 values, can be changed with
 | `read_buffer`, `write_buffer` | 256, 64 | 32, 32 | 32, 32 |
 | `coalesce_bytes` | 64: a read to a 64-byte block already being read shares that read (`ramulator_dpi.cpp`) | 0 | 0 |
 | `mapper`, `row_policy` | `RoBaRaCoCh`, `Open` | same | same |
-| `relu.c` | 894 cycles | 1,740 | 6,481 |
+| `relu.c`, through the AXI bus | 861 cycles | 1,672 | 5,729 |
+| `relu.c`, `--no-axi` | 894 | 1,740 | 6,481 |
 
-(`relu.c` takes 664 cycles with the fixed channel.) The clock ratio follows
+(`relu.c` takes 664 cycles with the fixed channel, 728 with the fixed DRAM
+behind the bus, and 613 with an ideal one.) The clock ratio follows
 from tCK and the 800 MHz core clock, so another preset (`preset=DDR4_2400R`)
 or `tCK_ps` changes it too.
 
 Every request is one 64-byte DDR4 transaction, however few bytes it carries:
 with the 8-byte requests the masters make, a stream of row hits in one bank
 group moves 8 bytes every tCCD_L. `rtl`'s merged reads recover much of
-that: without them (`coalesce_bytes=0`) `relu.c` takes 1,448 cycles.
+that: without them (`coalesce_bytes=0`) `relu.c` takes 1,432 cycles.
 
 `ddr_cntrl` takes `dram_pkg.vh`'s values where they leave DDR4-1600J:
 

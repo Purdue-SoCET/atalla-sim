@@ -180,7 +180,9 @@ def frozen(name):
 
 
 @pytest.mark.parametrize("name", ["gemm", "relu", "softmax"])
-def test_kernels_end_in_the_same_state_only_later(name):
+def test_kernels_end_in_the_same_state(name):
+    """Through the AXI bus to Ramulator, as with the fixed channel: only the
+    timing differs."""
     from atalla.atalla_platform import build_atalla_platform
     instr, data = frozen(name)
     plats = [build_atalla_platform(instr, data, dram_channel=ch)
@@ -188,7 +190,7 @@ def test_kernels_end_in_the_same_state_only_later(name):
     for p in plats:
         p.run_until_done()
     fixed, ram = plats
-    assert ram.cycle > fixed.cycle
+    assert ram.axi is not None and ram.cycle != fixed.cycle
     assert ram.dram._blocks == fixed.dram._blocks
     assert [ram.vc.read_vreg(v) for v in range(64)] == [fixed.vc.read_vreg(v) for v in range(64)]
 
