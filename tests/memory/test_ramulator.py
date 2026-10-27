@@ -89,6 +89,35 @@ def test_config_overrides_reach_the_controller():
     assert done == [26]
 
 
+def test_the_rtl_timings_fold_additive_latency_into_cl():
+    """The RTL waits tRL = tAL + tCL = 11 after RD: one cycle more than the spec."""
+    ram, done = RamulatorDRAM(ramulator_config(timings="rtl", nREFI=6240)), []
+    ram.send(0, 0, 8, False, done.append)
+    run(ram, 40)
+    assert done == [25]
+
+
+def test_the_rtl_refresh_interval_dominates():
+    """nREFI 250 with nRFC 172: reads wait behind refreshes most of the time."""
+    def mean_latency(cfg):
+        ram, done, sent = RamulatorDRAM(cfg), [], []
+        for c in range(0, 5000, 50):
+            sent.append(c)
+            ram.send(c, 0x40 * c, 8, False, done.append)
+            run(ram, 50, c)
+        run(ram, 400, 5000)
+        return sum(d - s for d, s in zip(done, sent)) / len(sent)
+
+    assert mean_latency(ramulator_config(timings="rtl")) > 2 * mean_latency(ramulator_config())
+
+
+def test_unknown_timing_sets_and_parameters_are_refused():
+    with pytest.raises(ValueError, match="spec, rtl"):
+        ramulator_config(timings="fast")
+    with pytest.raises(ValueError, match="bogus"):
+        ramulator_config(bogus=1)
+
+
 def test_a_backend_loads_a_tile_through_it():
     rows = []
     ram, dram = RamulatorDRAM(), DRAM()

@@ -21,8 +21,10 @@ launches per cycle in total, as on the fixed channel.
 The default configuration is the RTL DDR controller's
 (rtl/include/ddr_cntrl/dram_pkg.vh): DDR4 4Gb x8 parts on a 64-bit
 channel, 2 ranks of 4 bank groups of 4 banks, 15 row and 10 column bits,
-CL-RCD-RP 10-10-10 (DDR4-1600J, an 800 MHz memory clock: one memory cycle
-per 800 MHz core cycle). The address mapping is Ramulator's RoBaRaCoCh,
+CL-RCD-RP 10-10-10 (DDR4-1600J: tCK 1.25 ns, one memory cycle per 800 MHz
+core cycle). Two timing sets (TIMING_SETS): "spec", DDR4-1600J as JEDEC
+gives it, and "rtl", the controller's own values where they leave the spec;
+any single timing can be overridden on top. The address mapping is Ramulator's RoBaRaCoCh,
 not the RTL address_mapper's {rank, row, bank, BG[1], col[9:3], BG[0],
 col[2:0]}, which Ramulator has no mapper for.
 
@@ -89,12 +91,35 @@ def ramulator_available() -> bool:
     return _load() is not None
 
 
-def ramulator_config(*, org: str = "DDR4_4Gb_x8", timing: str = "DDR4_1600J",
-                     ranks: int = 2, channels: int = 1, mapper: str = "RoBaRaCoCh",
-                     row_policy: str = "Open", **dram_overrides) -> str:
-    """A Ramulator 2 configuration, as the YAML its C++ side reads. The
-    keywords pick Ramulator's DDR4 presets and components by name;
-    `dram_overrides` go to its DDR4 object (nCL=11, ...)."""
+#: Timings in memory cycles (tCK 1.25 ns) on top of the DDR4-1600J preset.
+#: "rtl" is rtl/include/ddr_cntrl/dram_pkg.vh where it differs from the spec:
+#:   nCL 11    the read FSM waits tRL = tAL + tCL = 1 + 10 (fsm_module.sv);
+#:             Ramulator has no additive latency, so AL is folded into CL.
+#:             DDR4 allows AL = 0, CL - 1 or CL - 2 only.
+#:   nCWL 10   the write path counts tCWL (nb_wdata_queue.sv); DDR4-1600 is 9
+#:   nRAS 45   spec 28 (35 ns): legal, rows stay open longer than needed
+#:   nRC 55    tRAS + tRP; spec 38
+#:   nRFC 172  spec 208 (260 ns for 4Gb): too short, refresh overlaps commands
+#:   nREFI 250 shortened in the RTL to watch refreshes; spec 6240 (7.8 us).
+#:             With nRFC 172 the device spends most of its time refreshing.
+#: The RTL sets no tRRD, tCCD, tFAW, tWTR or tRTP; those keep the spec values.
+TIMING_SETS: Dict[str, Dict[str, int]] = {
+    "spec": {},
+    "rtl": dict(nCL=11, nCWL=10, nRAS=45, nRC=55, nRFC=172, nREFI=250),
+}
+
+
+def ramulator_config(*, timings: str = "spec", preset: str = "DDR4_1600J",
+                     org: str = "DDR4_4Gb_x8", ranks: int = 2, channels: int = 1,
+                     mapper: str = "RoBaRaCoCh", row_policy: str = "Open",
+                     **overrides) -> str:
+    """A Ramulator 2 configuration, as the YAML its C++ side reads.
+    `timings` picks a TIMING_SETS entry, applied over the `preset`;
+    `overrides` (nCL=12, nREFI=6240, tCK_ps=1250, channel_width=64, ...) go
+    on top. The other keywords pick Ramulator components by name."""
+    if timings not in TIMING_SETS:
+        raise ValueError("timings: one of %s, not %r" % (", ".join(TIMING_SETS), timings))
+    dram_overrides = {**TIMING_SETS[timings], **overrides}
     path = os.path.join(RAMULATOR_DIR, "python")
     if path not in sys.path:
         sys.path.insert(0, path)
@@ -103,7 +128,7 @@ def ramulator_config(*, org: str = "DDR4_4Gb_x8", timing: str = "DDR4_1600J",
 
     def ctrl():
         return ramulator.controller.GenericDDR(
-            dram=ramulator.dram.DDR4(org_preset=org, timing_preset=timing,
+            dram=ramulator.dram.DDR4(org_preset=org, timing_preset=preset,
                                      rank=int(ranks), **dram_overrides),
             scheduler=ramulator.scheduler.FRFCFS(),
             refresh_manager=ramulator.refresh_manager.AllBank(),

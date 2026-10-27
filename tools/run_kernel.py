@@ -33,6 +33,7 @@ loader's stack registers. A .c program with --elf also gets its inputs and
 reference result from the compiler's harness.
     tools/run_kernel.py gemm --activity gemm.html   # which blocks work when
     tools/run_kernel.py gemm --dram ramulator       # DRAM timed by Ramulator 2 (make ramulator)
+    tools/run_kernel.py gemm --dram ramulator --dram-timings rtl --dram-param nREFI=6240
 """
 
 import argparse
@@ -52,7 +53,7 @@ from scheduler.elf import ElfError, load_elf                       # noqa: E402
 from atalla.atalla_platform import build_atalla_platform, c_entry_sregs  # noqa: E402
 from scheduler.assembler import to_in_text                        # noqa: E402
 from memory.dram import DRAM_BURST_BYTES                          # noqa: E402
-from memory.ramulator import RamulatorDRAM                        # noqa: E402
+from memory.ramulator import TIMING_SETS, RamulatorDRAM, ramulator_config  # noqa: E402
 import c_kernels                                                  # noqa: E402
 
 SIM = golden.SUBMODULE_PATH
@@ -122,6 +123,12 @@ def main() -> None:
     ap.add_argument("--dram", choices=["fixed", "ramulator"], default="fixed",
                     help="DRAM timing: a fixed --dram-latency, or Ramulator 2's DDR4 model "
                          "(the RTL controller's DDR4-1600J; build it with `make ramulator`)")
+    ap.add_argument("--dram-timings", choices=sorted(TIMING_SETS), default="spec",
+                    help="with --dram ramulator: DDR4-1600J as the spec gives it, or the RTL "
+                         "controller's own values (dram_pkg.vh) where they differ")
+    ap.add_argument("--dram-param", metavar="NAME=VALUE", action="append", default=[],
+                    help="with --dram ramulator: override one DDR4 timing or organization "
+                         "value, e.g. nCL=12 or nREFI=6240; repeatable")
     ap.add_argument("--lanes", type=int, default=16, help="vector lanes (must divide 32)")
     ap.add_argument("--array", choices=["meissa", "tpu"], default="meissa",
                     help="the systolic array: MEISSA (the RTL's) or the TPU-style array")
@@ -182,10 +189,18 @@ def main() -> None:
 
     dram_channel = None
     if args.dram == "ramulator":
+        params = {}
+        for item in args.dram_param:
+            name, eq, value = item.partition("=")
+            if not eq or not value.lstrip("-").isdigit():
+                sys.exit("--dram-param takes NAME=INTEGER, not %r" % item)
+            params[name] = int(value)
         try:
-            dram_channel = RamulatorDRAM()
-        except RuntimeError as exc:
+            dram_channel = RamulatorDRAM(ramulator_config(timings=args.dram_timings, **params))
+        except (RuntimeError, ValueError) as exc:
             sys.exit(str(exc))
+    elif args.dram_param or args.dram_timings != "spec":
+        sys.exit("--dram-timings and --dram-param need --dram ramulator")
     plat = build_atalla_platform(instr, data, dram_latency=args.dram_latency,
                                  lane_count=args.lanes, systolic_array=args.array,
                                  burst_bytes=args.burst_bytes,

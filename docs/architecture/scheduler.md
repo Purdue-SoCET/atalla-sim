@@ -314,15 +314,31 @@ the timing changes. The configuration is the RTL DDR controller's
 | ranks, bank groups, banks | 2, 4, 4 (1 + 2 + 2 bits) | 2, 4, 4 |
 | rows, columns | 15, 10 bits | 32K, 1K |
 | CL-RCD-RP | 10-10-10 | `DDR4_1600J`: 10-10-10, tCK 1.25 ns |
-| clock | | 800 MHz memory clock, one memory cycle a core cycle |
+| clock | tCK 1.25 ns | 800 MHz memory clock, one memory cycle a core cycle |
 | address mapping | `{rank, row, bank, BG[1], col[9:3], BG[0], col[2:0]}` | `RoBaRaCoCh` (Ramulator has no mapper like the RTL's) |
 
 Every burst is one 64-byte DDR4 transaction, however few bytes it carries.
 With the default 8-byte bursts, a stream of row hits in one bank group moves
 8 bytes every tCCD_L (5 cycles), so DRAM peaks near 1.6 bytes a cycle
 instead of the fixed channel's 8: `relu.c` takes 1,740 cycles instead of 664.
-`--burst-bytes 64` asks for whole transactions. `ramulator_config()` takes
-other Ramulator presets, mappers and timing overrides (`nCL=12`, ...). The
+`--burst-bytes 64` asks for whole transactions.
+
+Two timing sets, picked with `--dram-timings` (`ramulator_config(timings=...)`):
+`spec` is DDR4-1600J as JEDEC gives it; `rtl` takes `dram_pkg.vh`'s values
+where they leave the spec. Any single value can go on top with
+`--dram-param NAME=VALUE` (`nREFI=6240`, `tCK_ps=1250`, ...).
+
+| | `spec` | `rtl` | |
+|---|---|---|---|
+| nCL | 10 | 11 | the RTL waits tRL = tAL + tCL; Ramulator has no AL, so it is folded into CL. DDR4 allows AL = 0, CL − 1 or CL − 2 only |
+| nCWL | 9 | 10 | 10 is DDR4-1866's |
+| nRAS | 28 | 45 | legal, slower |
+| nRC | 38 | 55 | tRAS + tRP |
+| nRFC | 208 | 172 | under the 260 ns a 4Gb part needs |
+| nREFI | 6240 | 250 | shortened in the RTL to watch refreshes: with nRFC 172 the device refreshes most of the time, and `relu.c` takes 6,481 cycles instead of 1,740 |
+
+The RTL sets no tRRD, tCCD, tFAW, tWTR or tRTP; both sets use DDR4-1600J's.
+`ramulator_config()` also takes other Ramulator presets and mappers. The
 model sleeps while nothing is in flight and runs the cycles it skipped before
 its next request, so refresh lands where it would if every cycle had ticked.
 
