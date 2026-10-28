@@ -32,6 +32,10 @@ put them, called through `jal x1, main; halt.s` at address 0, with the C
 loader's stack registers. A .c program with --elf also gets its inputs and
 reference result from the compiler's harness.
     tools/run_kernel.py gemm --activity gemm.html   # which blocks work when
+    tools/run_kernel.py gemm --dram ramulator       # DRAM timed by Ramulator 2 (make ramulator)
+    tools/run_kernel.py gemm --dram ramulator --dram-config ddr_cntrl --dram-param nREFI=6240
+    tools/run_kernel.py gemm --dram ramulator --no-axi   # masters straight to the DRAM model
+    tools/run_kernel.py gemm --axi --dram-latency 0     # the bus alone, an ideal DRAM behind it
 """
 
 import argparse
@@ -51,6 +55,7 @@ from scheduler.elf import ElfError, load_elf                       # noqa: E402
 from atalla.atalla_platform import build_atalla_platform, c_entry_sregs  # noqa: E402
 from scheduler.assembler import to_in_text                        # noqa: E402
 from memory.dram import DRAM_BURST_BYTES                          # noqa: E402
+from memory.ramulator import DRAM_CONFIGS, RamulatorDRAM                 # noqa: E402
 import c_kernels                                                  # noqa: E402
 
 SIM = golden.SUBMODULE_PATH
@@ -117,6 +122,23 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=5_000_000, help="cycle limit")
     ap.add_argument("--dram-latency", type=int, default=6,
                     help="cycles from a DRAM request launching to its data returning")
+    ap.add_argument("--dram", choices=["fixed", "ramulator"], default="fixed",
+                    help="DRAM timing: a fixed --dram-latency, or Ramulator 2's DDR4 model "
+                         "(build it with `make ramulator`)")
+    ap.add_argument("--axi", action=argparse.BooleanOptionalAction, default=None,
+                    help="the memory_FA26 AXI bus between the DRAM masters and DRAM "
+                         "(default: with --dram ramulator; --no-axi drives the DRAM "
+                         "directly, --axi with --dram fixed puts a fixed-latency DRAM "
+                         "behind the bus)")
+    ap.add_argument("--dram-config", choices=list(DRAM_CONFIGS), default="rtl",
+                    help="with --dram ramulator: rtl (memory_FA26's Ramulator wrapper, "
+                         "DDR4-3200W), ddr4-1600 or ddr_cntrl (the DDR controller's "
+                         "dram_pkg.vh timings, branch ddr_cntrl_final); src/memory/ramulator.py "
+                         "DRAM_CONFIGS")
+    ap.add_argument("--dram-param", metavar="NAME=VALUE", action="append", default=[],
+                    help="with --dram ramulator: override one value of the config or of "
+                         "Ramulator's DDR4 model, e.g. read_buffer=64, preset=DDR4_2400R, "
+                         "nCL=12; repeatable")
     ap.add_argument("--lanes", type=int, default=16, help="vector lanes (must divide 32)")
     ap.add_argument("--array", choices=["meissa", "tpu"], default="meissa",
                     help="the systolic array: MEISSA (the RTL's) or the TPU-style array")
@@ -175,12 +197,27 @@ def main() -> None:
         Path(args.save).write_text(to_in_text(instr, data))
         print("program image written to %s" % args.save)
 
+    dram_channel = None
+    if args.dram == "ramulator":
+        params = {}
+        for item in args.dram_param:
+            name, eq, value = item.partition("=")
+            if not eq or not value:
+                sys.exit("--dram-param takes NAME=VALUE, not %r" % item)
+            params[name] = int(value) if value.lstrip("-").isdigit() else value
+        try:
+            dram_channel = RamulatorDRAM(args.dram_config, **params)
+        except (RuntimeError, ValueError) as exc:
+            sys.exit(str(exc))
+    elif args.dram_param or args.dram_config != "rtl":
+        sys.exit("--dram-config and --dram-param need --dram ramulator")
     plat = build_atalla_platform(instr, data, dram_latency=args.dram_latency,
                                  lane_count=args.lanes, systolic_array=args.array,
                                  burst_bytes=args.burst_bytes,
                                  activity=bool(args.activity), warm_icache=args.warm_icache,
                                  perf_timeline=args.timeline, init_sregs=init_sregs,
-                                 describe_pc=describe_pc, strict=False)
+                                 describe_pc=describe_pc, dram_channel=dram_channel,
+                                 axi=args.axi, strict=False)
     t = time.time()
     cycles = plat.run_until_done(limit=args.limit)
     c = plat.core
@@ -188,12 +225,20 @@ def main() -> None:
     print()
     print(plat.perf.summary())
     print()
+    if plat.axi is not None:
+        print(plat.axi.summary(cycles))
+        print()
+    if dram_channel is not None:
+        print(dram_channel.summary(through=plat.cycle - 1))
+        print()
     if args.perf_json:
         plat.perf.to_json(args.perf_json, timeline=args.timeline)
         print("performance report written to %s" % args.perf_json)
     if args.activity:
         meta = dict(program=Path(args.kernel).name, array=args.array, lanes=args.lanes,
-                    burst_bytes=args.burst_bytes, dram_latency=args.dram_latency)
+                    burst_bytes=args.burst_bytes, dram=args.dram, axi=plat.axi is not None)
+        if args.dram == "fixed":
+            meta["dram_latency"] = args.dram_latency
         if args.activity.endswith(".html"):
             import activity_view
             Path(args.activity).write_text(activity_view.render(plat.activity.trace(meta)))

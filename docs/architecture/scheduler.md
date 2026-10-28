@@ -298,6 +298,125 @@ DMA, and they behind it. The icache starts cold (`warm_icache=True` for
 tests that time something else). The ports' `stats` count bursts, bytes,
 cycles busy and cycles lost to contention.
 
+**The AXI bus.** With `--axi` (`axi=True`; the default with
+`--dram ramulator`), the six masters reach DRAM through the `memory_FA26`
+branch's AXI interconnect and the Ramulator wrapper at its end
+(`src/memory/axi.py`; `rtl/modules/memory/axi_bus`, `ramulator_wrapper`).
+A scratchpad row is one read or write burst of 8-byte beats (the backend's
+`num_request + 1` per-beat requests), a cache line one burst of 8:
+
+| | read | write |
+|---|---|---|
+| per master | 4 bursts queued | 3 bursts and 31 beats queued |
+| arbitration | round robin, one burst a cycle | round robin, a burst at a time, held to its last beat |
+| to DRAM | every beat at once; beats back one a cycle for all masters, oldest burst first | one 8-byte write a beat |
+| timing | the wrapper takes a burst the cycle after the master offers it; a beat the DRAM completes in cycle c is the master's in c + 2 | the first beat goes 4 cycles after the master offers the burst, then one a cycle; B one cycle after the last; 2 idle cycles before the next burst (3 for the same master alone) |
+
+B comes back when the wrapper has taken the beats, not when the DRAM has
+written them. The RTL's wrapper registers ARREADY and WREADY but takes an AR
+or W beat on VALID alone, so it can lose a refused AR and take W beats twice,
+and it still packs 256-bit beats onto the 64-bit bus; the model takes each
+burst and beat once, as intended. `--no-axi` sends each 8-byte request
+straight to the DRAM model instead, one a cycle for all masters; `--axi` with
+`--dram fixed` puts a DRAM that answers in `--dram-latency` cycles behind the
+bus (`--dram-latency 0` measures the bus alone). Sizes are in `AXIParams`,
+including the wrapper's 8,192 burst slots. With the bus, the performance
+summary gives each master's AXI bursts and bytes and the read and write
+paths' bytes a cycle against their 8 each, and the activity view draws the
+two paths in place of the shared channel.
+
+**DRAM timing from Ramulator 2.** With `--dram ramulator`
+(`dram_channel=RamulatorDRAM()` from Python; `src/memory/ramulator.py`), the
+channel is Ramulator 2's DDR4 controller instead of a fixed latency. A request
+completes when Ramulator says so: a read when its data returns, a write when
+its WR command issues. The masters see it the next cycle. Bank and row state,
+refresh, FR-FCFS scheduling and the controller's queues all count. The data
+still lives in atalla-sim's DRAM, so results are the same and only the timing
+changes.
+
+The configuration is named (`--dram-config`, `DRAM_CONFIGS`), and any value in
+it, or any of Ramulator's DDR4 values, can be changed with
+`--dram-param NAME=VALUE` (`RamulatorDRAM(config, **overrides)` from Python):
+
+| | `rtl` (default) | `ddr4-1600` | `ddr_cntrl` |
+|---|---|---|---|
+| from | `memory_FA26`: the AXI bus's Ramulator wrapper (`rtl/modules/memory/ramulator_wrapper`, `configs/ddr4_config.yaml`) | the DDR controller's organization (`ddr_cntrl_final`: `rtl/include/ddr_cntrl/dram_pkg.vh`) | the same, with the controller's own timings |
+| `org` | `DDR4_8Gb_x16`, 64-bit channel | `DDR4_4Gb_x8` | `DDR4_4Gb_x8` |
+| `ranks`, `channels` | 2, 1 | 2, 1 | 2, 1 |
+| `preset` | `DDR4_3200W` (CL-RCD-RP 20-20-20, tCK 0.625 ns) | `DDR4_1600J` (10-10-10, tCK 1.25 ns) | `DDR4_1600J` and the values below |
+| memory cycles per 800 MHz cycle | 2 (`ramulator_sv_wrapper.sv` ticks twice a clock) | 1 | 1 |
+| `read_buffer`, `write_buffer` | 256, 64 | 32, 32 | 32, 32 |
+| `coalesce_bytes` | 64: a read to a 64-byte block already being read shares that read (`ramulator_dpi.cpp`) | 0 | 0 |
+| `mapper`, `row_policy` | `RoBaRaCoCh`, `Open` | same | same |
+| `relu.c`, through the AXI bus | 861 cycles | 1,672 | 5,729 |
+| `relu.c`, `--no-axi` | 894 | 1,740 | 6,481 |
+
+(`relu.c` takes 664 cycles with the fixed channel, 728 with the fixed DRAM
+behind the bus, and 613 with an ideal one.) `clock_ratio` is the memory
+cycles run per core cycle: 2 in `rtl`, as the wrapper ticks Ramulator twice a
+clock whatever the standard; `clock_ratio=None` takes it from tCK and the
+800 MHz core clock instead, as `ddr4-1600` does, so another preset
+(`preset=DDR4_2400R`) or `tCK_ps` changes it too.
+
+Every request is one 64-byte DDR4 transaction, however few bytes it carries:
+with the 8-byte requests the masters make, a stream of row hits in one bank
+group moves 8 bytes every tCCD_L. `rtl`'s merged reads recover much of
+that: without them (`coalesce_bytes=0`) `relu.c` takes 1,432 cycles.
+
+`ddr_cntrl` takes `dram_pkg.vh`'s values (`ddr_cntrl_final`) where they leave DDR4-1600J:
+
+| | DDR4-1600J | `ddr_cntrl` | |
+|---|---|---|---|
+| nCL | 10 | 11 | the controller waits tRL = tAL + tCL; Ramulator has no AL, so it is folded into CL. DDR4 allows AL = 0, CL − 1 or CL − 2 only |
+| nCWL | 9 | 10 | 10 is DDR4-1866's |
+| nRAS | 28 | 45 | legal, slower |
+| nRC | 38 | 55 | tRAS + tRP |
+| nRFC | 208 | 172 | under the 260 ns a 4Gb part needs |
+| nREFI | 6240 | 250 | shortened in the RTL to watch refreshes: with nRFC 172 the device refreshes most of the time |
+
+The controller sets no tRRD, tCCD, tFAW, tWTR or tRTP; `ddr_cntrl` uses
+DDR4-1600J's. The model sleeps while nothing is in flight and runs the cycles
+it skipped before its next request, so refresh lands where it would if every
+cycle had ticked.
+
+**Checked against the RTL.** `tools/memory_bench.py` runs the DRAM subsystem
+report's measurements (Spring 2026) on the model. Tables 3 and 4 follow the
+wrapper's own bench, `tb/unit/memory/ramulator_wrapper/test_sdma.sv` on
+`memory_FA26`: a 1024×1024 int16 matrix read through the wrapper in 32-byte
+beats, one AR offered a cycle, row-major and then tile-major, in single-beat
+reads (table 3) or 2-beat bursts, one per 64-byte tile row (table 4), with
+the branch's `configs/ddr4_*.yaml`. Every one of the 20 DDR4 rows lands
+within 0.2% of the report's cycles, and the stall percentages agree to
+0.1 points:
+
+| config | single-beat row-major | tile-major | 2-beat bursts row-major | tile-major |
+|---|---|---|---|---|
+| DDR4 1ch 128b | 207,760 / 207,824 | 137,945 / 138,126 | 70,972 / 70,802 | 69,516 / 69,578 |
+| DDR4 1ch 256b | 241,824 / 242,003 | 190,437 / 190,603 | 103,993 / 104,017 | 86,981 / 87,037 |
+| DDR4 1ch 512b | 258,944 / 259,211 | 258,948 / 259,510 | 121,181 / 121,273 | 121,166 / 121,262 |
+| DDR4 2ch 128b | 104,138 / 104,145 | 90,605 / 90,679 | 65,737 / 65,737 | 65,647 / 65,647 |
+| DDR4 4ch 128b | 65,917 / 65,924 | 66,291 / 66,299 | 65,562 / 65,562 | 65,686 / 65,686 |
+
+(model / report, cycles.) What is left is Ramulator 2.1 against the 2.0 the
+wrapper links, and where the bench's write phase leaves refresh. The
+saturated burst rows show the wrapper's 8,192 burst slots at work: the bench
+offers its 32,768 bursts faster than one beat a cycle drains them, so once
+the slots fill a burst goes in every other cycle, and 25% of the cycles
+stall in both. The HBM3 rows are left out: their `HBM3_8Gb` preset is
+Ramulator 2.0's, which 2.1 replaced.
+
+Table 1 (the bus with a zero-latency DRAM) was measured on the earlier,
+two-scratchpad interconnect, and no bench for it is in the repository. Today's
+bus, driven as fast as its masters can with `axi_tb.sv`'s burst lengths,
+reads at 7.99 B/cycle (100%: one R beat a cycle) and writes at 6.04 B/cycle
+(76%: 2-3 idle cycles between bursts), against the report's 3.28 and 2.23
+for the old design.
+
+```bash
+python tools/memory_bench.py all                        # about five minutes
+python tools/memory_bench.py table4 --config "DDR4 2ch 128b"
+```
+
 ## Performance monitor
 
 `build_atalla_platform` attaches a `PerfMonitor` (`src/atalla/perf_monitor.py`)

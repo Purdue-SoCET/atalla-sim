@@ -107,6 +107,9 @@ Longer runs:
     python tools/plot_sysarr_tpu_sweeps.py
     python tools/bench_native.py
 
+    # the DRAM subsystem report's AXI and Ramulator measurements, on the model
+    python tools/memory_bench.py all         # needs `make ramulator`
+
 Simulation output lands in `logs/`: stats.log, schedule.log, gemm_cycles.log,
 gantt.log.
 

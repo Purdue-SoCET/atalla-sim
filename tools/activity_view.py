@@ -246,8 +246,14 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
       box("spad" + i, x, 512, pw, 52, "Scratchpad " + i + "\n32 banks, 1RW", "store");
       box("spad" + i + "_r", x, 568, pw, 16, "xbar (reads)", "unit", {small: true});
     }
-    box("dram", 950, 462, 150, 122, "DRAM\nfixed latency", "store");
-    box("channel", 20, 612, 1080, 26, "Shared DRAM channel: one request a cycle, shared by the caches and the DMAs", "unit");
+    box("dram", 950, 462, 150, 122, /Ramulator/.test((byId.dram || {}).label || "")
+        ? "DRAM\nRamulator 2" : "DRAM\nfixed latency", "store");
+    if (byId.axi_r) {
+      box("axi_r", 20, 612, 537, 26, "AXI read path: a burst taken a cycle, beats back one a cycle", "unit");
+      box("axi_w", 563, 612, 537, 26, "AXI write path: one burst at a time, a beat a cycle", "unit");
+    } else {
+      box("channel", 20, 612, 1080, 26, "Shared DRAM channel: one request a cycle, shared by the caches and the DMAs", "unit");
+    }
     // Data flow.
     ARROWS.push([132, 165, 142, 165], [292, 165, 302, 165], [632, 165, 642, 165],
                 [466, 296, 466, 306], [870, 372, 888, 372],
@@ -463,7 +469,9 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
   if (m.array) bits.push("array " + m.array);
   if (m.lanes) bits.push(m.lanes + " lanes");
   if (m.burst_bytes) bits.push(m.burst_bytes + "-byte DRAM requests");
-  if (m.dram_latency !== undefined) bits.push("DRAM latency " + m.dram_latency);
+  if (m.axi) bits.push("AXI bus");
+  if (m.dram === "ramulator") bits.push("DRAM timed by Ramulator 2");
+  else if (m.dram_latency !== undefined) bits.push("DRAM latency " + m.dram_latency);
   document.getElementById("sub").textContent = bits.join(" · ");
   document.getElementById("pctnote").textContent =
     "Percentages: the share of the run's " + N.toLocaleString() +
@@ -471,7 +479,9 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
   document.getElementById("diff").textContent =
     "Drawn as the model builds the chip: " + count("spad") + " scratchpads, one per vector load/store unit; " +
     count("lane") + " lanes; a transpose unit beside the GSAU; separate EX2 and EX4 units. " +
-    "DRAM is a fixed-latency model (no DDR4 controller or Ramulator2). Dashed: not in the model." +
+    (m.dram === "ramulator" ? "DRAM is timed by Ramulator 2's DDR4 controller model. "
+                            : "DRAM is a fixed-latency model (no DDR4 controller). ") +
+    "Dashed: not in the model." +
     (unplaced.length ? " Also recorded, not drawn:" : "");
   paint();
 })();

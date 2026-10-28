@@ -16,7 +16,9 @@ changes nothing). It gathers:
 - **The instruction mix** retired, by class, and how full the packets were.
 - **Memory:** bursts and bytes each DRAM master moved (icache, dcache, the
   four scratchpad backends), how busy the shared channel was, and the
-  cycles each master lost waiting for it.
+  cycles each master lost waiting for it. On the AXI bus: bursts are AXI
+  transactions, the read and write paths' bytes a cycle against their 8
+  each, and the cycles a master waited for a full bus FIFO.
 - **Work and intensity:** floating-point operations done (lanes and the
   array), throughput per cycle, DRAM bandwidth used against its peak, and
   arithmetic intensity against bytes really moved over DRAM -- unlike the
@@ -209,18 +211,30 @@ class PerfMonitor(Clocked):
         vs = core.vector
         burst = p.backends[0].dram_burst_bytes if p.backends else 0
 
+        axi = getattr(p, "axi", None)
         masters = {}
-        for name, port in (p.ports or {}).items():
+        for name, port in ({} if axi is not None else (p.ports or {})).items():
             st = port.stats
             masters[name] = dict(bursts=st["read_bursts"] + st["write_bursts"],
                                  bytes=st["read_bytes"] + st["write_bytes"],
                                  read_bytes=st["read_bytes"], write_bytes=st["write_bytes"],
                                  wait_cycles=st["contention_cycles"])
-        for s, b in enumerate(p.backends):
+        for s, b in enumerate(p.backends if axi is None else ()):
             st = b.get_stats()
             masters["scpad%d" % s] = dict(bursts=st["issued_bursts"],
                                           bytes=st["issued_bursts"] * burst,
                                           wait_cycles=st["backend_stalls"])
+        if axi is not None:
+            # On the AXI bus (memory/axi.py) a burst is a transaction of beats.
+            bb = axi.params.beat_bytes
+            for port in axi.ports:
+                st = port.stats
+                name = "scpad" + port.name[2:] if port.name.startswith("sp") else port.name
+                masters[name] = dict(bursts=st["reads"] + st["writes"],
+                                     bytes=(st["read_beats"] + st["write_beats"]) * bb,
+                                     read_bytes=st["read_beats"] * bb,
+                                     write_bytes=st["write_beats"] * bb,
+                                     wait_cycles=st["ar_full"] + st["aw_full"])
         dram_bursts = sum(m["bursts"] for m in masters.values())
         dram_bytes = sum(m["bytes"] for m in masters.values())
 
@@ -248,8 +262,16 @@ class PerfMonitor(Clocked):
                 "dram_bursts": dram_bursts,
                 "dram_bytes": dram_bytes,
                 "dram_bytes_per_cycle": dram_bytes / cyc,
-                "dram_peak_bytes_per_cycle": burst,
+                # The shared channel launches one burst a cycle; the AXI bus has a
+                # read path and a write path, a beat a cycle each.
+                "dram_peak_bytes_per_cycle": (2 * axi.params.beat_bytes if axi is not None
+                                              else burst),
                 "dram_channel_busy": dram_bursts / cyc,
+                "axi": None if axi is None else {
+                    "read_bytes_per_cycle": axi.stats["r_beats"] * axi.params.beat_bytes / cyc,
+                    "write_bytes_per_cycle": axi.stats["w_beats"] * axi.params.beat_bytes / cyc,
+                    "path_peak_bytes_per_cycle": axi.params.beat_bytes,
+                },
                 "masters": masters,
                 "icache": {"fills": core.icache.fills, "iwait_cycles": core.icache.iwait_cycles},
                 "dcache": dict(core.dcache.stats),
@@ -283,9 +305,16 @@ class PerfMonitor(Clocked):
         for k, v in r["unit_busy"].items():
             lines.append("  %-14s %8d  %5.1f%%" % (k, v["cycles"], 100 * v["fraction"]))
         m = r["memory"]
-        lines += ["", "DRAM: %d bytes in %d bursts, %.2f B/cycle of %d peak, channel busy %.1f%%"
-                  % (m["dram_bytes"], m["dram_bursts"], m["dram_bytes_per_cycle"],
-                     m["dram_peak_bytes_per_cycle"], 100 * m["dram_channel_busy"])]
+        if m["axi"] is not None:
+            a = m["axi"]
+            lines += ["", "DRAM: %d bytes in %d bursts over the AXI bus: reads %.2f B/cycle, "
+                      "writes %.2f B/cycle, of %d each"
+                      % (m["dram_bytes"], m["dram_bursts"], a["read_bytes_per_cycle"],
+                         a["write_bytes_per_cycle"], a["path_peak_bytes_per_cycle"])]
+        else:
+            lines += ["", "DRAM: %d bytes in %d bursts, %.2f B/cycle of %d peak, channel busy %.1f%%"
+                      % (m["dram_bytes"], m["dram_bursts"], m["dram_bytes_per_cycle"],
+                         m["dram_peak_bytes_per_cycle"], 100 * m["dram_channel_busy"])]
         for k, v in m["masters"].items():
             if v["bursts"] or v["wait_cycles"]:
                 lines.append("  %-8s %6d bursts %8d bytes  waited %d cycles"

@@ -76,6 +76,7 @@ class ActivityProbe(Clocked):
         self._prev = {"issued": 0, "to_d1d2": 0, "mul_ops": 0, "act_rows": 0}
         self._prev_stalls = [0] * len(platform.backends)
         self._prev_contention = {n: 0 for n in platform.ports}
+        self._prev_axi = (0, 0)
 
     # -- the blocks ---------------------------------------------------------------------
     def _blocks(self) -> List[Block]:
@@ -145,10 +146,15 @@ class ActivityProbe(Clocked):
         b += [Block("%s_port" % n, "%s port" % ("iCache" if n == "icache" else "dCache"),
                     "Memory", "bursts queued or in flight", "lost the DRAM channel")
               for n in p.ports]
-        b += [
-            Block("channel", "DRAM channel", "Memory", "a burst launched this cycle"),
-            Block("dram", "DRAM (fixed latency)", "Memory", "bursts outstanding"),
-        ]
+        if p.axi is not None:
+            b += [Block("axi_r", "AXI read path", "Memory",
+                        "a read burst taken or a beat returned this cycle"),
+                  Block("axi_w", "AXI write path", "Memory", "a write beat taken this cycle")]
+        else:
+            b += [Block("channel", "DRAM channel", "Memory", "a burst launched this cycle")]
+        timed = type(p.dram_channel).__name__ == "RamulatorDRAM"
+        b += [Block("dram", "DRAM (Ramulator 2)" if timed else "DRAM (fixed latency)", "Memory",
+                    "requests outstanding")]
         return b
 
     # -- one cycle ----------------------------------------------------------------------
@@ -288,12 +294,22 @@ class ActivityProbe(Clocked):
         for n, port in p.ports.items():
             lost = port.stats["contention_cycles"] > self._prev_contention[n]
             self._prev_contention[n] = port.stats["contention_cycles"]
-            s["%s_port" % n] = (STALLED if lost
-                                else ACTIVE if port._launch_q or port._due else IDLE)
-        channel = p.backends[0].shared_burst_channel if p.backends else None
-        s["channel"] = ACTIVE if channel is not None and channel.last_issue_tick == cycle else IDLE
+            s["%s_port" % n] = (STALLED if lost else ACTIVE
+                                if port._launch_q or port._due or port._inflight else IDLE)
+        if p.axi is not None:
+            st = p.axi.stats
+            r, w = st["ar"] + st["r_beats"], st["w_beats"]
+            s["axi_r"] = ACTIVE if r > self._prev_axi[0] else IDLE
+            s["axi_w"] = ACTIVE if w > self._prev_axi[1] else IDLE
+            self._prev_axi = (r, w)
+        else:
+            channel = p.backends[0].shared_burst_channel if p.backends else None
+            s["channel"] = (ACTIVE if channel is not None and channel.last_issue_tick == cycle
+                            else IDLE)
         outstanding = (any(not be._dram_pending.is_empty() for be in p.backends)
-                       or any(port._due for port in p.ports.values()))
+                       or any(port._due for port in p.ports.values())
+                       or (p.axi is not None and not p.axi.idle)
+                       or (p.dram_channel is not None and not p.dram_channel.idle))
         s["dram"] = ACTIVE if outstanding else IDLE
         return s
 
