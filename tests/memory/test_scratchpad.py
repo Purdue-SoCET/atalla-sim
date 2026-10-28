@@ -5,6 +5,7 @@ from base.testing import build_sim
 
 from memory.dram import DRAM
 from memory.scratchpad import Scratchpad
+from memory.sram_bank import done_delay
 from memory.backend import Backend
 
 
@@ -184,6 +185,33 @@ def test_a_pad_takes_one_request_a_cycle_and_drops_none():
 
     assert _read_row(spad, tile_id=0, slot=0) == row0
     assert _read_row(spad, tile_id=0, slot=1) == row1
+
+@pytest.mark.parametrize("write_latency", [1, 3])
+def test_a_frontend_write_calls_back_once_at_its_write_done(write_latency):
+    """The vreg.st release point: each write's callback fires once, in the
+    order the writes were accepted, at the bank's write done -- done_delay
+    cycles after its enable. 1 is PCACTI's write latency (the platform's); 3
+    is how the sim models the RTL instance's 2 (test_scratchpad_rtl_timing
+    pins that against the RTL)."""
+    eq, clk, sim = build_sim()
+    spad = Scratchpad(num_banks=8, bank_size=16, elem_bytes=2, write_latency=write_latency)
+    clk.add_clocked(spad)
+    clk.schedule_next(0.0)
+    enables, done = [], []
+    spad.trace_hook = lambda e: enables.append(e["cycle"]) if e["kind"] == "write" else None
+
+    for k in range(4):
+        row = _pack_row([k] * 8)
+        cb = lambda _k=k: done.append((_k, spad.now))
+        assert spad.frontend_write(k, row, row_idx=0, tile_id=0, now=k, callback=cb)
+        sim.run(until=float(k) + 0.5)
+    sim.run(until=30.0)
+
+    delay = done_delay(write_latency)
+    assert [k for k, _ in done] == [0, 1, 2, 3]
+    assert [c for _, c in done] == [e + delay for e in enables]
+    assert {b - a for a, b in zip(enables, enables[1:])} == {delay}
+
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))

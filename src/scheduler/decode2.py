@@ -33,6 +33,18 @@ bit cleared and set on the same edge ends up set -- a new instruction has
 just claimed the register. Branches write rs1 (rs1 += incr7); an SDMA holds
 its rs1 until the scratchpad reports it done.
 
+vreg.st -> scpad.st / scpad.ld ordering (dependency_checker.sv's vst_* table,
+FA26_integration_l2wokr; VstReservations here). A vreg.st's row reaches the
+scratchpad's write queue, and an SDMA's reads of that row can overtake it, so
+a vreg.st reserves its rs1 -- the tile's base register -- when it issues, and
+the scratchpad releases one reservation when that row's SRAM write is done.
+It is a count, not a busy bit: a tile is stored by many vreg.st on one rs1
+(different rs2 rows), and a bit would clear at the first row. An SDMA, store
+or load (the load for write-after-write), can't issue while its rs1 holds a
+count; vreg.st never checks it, so stores to one tile pipeline. The table has
+8 entries counting to 63; a vreg.st that needs a ninth entry, or might
+overflow a count, stalls its packet. The halt waits for the table to empty.
+
 Packets the RTL cannot execute are a compiler contract, not a stall: the RTL
 silently drops the extra instruction or zeroes the extra operand. Here they
 raise PacketContractError (or are counted, with strict=False):
@@ -41,6 +53,7 @@ raise PacketContractError (or are counted, with strict=False):
     4 scalar, 4 vector, 2 mask reads     the source register allocator's ports
     1 GSAU, 1 move-to-scalar, 2 lane ops scheduler_core's routing
     1 VLSU op and 1 SDMA per scratchpad
+    no vreg.st and SDMA on one rs1      no defined order between them
 
 Where the RTL is wrong this does what was meant (see also control.py):
 
@@ -162,6 +175,9 @@ def contract_violations(pkt: DecodedPacket, sdma_sids: Sequence[int] = ()) -> Li
         out.append("two VLSU ops on one scratchpad")
     if len(sdma_sids) != len(set(sdma_sids)):
         out.append("two SDMAs on one scratchpad")
+    shared = set(VstReservations.vst_regs(pkt)) & {o.rs1_rd for o in d}
+    if shared:
+        out.append("vreg.st and an SDMA on one rs1 (x%d)" % min(shared))
     return out
 
 
@@ -207,6 +223,60 @@ class Scoreboard(RTLModule):
     @property
     def idle(self) -> bool:
         return not (self.scalar or self.vector or self.mask)
+
+
+#: dependency_checker.sv's vreg.st reservation table: entries, and the
+#: largest count (a 6-bit counter).
+VST_RSV_ENTRIES = 8
+VST_CNT_MAX = 63
+#: The headroom an entry keeps: a packet holds at most this many vreg.st.
+NUM_VECTOR_SLOTS = PACKET_SIZE
+
+
+class VstReservations(RTLModule):
+    """vreg.st -> SDMA ordering: outstanding vreg.st per rs1
+    (dependency_checker.sv, vst_*). See the module docstring.
+
+    Capacity is checked against registered state, so an entry that empties
+    this cycle frees up next cycle. A release and a new vreg.st on one
+    register in one cycle cancel; two vreg.st in one packet on a new register
+    take one entry and count 2; two scratchpads releasing one register in a
+    cycle count down 2.
+    """
+
+    REGS = dict(cnt={})                      # rs1 -> outstanding vreg.st, > 0 only
+
+    @staticmethod
+    def vst_regs(pkt: DecodedPacket) -> List[int]:
+        """The rs1 of every vreg.st in the packet."""
+        return [o.rs1 for o in pkt.vector
+                if o.valid and o.fu == V_VLSU and not o.vector_reg_write]
+
+    def hazard(self, pkt: DecodedPacket) -> bool:
+        """An SDMA on a reserved rs1."""
+        return any(o.rs1_rd in self.cnt for o in pkt.sdma if o.valid)
+
+    def full(self, pkt: DecodedPacket) -> bool:
+        """No entry for a new register, or no headroom on an old one."""
+        regs = self.vst_regs(pkt)
+        new = {r for r in regs if r not in self.cnt}
+        if len(self.cnt) + len(new) > VST_RSV_ENTRIES:
+            return True
+        return any(self.cnt[r] > VST_CNT_MAX - NUM_VECTOR_SLOTS for r in regs if r in self.cnt)
+
+    def next_state(self, issued: Optional[DecodedPacket], released=()) -> None:
+        cnt = dict(self.cnt)
+        for r in released:
+            assert cnt.get(r, 0) > 0, "vreg.st release for x%d with no reservation" % r
+            cnt[r] -= 1
+        if issued is not None:
+            for r in self.vst_regs(issued):
+                cnt[r] = cnt.get(r, 0) + 1
+        self.cnt_n = {r: n for r, n in cnt.items() if n}
+
+    @property
+    def idle(self) -> bool:
+        return not self.cnt
 
 
 # -- reg_file / reggie -----------------------------------------------------------------
@@ -357,16 +427,18 @@ class Decode2(RTLModule):
                sdma=[0] * PACKET_SIZE, valid=False, pc=0, pc_pred_addr=0,
                predict_taken=False, flush=False, halt=False,
                ex_ready=None, vector_ready=None, vlsu_ready=None, scpad_busy=None,
-               wb_scalar=(), wb_vector=(), wb_mask=(), wb_sdma=())
+               wb_scalar=(), wb_vector=(), wb_mask=(), wb_sdma=(), wb_vst=())
     OUTS = dict(ready=False, issued=None)
     #: The EX/WB latch's writebacks hold for one cycle only.
-    CLEAR_ON_COMMIT = ("in_wb_scalar", "in_wb_vector", "in_wb_mask", "in_wb_sdma")
+    CLEAR_ON_COMMIT = ("in_wb_scalar", "in_wb_vector", "in_wb_mask", "in_wb_sdma",
+                       "in_wb_vst")
 
     def __init__(self, name: str = "decode2", *, strict: bool = True,
                  vector_storage=None, vector_len: int = 32):
         super().__init__(name)
         self.strict = bool(strict)
         self.scoreboard = Scoreboard("scoreboard")
+        self.vst = VstReservations("vst")
         self.srf = ScalarRegFile("srf")
         zero_vec = [0.0] * int(vector_len)
         self.vrf = RegFile("vrf", NUM_VECTOR_REGS, VECTOR_BANKS, zero_value=zero_vec,
@@ -415,7 +487,10 @@ class Decode2(RTLModule):
         read = self.srf.read
         sids = {o.slot: (read(o.rs3) >> 30) & 3 for o in pkt.sdma if o.valid}
         self._sids = sids
-        deps = not self.scoreboard.hazard(pkt)
+        sb_hazard = self.scoreboard.hazard(pkt)
+        vst_hazard = self.vst.hazard(pkt)
+        vst_full = self.vst.full(pkt)
+        deps = not (sb_hazard or vst_hazard or vst_full)
         fus = self._fu_ready(pkt, sids)
         self._wb_v_regs, self._wb_v = _with_data(self.in_wb_vector)
         self._wb_m_regs, self._wb_m = _with_data(self.in_wb_mask)
@@ -426,14 +501,17 @@ class Decode2(RTLModule):
         rf = all(rf)
         self.out_ready = deps and fus and rf
         #: This cycle's stall, for the performance monitor: None, "hazard",
-        #: "unit" (blocked_by names it) or "regfile".
+        #: "vst" (an SDMA waiting for vreg.st reservations on its rs1),
+        #: "vst_full" (no room in the reservation table), "unit" (blocked_by
+        #: names it) or "regfile".
         self.last_stall = None
         self.hazard_reg = None
         if not self.out_ready and self.in_valid and not pkt.empty:
-            why = "hazard" if not deps else "unit" if not fus else "regfile"
+            why = ("hazard" if sb_hazard else "vst" if vst_hazard else "vst_full" if vst_full
+                   else "unit" if not fus else "regfile")
             self.stall_reasons[why] = self.stall_reasons.get(why, 0) + 1
             self.last_stall = why
-            if not deps:
+            if sb_hazard:
                 self.hazard_reg = self.scoreboard.first_hazard(pkt)
 
     def eval_data(self) -> None:
@@ -451,6 +529,7 @@ class Decode2(RTLModule):
         self.out_issued = issued
         self.scoreboard.next_state(pkt if issue else None, [r for r, _ in self.in_wb_scalar],
                                    self._wb_v_regs, self._wb_m_regs, self.in_wb_sdma)
+        self.vst.next_state(pkt if issue else None, self.in_wb_vst)
         self.srf.next_state(ready, self.in_wb_scalar)
         self.vrf.next_state(ready, self._wb_v)
         self.mrf.next_state(ready, self._wb_m)
@@ -479,6 +558,7 @@ class Decode2(RTLModule):
 
     def commit(self) -> None:
         self.scoreboard.commit()
+        self.vst.commit()
         self.srf.commit()
         self.vrf.commit()
         self.mrf.commit()
@@ -487,5 +567,5 @@ class Decode2(RTLModule):
     # -- what execute asks before halting -----------------------------------------
     @property
     def scalar_halt_ready(self) -> bool:
-        return bool(self.scoreboard.scalar)
+        return bool(self.scoreboard.scalar) or not self.vst.idle
 

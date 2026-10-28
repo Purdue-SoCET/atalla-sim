@@ -41,7 +41,8 @@ component.
 A packet issues as a whole, in a cycle where all of these hold:
 
 - **No hazard.** No source and no destination of any instruction is busy in
-  the scoreboard (read-after-write, write-after-write).
+  the scoreboard (read-after-write, write-after-write), and no SDMA's `rs1`
+  has a `vreg.st` outstanding (below).
 - **Every unit it needs is ready:**
   - scalar EX1–EX5;
   - the vector ALU, MUL and reduction lanes, the GSAU, and the move-to-scalar unit;
@@ -53,6 +54,20 @@ The scoreboard is a busy bit per register — 256 scalar, 256 vector, 16 mask �
 set when the instruction that writes it issues and cleared when its
 writeback reaches the register file. Cleared and set on one edge, it stays
 set. A dependent packet issues the cycle after its producer's writeback.
+
+`vreg.st` → SDMA ordering. A `vreg.st` reserves its `rs1`, the tile's base
+register, when it issues, and the scratchpad releases one reservation when
+that row's SRAM write is done. The release reaches decode 2 through the EX/WB
+latch, like an SDMA's completion. An SDMA (`scpad.st`, or `scpad.ld`, which
+would overwrite the tile) can't issue while its `rs1` holds any reservation;
+`vreg.st` itself never waits on them, so the stores to one tile pipeline. It
+is a count per register, not a bit, because a tile is many `vreg.st` on one
+`rs1`. The table has 8 registers, each counting to 63; a `vreg.st` that would
+need a ninth, or could overflow a count, stalls its packet. The halt waits
+for the table to empty, and a `vreg.st` and an SDMA on one `rs1` in one
+packet is a contract violation. The perf monitor reports these stalls as
+`stall:vst` and `stall:vst_full`. (`dependency_checker.sv` on
+`FA26_integration_l2wokr`; `vreg.ld` isn't gated.)
 
 Decode 2 owns three register files and reads every operand at issue, so the
 units downstream get data, not register numbers, and write-after-read is

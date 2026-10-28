@@ -206,18 +206,21 @@ class SchedulerCore(Clocked):
     def warm_icache(self, addresses: Optional[Iterable[int]] = None) -> None:
         self.icache.warm(self.program if addresses is None else addresses)
 
-    def writeback_at(self, cycle: int, scalar=(), vector=(), mask=(), sdma=()) -> None:
+    def writeback_at(self, cycle: int, scalar=(), vector=(), mask=(), sdma=(),
+                     vst=()) -> None:
         """Put writebacks in the EX/WB latch for `cycle`: scalar (reg, value)
         pairs; vector and mask registers, each a register (busy bit only) or
-        (register, value); and SDMA completions (the rs1 an SDMA held). They
-        reach the register file and clear their busy bits on that cycle's
-        edge."""
+        (register, value); SDMA completions (the rs1 an SDMA held); and vreg.st
+        releases (the rs1 of a vreg.st whose row the scratchpad has written,
+        one entry per row). They reach the register file and clear their busy
+        bits and reservations on that cycle's edge."""
         due = self._wb_due.setdefault(int(cycle), {"scalar": [], "vector": [],
-                                                   "mask": [], "sdma": []})
+                                                   "mask": [], "sdma": [], "vst": []})
         due["scalar"] += [(int(r), int(v)) for r, v in scalar]
         due["vector"] += [(int(e[0]), e[1]) if isinstance(e, tuple) else int(e) for e in vector]
         due["mask"] += [(int(e[0]), e[1]) if isinstance(e, tuple) else int(e) for e in mask]
         due["sdma"] += [int(r) for r in sdma]
+        due["vst"] += [int(r) for r in vst]
 
     # -- one cycle ---------------------------------------------------------
     def tick(self, time: Optional[Time] = None) -> None:
@@ -290,9 +293,10 @@ class SchedulerCore(Clocked):
         self.vector_ready, self.vlsu_ready, self.scpad_busy = vec, vlsu, busy
         granted, vw, mw = vs.arbitrate(vs.offers())
         done = vs.take_sdma_done()
-        if vw or mw or done:
+        vst = vs.take_vst_done()
+        if vw or mw or done or vst:
             self.writeback_at(cycle + 1, vector=[(w.reg, w.value) for w in vw],
-                              mask=[(w.reg, w.value) for w in mw], sdma=done)
+                              mask=[(w.reg, w.value) for w in mw], sdma=done, vst=vst)
             vs.stats["vector_writes"] += len(vw)
             vs.stats["mask_writes"] += len(mw)
         vs.retire(granted)
@@ -310,7 +314,10 @@ class SchedulerCore(Clocked):
         self.ex4.advance(r.get(4), g.get("ex4", False))
         self.lsu.advance(g.get("ex5", False))
         self.dcache.commit()
+        # The vreg.st table, not vector.idle, covers a row still in the
+        # scratchpad's write queue.
         if (self.halt_latch and self.halted_at is None and self.decode2.scoreboard.idle
+                and self.decode2.vst.idle
                 and self.lsu.idle and not any(self.scpad_busy)
                 and (self.vector is None or self.vector.idle)):
             self.halted_at = cycle          # halt_out
@@ -356,6 +363,7 @@ class SchedulerCore(Clocked):
         d2.in_wb_vector = wb.get("vector", [])
         d2.in_wb_mask = wb.get("mask", [])
         d2.in_wb_sdma = wb.get("sdma", [])
+        d2.in_wb_vst = wb.get("vst", [])
         d2.eval_ready()
         if self.decode2_override is not None:
             d2.out_ready = bool(self.decode2_override)
