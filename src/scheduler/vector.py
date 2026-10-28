@@ -27,6 +27,11 @@ result. Compares write the mask file. A write offered in cycle v reaches the
 register file in v + 1, through the EX/WB latch. An SDMA's completion clears
 the busy bit on its rs1 the same way.
 
+A vreg.st's row carries its rs1 (meta "vst_rd") to the scratchpad; when the
+pad's SRAM write is done, its bridge calls vst_committed, and the release goes
+through the EX/WB latch like an SDMA's completion, freeing one of decode 2's
+vreg.st reservations on that rs1 (decode2.VstReservations).
+
 Where the RTL is wrong this does what was meant: all four VLSUs write back,
 the write ports are chosen by the register file's bank vd[1:0], and lw.vi
 writes no register.
@@ -198,6 +203,7 @@ class VectorSide:
         self._vlsu_holds: Dict[int, Deque] = {s: deque() for s in range(len(vc.vls_units))}
         self.sdma_busy = [False] * max(4, len(self.backends))
         self._sdma_done: List[int] = []           # rs1s whose SDMA finished
+        self._vst_done: List[int] = []            # rs1s of vreg.st rows written
         #: Transpose requests in program order, ("push", vector) or
         #: ("pop", vd), not yet given to the unit; the vds of tpop.vi waiting
         #: for their column; and the columns left in the drain under way.
@@ -415,8 +421,9 @@ class VectorSide:
             self.stats["vlsu_loads"] += 1
         else:
             data = [bf16_bits(x) for x in ops["vs1"]]
+            # vst_rd: the reservation the scratchpad releases once the row is written
             op = {"kind": "store", "scratchpad": 0, "data": data, "addr": addr,
-                  "vl": o.num_cols + 1}
+                  "vl": o.num_cols + 1, "meta": {"vst_rd": o.rs1}}
             self.stats["vlsu_stores"] += 1
         assert vls.enqueue_issue(op), "VLSU %d issued while not ready" % o.sid
 
@@ -448,6 +455,15 @@ class VectorSide:
 
     def take_sdma_done(self) -> List[int]:
         done, self._sdma_done = self._sdma_done, []
+        return done
+
+    def vst_committed(self, sid: int, rd: int) -> None:
+        """Scratchpad `sid` has written a vreg.st's row: release one
+        reservation on its rs1 `rd` (the RTL's vec_wr_done)."""
+        self._vst_done.append(int(rd))
+
+    def take_vst_done(self) -> List[int]:
+        done, self._vst_done = self._vst_done, []
         return done
 
     @property

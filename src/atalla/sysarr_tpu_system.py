@@ -123,6 +123,9 @@ class VLSFrontendBridge(Clocked):
         self.activity_this_cycle = False
         self.now = 0
         self.trace_hook = None
+        #: on_store_commit(vls_id, rd), when a store tagged meta["vst_rd"] is
+        #: written to the pad (the scheduler's vreg.st release).
+        self.on_store_commit: Optional[Callable[[int, int], None]] = None
 
     def start_cycle(self) -> None:
         self.activity_this_cycle = False
@@ -179,12 +182,17 @@ class VLSFrontendBridge(Clocked):
                         "meta": meta,
                     }
                 )
+            rd = meta.get("vst_rd")
+            cb = None
+            if rd is not None and self.on_store_commit is not None:
+                cb = lambda _rd=rd, _sid=self.vls_id: self.on_store_commit(_sid, _rd)
             assert self.spad.frontend_write(
                 addr,
                 _encode_vector_u16(req["data"]),
                 row_idx=0,
                 tile_id=self.frontend_id,
                 now=int(self.now),
+                callback=cb,
             )
             return
 

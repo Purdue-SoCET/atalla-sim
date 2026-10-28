@@ -194,6 +194,7 @@ def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]
     root = CompositeClocked("atalla_platform")
     root.add_child(core, phase=PHASE_CORE)
     for bridge in parts.vls_bridges:
+        bridge.on_store_commit = core.vector.vst_committed
         root.add_child(bridge, phase=PHASE_VLS)
     root.add_child(sysarr_bridge, phase=PHASE_SYSARR)
     root.add_child(parts.spad, phase=PHASE_SPAD)

@@ -222,9 +222,10 @@ class Scratchpad(Clocked):
 
     # -- legacy entry points ---------------------------------------------------------
     def frontend_write(self, base_sp_addr: int, row_bytes: bytes, row_idx: int,
-                       tile_id: Optional[int] = None, now: Optional[int] = None) -> bool:
+                       tile_id: Optional[int] = None, now: Optional[int] = None,
+                       callback: Optional[Callable[[], None]] = None) -> bool:
         tile_id, slot = self._tile_and_slot(base_sp_addr, tile_id)
-        return self.submit_write(tile_id, slot, row_bytes, now=now)
+        return self.submit_write(tile_id, slot, row_bytes, callback=callback, now=now)
 
     def read_row_now(self, sp_addr: int, tile_id: Optional[int] = None) -> bytes:
         """The row as stored, with no timing -- for checks and debug only."""

@@ -12,7 +12,7 @@ from scheduler.control import decode_scalar, decode_sdma, decode_vector
 from scheduler.core import SchedulerCore
 from scheduler.decode1 import SCALAR, SCPAD, VECTOR, classify
 from scheduler.decode2 import (
-    DecodedPacket, PacketContractError, Scoreboard, contract_violations)
+    VST_RSV_ENTRIES, DecodedPacket, PacketContractError, Scoreboard, contract_violations)
 from scheduler.isa import INST_BYTES, INST_W, OPCODES, decode_instruction
 
 OP = {m: op for op, (m, _) in OPCODES.items()}
@@ -252,6 +252,99 @@ def test_an_sdma_holds_its_rs1_until_the_scratchpad_is_done():
     prog = {0: slot0(sdma("scpad.ld", 11, 12, 13)), 20: packet(i("addi.s", 20, 11, 0))}
     _, issued = run(prog, 14, setup=lambda c: c.writeback_at(9, sdma=[11]))
     assert issued == {0: 2, 20: 10}
+
+
+# -- vreg.st -> SDMA reservations (dependency_checker.sv, vst_*) -----------------------
+def vst(rs1, sid=0, rs2=6, vs=9):
+    return vm("vreg.st", vs, rs1, rs2, sid=sid)
+
+
+def test_a_scpad_st_waits_for_the_vreg_st_release():
+    """The vreg.st reserves x5; the scpad.st on x5 waits until the release
+    reaches decode 2 on cycle 9's edge."""
+    prog = {0: slot0(vst(5)), 20: slot0(sdma("scpad.st", 5, 7, 8))}
+    core, issued = run(prog, 14, setup=lambda c: c.writeback_at(9, vst=[5]))
+    assert issued == {0: 2, 20: 10}
+    assert core.decode2.stall_reasons.get("vst", 0) == 7
+
+
+def test_a_reservation_on_another_register_holds_nothing():
+    with_vst, _ = {0: slot0(vst(5)), 20: slot0(sdma("scpad.st", 7, 7, 8))}, None
+    without = {0: slot0(r("nop.s")), 20: slot0(sdma("scpad.st", 7, 7, 8))}
+    assert run(with_vst, 10)[1][20] == run(without, 10)[1][20]
+
+
+def test_vreg_st_never_waits_on_the_table():
+    prog = {20 * k: slot0(vst(5)) for k in range(4)}
+    core, issued = run(prog, 10)
+    assert [issued[20 * k] for k in range(4)] == [2, 3, 4, 5]
+    assert core.decode2.vst.cnt == {5: 4}
+
+
+def test_a_reservation_is_a_count_not_a_bit():
+    """Two vreg.st on x5 in one packet take one entry and count 2; with a
+    third, the scpad.st waits for all three rows."""
+    prog = {0: packet(vst(5, sid=0), vst(5, sid=1)), 20: slot0(vst(5)),
+            40: slot0(sdma("scpad.st", 5, 7, 8))}
+
+    def releases(core):
+        for c in (9, 10, 11):
+            core.writeback_at(c, vst=[5])
+    first = run(prog, 8)[1][0]
+    core, _ = run(prog, first + 1)
+    assert core.decode2.vst.cnt == {5: 2}
+    core, issued = run(prog, 15, setup=releases)
+    assert issued[40] == 12
+    assert core.decode2.vst.idle
+
+
+def test_two_releases_in_one_cycle_count_down_two():
+    prog = {0: packet(vst(5, sid=0), vst(5, sid=1)), 20: slot0(sdma("scpad.st", 5, 7, 8))}
+    _, issued = run(prog, 12, setup=lambda c: c.writeback_at(8, vst=[5, 5]))
+    assert issued[20] == 9
+
+
+def test_a_release_and_a_new_vreg_st_on_one_edge_cancel():
+    prog = {0: slot0(vst(5)), 20: slot0(vst(5))}
+    second = run(prog, 6)[1][20]
+    core, _ = run(prog, 6, setup=lambda c: c.writeback_at(second, vst=[5]))
+    assert core.decode2.vst.cnt == {5: 1}
+
+
+def test_a_full_table_stalls_the_vreg_st_that_needs_a_ninth_entry():
+    """Capacity is registered state: the entry x1 frees on cycle 14's edge
+    takes a vreg.st on cycle 15."""
+    prog = {20 * k: slot0(vst(k + 1)) for k in range(VST_RSV_ENTRIES + 1)}
+    core, issued = run(prog, 18, setup=lambda c: c.writeback_at(14, vst=[1]))
+    ninth = 20 * VST_RSV_ENTRIES
+    assert issued[ninth] == 15
+    assert core.decode2.stall_reasons["vst_full"] > 0
+
+
+def test_a_scpad_ld_waits_too():
+    """Write after write: the DMA must not overwrite the tile before the
+    vector stores land."""
+    prog = {0: slot0(vst(5)), 20: slot0(sdma("scpad.ld", 5, 7, 8))}
+    _, issued = run(prog, 14, setup=lambda c: c.writeback_at(9, vst=[5]))
+    assert issued[20] == 10
+
+
+def test_a_vreg_st_and_an_sdma_on_one_rs1_in_a_packet_is_a_contract_violation():
+    pkt = DecodedPacket.from_words([0] * 4, [vst(5, rs2=0), 0, 0, 0],
+                                   [sdma("scpad.st", 5, 0, 0), 0, 0, 0])
+    assert any("vreg.st and an SDMA" in b for b in contract_violations(pkt))
+    prog = {0: packet(vst(5, rs2=0), sdma("scpad.st", 5, 0, 0))}
+    with pytest.raises(PacketContractError):
+        run(prog, 6)
+
+
+def test_the_halt_waits_for_the_vreg_st_reservations():
+    core, _ = run({0: slot0(vst(5))}, 4)
+    d2 = core.decode2
+    assert d2.scalar_halt_ready and not d2.scoreboard.scalar
+    core.writeback_at(4, vst=[5])
+    core.run(1, start=4)
+    assert not d2.scalar_halt_ready
 
 
 def test_a_mask_written_from_vector_slot_3_is_tracked():
