@@ -59,7 +59,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from atalla import tensors                                        # noqa: E402
 from atalla.hang import HANG_AFTER                                # noqa: E402
+from atalla.kernel import entry_sregs                             # noqa: E402
 from scheduler import golden                                     # noqa: E402
 from scheduler.core import load_program_text                      # noqa: E402
 from scheduler.elf import ElfError, load_elf                       # noqa: E402
@@ -174,6 +176,19 @@ def main(argv=None) -> None:
                          "its scpad.ld lands, a scpad.st before its vreg.st, misaligned "
                          "scalar accesses, packets the RTL can't run); =error also exits 1 "
                          "when there are any")
+    ap.add_argument("--input", metavar="FILE@ADDR[:DTYPE]", action="append", default=[],
+                    help="put an array into DRAM before the run: a .npy file (or numbers in a "
+                         "text file) at byte address ADDR, as DTYPE (bf16, f32, i32, u32, i16, "
+                         "u16, i8, u8; default bf16); repeatable, after the program's own data")
+    ap.add_argument("--output", metavar="ADDR:SHAPE[:DTYPE][=FILE]", action="append", default=[],
+                    help="read an array from DRAM after the run, e.g. 0x3000:32x32:bf16=y.npy; "
+                         "prints a summary and saves FILE (.npy); repeatable. A C program's "
+                         "stack goes above every --output")
+    ap.add_argument("--expect", metavar="FILE@ADDR[:DTYPE]", action="append", default=[],
+                    help="after the run, compare DRAM at ADDR with the array in FILE (its "
+                         "shape); exits 1 if any element is more than --ulps BF16 steps off")
+    ap.add_argument("--ulps", type=float, default=1,
+                    help="with --expect: allowed error in BF16 steps (default %(default)g)")
     ap.add_argument("--report", action="store_true",
                     help="print the performance monitor's report: where the cycles went, "
                          "unit utilisation, and the AXI / DRAM summaries")
@@ -215,6 +230,22 @@ def main(argv=None) -> None:
             if path.suffix != ".in":
                 path = build_kernel(args.kernel, extra, Path(tmp))
             instr, data = load_program_text(path.read_text())
+    try:
+        inputs = [tensors.parse_input(spec) for spec in args.input]
+        outputs = [tensors.parse_output(spec) for spec in args.output]
+        expects = [tensors.parse_input(spec) for spec in args.expect]
+    except ValueError as exc:
+        sys.exit(str(exc))
+    if inputs or outputs:
+        data = dict(data)
+        for path, addr, dtype in inputs:
+            try:
+                tensors.put(data, addr, tensors.load_array(path), dtype)
+            except (OSError, ValueError) as exc:
+                sys.exit("--input %s: %s" % (path, exc))
+        if init_sregs is not None:
+            init_sregs = entry_sregs(data, [(a, a + tensors.nbytes(shape, dt))
+                                            for a, shape, dt, _ in outputs])
     if args.save:
         Path(args.save).write_text(to_in_text(instr, data))
         print("program image written to %s" % args.save)
@@ -293,8 +324,30 @@ def main(argv=None) -> None:
         compare(plat, instr, data, red, init_sregs)
     if args.check:
         print(plat.check.summary())
-        if args.check == "error" and plat.check.findings:
-            sys.exit(1)
+    reader = tensors.plat_reader(plat)
+    for addr, shape, dtype, path in outputs:
+        y = tensors.read(reader, addr, shape, dtype)
+        print("output %#x (%s): %s" % (addr, dtype, tensors.describe(y)))
+        if path:
+            import numpy as np
+            np.save(path, y)
+            print("  saved to %s" % path)
+    failed = False
+    for path, addr, dtype in expects:
+        try:
+            want = tensors.load_array(path)
+        except (OSError, ValueError) as exc:
+            sys.exit("--expect %s: %s" % (path, exc))
+        got = tensors.read(reader, addr, want.shape, dtype)
+        try:
+            m = tensors.assert_close(got, want, ulps=args.ulps)
+            print("expect %s at %#x: PASS (max abs %.3g, worst %.1f BF16 steps, cosine %.6f)"
+                  % (path, addr, m["max_abs"], m["max_bf16_steps"], m["cosine"]))
+        except AssertionError as exc:
+            failed = True
+            print("expect %s at %#x: FAIL -- %s" % (path, addr, exc))
+    if failed or (args.check == "error" and plat.check.findings):
+        sys.exit(1)
 
 
 if __name__ == "__main__":

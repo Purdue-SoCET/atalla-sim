@@ -186,6 +186,22 @@ checked run takes the same cycles. Rules and limits: `src/atalla/check.py`.
 | `--burst-bytes N` | 8 | bytes per DRAM request, for every DRAM master; 8 is the RTL's 64-bit interface |
 | `--warm-icache` | off | start with the program in the instruction cache |
 | `--limit N` | 5,000,000 | stop after this many cycles |
+| `--hang-after N` | 50,000 | stop once nothing has moved for N cycles, with a report of what everything waits on (0: never) |
+
+### Your own inputs and outputs
+
+```bash
+python tools/run_kernel.py add.c --input a.npy@0x1000 --input b.npy@0x2000 \
+    --output 0x3000:4x32=c.npy --expect c_ref.npy@0x3000 --ulps 1
+```
+
+`--input FILE@ADDR[:DTYPE]` puts an array (a `.npy` file, or numbers in a
+text file) into DRAM at byte address `ADDR` before the run, after the
+program's own data; `--output ADDR:SHAPE[:DTYPE][=FILE]` reads one back,
+prints a summary and saves it; `--expect FILE@ADDR[:DTYPE]` compares DRAM
+with a reference and exits 1 when any element is more than `--ulps` BF16
+steps off. Types: `bf16` (the default), `f32`, `i32`, `u32`, `i16`, `u16`,
+`i8`, `u8`. A C program's stack is placed above every input and output.
 
 ### From Python
 
@@ -230,6 +246,31 @@ the model.
 
 Scratchpad sizes are constants in `src/atalla/sysarr_tpu_system.py`
 (`SPAD_TOTAL_BYTES`, `SPAD_NUM_PADS`, ...).
+
+### A kernel in a test
+
+`atalla.kernel.Kernel` runs one program with numpy inputs and returns numpy
+outputs, on atalla-sim and, with `golden=True`, on the functional sim from
+the same image:
+
+```python
+import numpy as np
+from atalla.kernel import Kernel
+from atalla.tensors import assert_close, bf16_round
+
+a = bf16_round(np.random.default_rng(0).normal(size=(4, 32)))
+k = Kernel(c=open("my_kernel.c").read())    # or asm=..., image="prog.in", program=(instr, data)
+k.write(0x1000, a)                          # bf16 unless dtype= says otherwise
+k.output(0x3000, (4, 32))                   # keeps the C stack clear of it
+r = k.run(golden=True, check=True)          # keywords go to build_atalla_platform
+assert_close(r.read(0x3000, (4, 32)), 2 * a, ulps=1)          # within 1 BF16 step
+assert_close(r.golden.read(0x3000, (4, 32)), 2 * a, ulps=1)
+print(r.cycles, r.plat.check.summary())
+```
+
+`atalla.tensors.compare(got, want)` gives max abs error, rel_l2, cosine and
+the worst error in BF16 steps. Cosine alone hides scale errors; the BF16-step
+bound is the one to gate on.
 
 ### Larger studies
 
