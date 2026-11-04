@@ -169,6 +169,11 @@ def main(argv=None) -> None:
     ap.add_argument("--activity", metavar="PATH",
                     help="record which blocks are busy each cycle: a .html path draws the "
                          "activity view (tools/activity_view.py), anything else saves the trace")
+    ap.add_argument("--check", nargs="?", const="warn", choices=["warn", "error"],
+                    help="report accesses nothing in the hardware orders (a vreg.ld before "
+                         "its scpad.ld lands, a scpad.st before its vreg.st, misaligned "
+                         "scalar accesses, packets the RTL can't run); =error also exits 1 "
+                         "when there are any")
     ap.add_argument("--report", action="store_true",
                     help="print the performance monitor's report: where the cycles went, "
                          "unit utilisation, and the AXI / DRAM summaries")
@@ -233,6 +238,7 @@ def main(argv=None) -> None:
                                  burst_bytes=args.burst_bytes,
                                  perf=bool(args.report or args.perf_json),
                                  activity=bool(args.activity), warm_icache=args.warm_icache,
+                                 check=bool(args.check),
                                  perf_timeline=args.timeline, init_sregs=init_sregs,
                                  describe_pc=describe_pc, dram_channel=dram_channel,
                                  axi=args.axi, strict=False)
@@ -285,6 +291,10 @@ def main(argv=None) -> None:
         red = "functional" if args.functional_reductions else "lanes"
         print("against the functional sim (%s reduction order):" % red)
         compare(plat, instr, data, red, init_sregs)
+    if args.check:
+        print(plat.check.summary())
+        if args.check == "error" and plat.check.findings:
+            sys.exit(1)
 
 
 if __name__ == "__main__":

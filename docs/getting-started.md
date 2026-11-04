@@ -138,6 +138,38 @@ monitor's cycle buckets; click it to jump there.
 `python tools/activity_view.py gemm.json` draws it later. The blocks and
 what "active" means for each are in `src/atalla/activity.py`.
 
+### Check a program's dependencies
+
+```bash
+python tools/run_kernel.py add.c --check          # report; --check=error also exits 1
+```
+
+reports the accesses nothing in the hardware orders, so a program gets them
+right only by timing:
+
+- a `vreg.ld` reading a pad row an in-flight `scpad.ld` is still filling: the
+  hardware makes the load wait only if it reads the register the DMA holds
+  busy (the DMA's `rs1`);
+- a `scpad.st` reading a row a `vreg.st` hasn't written yet: the vreg.st
+  reservations order only an SDMA on the same `rs1`;
+- the same rows from the other side (a `scpad.ld` over rows a `vreg.st` still
+  writes, a `vreg.st` into rows an SDMA still uses);
+- scalar loads and stores at addresses that aren't a multiple of 4 (the word
+  path aligns them down);
+- packets the hardware can't run as one packet.
+
+```
+dependency check: 1 finding at 1 pc
+  scpad.ld -> vreg.ld: a vreg.ld read a row an in-flight scpad.ld was still filling
+    0x44c, first at cycle 343: vreg.ld of pad 1 row 0 (rs1 x10) while the scpad.ld at
+    0x3ac (rs1 x11) still fills rows 0-3; the load doesn't read x11, so nothing makes it wait
+      packet: vreg.ld v1, x10, x9
+```
+
+A finding can still compute the right answer in this run (here row 0 lands
+first); it breaks when the timing changes. The checker only reads, so a
+checked run takes the same cycles. Rules and limits: `src/atalla/check.py`.
+
 ## 3. Explore a design
 
 ### From the command line
