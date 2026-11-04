@@ -318,6 +318,18 @@ empty flag set enables everything.
 
 ## 8. Writing a component
 
+Start from the template:
+
+```bash
+atalla-sim new-component DotProductUnit --package vector_core
+```
+
+writes `src/vector_core/dot_product_unit.py`, the unit below with its
+docstring to fill in, and `tests/vector_core/test_dot_product_unit.py`,
+which runs it with wake-group scheduling on and off and checks that the
+results match and that it sleeps when idle. Both pass as written: change the
+behaviour, keep the test green.
+
 Minimum viable clocked object:
 
 ```python
