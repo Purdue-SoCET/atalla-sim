@@ -1,0 +1,53 @@
+{
+ "kernels": {
+  "add": {
+   "cycles": 2106
+  },
+  "add.c": {
+   "cycles": 774
+  },
+  "add_4x32.c": {
+   "cycles": 709
+  },
+  "conv_h4_w4_r3_s3_k4_baseline.c": {
+   "cycles": 1140
+  },
+  "conv_tiled": {
+   "cycles": 1537
+  },
+  "gemm": {
+   "cycles": 2502
+  },
+  "gemm_tiled": {
+   "cycles": 1341
+  },
+  "layernorm_4x4_active.c": {
+   "cycles": 831
+  },
+  "layernorm_param": {
+   "cycles": 4007
+  },
+  "maxpool": {
+   "cycles": 1360
+  },
+  "maxpool.c": {
+   "cycles": 820
+  },
+  "relu": {
+   "cycles": 2038
+  },
+  "relu.c": {
+   "cycles": 768
+  },
+  "sigmoid": {
+   "cycles": 395
+  },
+  "softmax": {
+   "cycles": 2656
+  },
+  "softmax_row32.c": {
+   "cycles": 482
+  }
+ },
+ "note": "cycles of tests/equivalence/programs on the default machine; tools/bench.py --update rewrites it"
+}

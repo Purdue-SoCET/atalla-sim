@@ -360,6 +360,21 @@ once (`lane_count`), or `lanes`, `array`, `dram`, `latency`. `--config`
 picks the base machine. A C program is compiled once, so every point runs
 the same image.
 
+### Cycle counts on the reference kernels
+
+```bash
+atalla-sim bench                    # every frozen kernel against tests/perf_baseline.json
+atalla-sim bench --update           # after an intended timing change: commit the new baseline with it
+atalla-sim gallery site/            # a static site: each kernel's trace in the viewer, ready to host
+```
+
+`bench` fails when any reference kernel's cycle count moves (`--tolerance`
+loosens it), so a timing change lands together with its updated baseline;
+it also reports how fast the simulator ran each kernel. `gallery` needs no
+private submodule (the kernels are frozen images in the repository), so it
+can run in CI and publish to GitHub Pages; with the functional simulator it
+adds the example MLP as a workload.
+
 ### Larger studies
 
 The harness-driven platform runs GEMMs too big to write as a program, and

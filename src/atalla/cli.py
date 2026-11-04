@@ -1,6 +1,8 @@
 """The `atalla-sim` command: one entry point for the simulator's tools.
 
     atalla-sim run KERNEL [options]   run a program on the whole machine (tools/run_kernel.py)
+    atalla-sim bench                  cycles and speed on the reference kernels vs tests/perf_baseline.json
+    atalla-sim gallery OUT            a static site of the reference kernels' traces, ready to host
     atalla-sim view TRACE.json        the activity viewer (also --join, --empty, --serve)
     atalla-sim sweep KERNEL --param KEY=V1,V2   one program over a grid of machine parameters
     atalla-sim new-component NAME     a new clocked component and its test, from the template
@@ -52,6 +54,14 @@ def _tool(name: str):
 
 def _run(argv):
     return _tool("run_kernel").main(argv)
+
+
+def _bench(argv):
+    return _tool("bench").main(argv)
+
+
+def _gallery(argv):
+    return _tool("build_gallery").main(argv)
 
 
 def _view(argv):
@@ -162,6 +172,8 @@ def _doctor(argv):
 #: and return an exit status (None is 0).
 COMMANDS = {
     "run": (_run, "run a program on the whole machine (a kernel name, .c, .in or .elf)"),
+    "bench": (_bench, "cycles and simulator speed on the reference kernels, against the baseline"),
+    "gallery": (_gallery, "a static site of traces for the reference kernels, ready to host"),
     "view": (_view, "the activity viewer: draw a trace, join a workload, or serve a folder"),
     "sweep": (_sweep, "run one program over a grid of machine parameters (CSV, plot)"),
     "new-component": (_new_component, "write a new clocked component and its test from the template"),
