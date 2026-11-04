@@ -124,6 +124,56 @@ def compare(plat, instr, data, reductions: str = "lanes", init_sregs=None, write
     return len(diffs)
 
 
+class Loaded:
+    """A program ready to run: what load_program returns."""
+
+    def __init__(self, instr, data, init_sregs=None, describe_pc=None, c_path=None,
+                 program=None):
+        self.instr, self.data, self.init_sregs = instr, data, init_sregs
+        self.describe_pc, self.c_path, self.program = describe_pc, c_path, program
+
+
+def load_program(kernel: str, extra=(), elf: bool = False) -> Loaded:
+    """A kernel name (built by the functional sim's build script, with
+    `extra` arguments), a .c program (compiled, with the compiler harness's
+    inputs), a .in image or a .elf. Exits with a message on errors."""
+    extra = list(extra)
+    program = None
+    init_sregs = None
+    c_path = None
+    describe_pc = None
+    if elf and not kernel.endswith(".c"):
+        sys.exit("--elf is for a .c program; a .elf file is loaded as it is")
+    if kernel.endswith(".c"):
+        if extra:
+            sys.exit("a C program takes no build arguments (its inputs come from the "
+                     "compiler's harness)")
+        c_path = find_c(kernel)
+        try:
+            program, data, init_sregs = c_kernels.build(c_path, elf=elf)
+        except (c_kernels.CompileError, ValueError) as exc:
+            sys.exit(str(exc))
+        instr = program.instr
+        describe_pc = getattr(program, "describe", None)
+    elif kernel.endswith(".elf"):
+        if extra:
+            sys.exit("an ELF takes no build arguments")
+        try:
+            program = load_elf(kernel)
+        except (OSError, ElfError) as exc:
+            sys.exit("%s: %s" % (kernel, exc))
+        instr, data = program.instr, program.data
+        init_sregs = c_entry_sregs(data)
+        describe_pc = program.describe
+    else:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(kernel)
+            if path.suffix != ".in":
+                path = build_kernel(kernel, extra, Path(tmp))
+            instr, data = load_program_text(path.read_text())
+    return Loaded(instr, data, init_sregs, describe_pc, c_path, program)
+
+
 def machine_config(args) -> dict:
     """The --config file with the command line's explicit flags applied."""
     cfg = config.load(args.config)
@@ -252,38 +302,9 @@ def main(argv=None) -> None:
                     help="with --perf-json: include the per-cycle timeline")
     args = ap.parse_args(argv)
 
-    init_sregs = None
-    c_path = None
-    describe_pc = None
-    if args.elf and not args.kernel.endswith(".c"):
-        sys.exit("--elf is for a .c program; a .elf file is loaded as it is")
-    if args.kernel.endswith(".c"):
-        if extra:
-            sys.exit("a C program takes no build arguments (its inputs come from the "
-                     "compiler's harness)")
-        c_path = find_c(args.kernel)
-        try:
-            program, data, init_sregs = c_kernels.build(c_path, elf=args.elf)
-        except (c_kernels.CompileError, ValueError) as exc:
-            sys.exit(str(exc))
-        instr = program.instr
-        describe_pc = getattr(program, "describe", None)
-    elif args.kernel.endswith(".elf"):
-        if extra:
-            sys.exit("an ELF takes no build arguments")
-        try:
-            program = load_elf(args.kernel)
-        except (OSError, ElfError) as exc:
-            sys.exit("%s: %s" % (args.kernel, exc))
-        instr, data = program.instr, program.data
-        init_sregs = c_entry_sregs(data)
-        describe_pc = program.describe
-    else:
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(args.kernel)
-            if path.suffix != ".in":
-                path = build_kernel(args.kernel, extra, Path(tmp))
-            instr, data = load_program_text(path.read_text())
+    loaded = load_program(args.kernel, extra, args.elf)
+    instr, data, init_sregs = loaded.instr, loaded.data, loaded.init_sregs
+    describe_pc, c_path, program = loaded.describe_pc, loaded.c_path, loaded.program
     try:
         inputs = [tensors.parse_input(spec) for spec in args.input]
         outputs = [tensors.parse_output(spec) for spec in args.output]

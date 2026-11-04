@@ -1,6 +1,7 @@
 """The `atalla-sim` command: one entry point for the simulator's tools.
 
     atalla-sim run KERNEL [options]   run a program on the whole machine (tools/run_kernel.py)
+    atalla-sim sweep KERNEL --param KEY=V1,V2   one program over a grid of machine parameters
     atalla-sim doctor                 check the installation: what works, what's missing, how to fix it
     atalla-sim --version              the version, ISA fingerprint, RTL followed, submodule commits
 
@@ -49,6 +50,10 @@ def _run(argv):
     return _tool("run_kernel").main(argv)
 
 
+def _sweep(argv):
+    return _tool("sweep").main(argv)
+
+
 def _version(argv):
     from atalla import version
     print(version.text())
@@ -63,6 +68,7 @@ def _doctor(argv):
 #: and return an exit status (None is 0).
 COMMANDS = {
     "run": (_run, "run a program on the whole machine (a kernel name, .c, .in or .elf)"),
+    "sweep": (_sweep, "run one program over a grid of machine parameters (CSV, plot)"),
     "doctor": (_doctor, "check the installation and say how to fix what's missing"),
     "version": (_version, "the version, ISA fingerprint, RTL followed and submodule commits"),
 }

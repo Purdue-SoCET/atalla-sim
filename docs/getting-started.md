@@ -324,6 +324,21 @@ print(r.cycles, r.plat.check.summary())
 the worst error in BF16 steps. Cosine alone hides scale errors; the BF16-step
 bound is the one to gate on.
 
+### Sweep a parameter
+
+```bash
+atalla-sim sweep gemm --param lanes=4,8,16,32 --param dram_latency=6,50 -j 8 \
+    -o sweep.csv --plot sweep.png
+```
+
+runs one program on every combination, in parallel, and prints a row per
+point (the parameters, cycles, packets issued; `--perf` adds the monitor's
+cycle buckets). A parameter is any key of the machine configuration: a
+dotted path (`dcache.size_bytes`, `ramulator.nCL`), a key name that appears
+once (`lane_count`), or `lanes`, `array`, `dram`, `latency`. `--config`
+picks the base machine. A C program is compiled once, so every point runs
+the same image.
+
 ### Larger studies
 
 The harness-driven platform runs GEMMs too big to write as a program, and
