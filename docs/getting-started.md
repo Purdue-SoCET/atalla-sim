@@ -375,6 +375,11 @@ private submodule (the kernels are frozen images in the repository), so it
 can run in CI and publish to GitHub Pages; with the functional simulator it
 adds the example MLP as a workload.
 
+The repository's CI (`.github/workflows/ci.yml`) runs the tests and `bench`
+on every push and pull request, with the cycle table in the job summary, and
+publishes the gallery to GitHub Pages from master. Without the private
+submodules the tests that need them skip; the file says how to add them.
+
 ### Larger studies
 
 The harness-driven platform runs GEMMs too big to write as a program, and
