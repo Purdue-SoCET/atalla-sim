@@ -100,6 +100,18 @@ array, scratchpads and DRAM:
 cycle count only: the performance monitor and other recorders are attached
 only for the options that ask for them, so they cost nothing otherwise.
 
+    atalla-sim run prog --check       accesses nothing in the hardware orders
+    atalla-sim run prog --golden      the first register write that differs from the functional sim
+    atalla-sim run prog --profile     the packets that cost the most cycles, and why
+    atalla-sim run prog --config atalla-0x01-ddr4   a machine from configs/
+    atalla-sim sweep gemm --param lanes=4,8,16,32   one program over a grid of parameters
+    atalla-sim view trace.json        the activity viewer (--join, --empty, --serve)
+    atalla-sim model plan.json        a model's operation plan, op by op
+    atalla-sim bench                  reference kernels' cycles against the baseline
+    atalla-sim --version              version, ISA fingerprint, RTL followed, submodules
+
+`atalla-sim -h` lists every command; docs/getting-started.md shows each.
+
 docs/getting-started.md walks through installing, running, reading the
 report and exploring a design.
 
