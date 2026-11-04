@@ -40,7 +40,7 @@ def gemm():
 
 def test_the_probe_changes_nothing(gemm):
     instr, data = frozen("gemm")
-    plain = build_atalla_platform(instr, data)
+    plain = build_atalla_platform(instr, data, perf=True)
     plain.run_until_done()
     assert plain.cycle == gemm.cycle
     assert plain.perf.report() == gemm.perf.report()

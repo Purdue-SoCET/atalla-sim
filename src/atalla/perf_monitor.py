@@ -113,11 +113,11 @@ class PerfMonitor(Clocked):
             self.timeline_busy.append(busy)
 
     def _bucket(self, core) -> str:
-        issued = core.issued
-        if len(issued) > self._issued_seen:
-            for _, ip in issued[self._issued_seen:]:
-                self._count_packet(ip.packet)
-            self._issued_seen = len(issued)
+        # The monitor ticks every cycle, after the core, and decode 2 issues
+        # at most one packet a cycle: the one in the D2/EX latch.
+        if core.issued_count > self._issued_seen:
+            self._count_packet(core.d2ex.packet)
+            self._issued_seen = core.issued_count
             return "issue"
         d2 = core.decode2
         if d2.last_stall == "unit":

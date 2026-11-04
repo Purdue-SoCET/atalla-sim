@@ -6,6 +6,7 @@ class docstring for the timing.
 """
 
 from base.clocked_object import Clocked
+from base import debug
 from base.debug import dprintf
 from base.queue import SimQueue
 from collections import deque
@@ -97,14 +98,16 @@ class Xbar(Clocked):
             # Queue is full, optionally call callback with False or handle overflow
             if callback:
                 callback(False)
-            dprintf("Xbar", f"enqueue dropped: queue full (op={self._op_counter})")
+            if debug.ON:
+                dprintf("Xbar", f"enqueue dropped: queue full (op={self._op_counter})")
             return -1
         self.total_submitted += 1
         # Run on the next available tick so the entry is moved into the
         # pipeline exactly when it would have been before scheduling existed.
         # _tick may be stale if we have been asleep; asking too early is safe.
         self.request_wake(self._tick + 1)
-        dprintf("Xbar", f"enqueue op={self._op_counter} delay={self.delay} inflight={self.inflight()}")
+        if debug.ON:
+            dprintf("Xbar", f"enqueue op={self._op_counter} delay={self.delay} inflight={self.inflight()}")
         return self._op_counter
 
     def tick(self, time: Optional[float] = None) -> List[Tuple[int, List[Any]]]:
@@ -124,13 +127,15 @@ class Xbar(Clocked):
             tail_accepted = tail["cb"](out) is not False if tail["cb"] else True
             if tail_accepted:
                 completed.append((tail["op"], out))
-                dprintf("Xbar", f"complete op={tail['op']}")
+                if debug.ON:
+                    dprintf("Xbar", f"complete op={tail['op']}")
                 self._blocked_tail = None
             else:
                 self.total_retire_stalls += 1
                 for entry in self._inflight:
                     entry["due_cycle"] += 1
-                dprintf("Xbar", f"retire stalled op={tail['op']}")
+                if debug.ON:
+                    dprintf("Xbar", f"retire stalled op={tail['op']}")
                 self.total_completed += len(completed)
                 return completed
         elif self._inflight and self._inflight[0]["due_cycle"] <= cycle:
@@ -140,13 +145,15 @@ class Xbar(Clocked):
             if tail_accepted:
                 self._inflight.popleft()
                 completed.append((tail["op"], out))
-                dprintf("Xbar", f"complete op={tail['op']}")
+                if debug.ON:
+                    dprintf("Xbar", f"complete op={tail['op']}")
             else:
                 self._blocked_tail = self._inflight.popleft()
                 self.total_retire_stalls += 1
                 for entry in self._inflight:
                     entry["due_cycle"] += 1
-                dprintf("Xbar", f"retire stalled op={tail['op']}")
+                if debug.ON:
+                    dprintf("Xbar", f"retire stalled op={tail['op']}")
                 self.total_completed += len(completed)
                 return completed
 

@@ -41,11 +41,13 @@ skipped, not failed.
 ## 2. Run a program
 
 ```bash
-python tools/run_kernel.py relu.c --golden
+python tools/run_kernel.py relu.c --golden --report
 ```
 
 `relu.c` is one of the compiler's kernels: it zeroes the negative values of a
-4 × 32 BF16 tile. The report, annotated:
+4 × 32 BF16 tile. Without `--report` a run prints only its cycle count: the
+performance monitor that writes the report is attached only when asked for,
+so plain runs and sweeps pay nothing for it. The report, annotated:
 
 ```
 relu.c: 768 cycles
@@ -90,6 +92,7 @@ python tools/run_kernel.py prog.in                # an already assembled program
 python tools/run_kernel.py prog.elf               # a program the compiler linked
 python tools/run_kernel.py relu.c --elf           # compile and link it, then load the ELF
 python tools/run_kernel.py relu.c --save relu.in  # keep the program image that ran
+python tools/run_kernel.py relu.c --report       # where the cycles went
 python tools/run_kernel.py relu.c --perf-json relu.json --timeline   # the report as JSON
 ```
 
@@ -167,6 +170,7 @@ plat = build_atalla_platform(
     lane_count=8,                                    # 8 lanes of 4 elements
     dram_latency=20,
     dcache_config=DCacheConfig(size_bytes=2048, ways=2),
+    perf=True,                                       # attach the performance monitor
 )
 cycles = plat.run_until_done()
 print(cycles, c_kernels.check(path, plat))
@@ -180,7 +184,12 @@ print(plat.perf.report()["cycle_breakdown"])
 | `dcache_config` | 4 KB, 4-way, 64 B lines, 8 MSHRs | `DCacheConfig`, `src/scheduler/dcache.py` |
 | `ex_latency` | e.g. `{"div.s": 66, "mul.s": 2}` | `DEFAULT_LATENCY`, `src/scheduler/execute.py` |
 | `lsu_depth` | 4 | load/store queue entries |
-| `perf_timeline` | off | keep a per-cycle record in `plat.perf.timeline` |
+| `perf` | off | attach the performance monitor as `plat.perf` |
+| `perf_timeline` | off | keep a per-cycle record in `plat.perf.timeline` (implies `perf`) |
+| `history` | off | keep the scheduler's per-packet lists (`core.issued`, `core.issued_to_d1d2`, `core.scalar_writes`); off, only their counts |
+
+Anything that records is off unless asked for, so a plain run pays only for
+the model.
 
 Scratchpad sizes are constants in `src/atalla/sysarr_tpu_system.py`
 (`SPAD_TOTAL_BYTES`, `SPAD_NUM_PADS`, ...).

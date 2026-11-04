@@ -133,7 +133,7 @@ class AtallaPlatform:
 def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]] = None, *,
                           systolic_array: str = "meissa", lane_count: int = 16,
                           dram_latency: int = 6, burst_bytes: int = DRAM_BURST_BYTES,
-                          warm_icache: bool = False, perf: bool = True,
+                          warm_icache: bool = False, perf: bool = False,
                           perf_timeline: bool = False, activity: bool = False,
                           init_sregs: Optional[Dict[int, int]] = None,
                           describe_pc: Optional[Callable[[int], str]] = None,
@@ -143,9 +143,11 @@ def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]
                           **core_kw) -> AtallaPlatform:
     """`program` and `data` as load_program_text returns them; `data` words
     go into DRAM. `systolic_array` is "meissa" (the RTL's) or "tpu"; extra
-    keywords go to SchedulerCore. `perf` attaches a PerfMonitor
+    keywords go to SchedulerCore (`history=True` keeps its per-packet
+    lists). Nothing that records is attached unless asked for, so a plain
+    run pays only for the model. `perf` attaches a PerfMonitor
     (atalla/perf_monitor.py) as platform.perf; `perf_timeline` makes it keep
-    the per-cycle timeline too. `activity` attaches an ActivityProbe
+    the per-cycle timeline too (and implies `perf`). `activity` attaches an ActivityProbe
     (atalla/activity.py) as platform.activity, which records every block's
     state each cycle for tools/activity_view.py. `init_sregs` presets scalar
     registers, as a loader would (c_entry_sregs for compiled C).
@@ -209,7 +211,7 @@ def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]
                           backends=backends, vls_bridges=parts.vls_bridges,
                           sysarr_bridge=sysarr_bridge, ports=ports, root=root,
                           describe_pc=describe_pc, dram_channel=dram_channel, axi=bus)
-    if perf or activity:
+    if perf or perf_timeline or activity:
         # Last in every cycle: it observes and changes nothing.
         plat.perf = PerfMonitor(plat, timeline=perf_timeline or activity)
         root.add_child(plat.perf, phase=PHASE_HARNESS)

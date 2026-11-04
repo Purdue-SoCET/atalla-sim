@@ -1,6 +1,12 @@
 """Debug logging: dprintf(flag, msg) writes msg to logs/<flag>.log.
 
-Off by default, so dprintf costs one check. Turn it on with
+Off by default. Guard each call with the module's ON flag, so a message is
+not even formatted when logging is off:
+
+    from base import debug
+    if debug.ON:
+        debug.dprintf("Xbar", f"enqueue op={op}")
+ Turn it on with
 configure_debug(flags=[...]) (no flags = every flag), optionally echoing to
 stdout. Each flag gets its own file, opened on first use; close_debug()
 closes them. To log from a new component, call dprintf with a flag named
@@ -75,6 +81,10 @@ class _DebugState:
 
 _STATE = _DebugState()
 
+#: True while any debug logging is configured on; check it before building
+#: a message.
+ON = False
+
 
 def configure_debug(
     *,
@@ -88,6 +98,8 @@ def configure_debug(
     logs/<flag>.log under `log_dir`, appended to if `append`, and echoed to
     stdout if `also_stdout`.
     """
+    global ON
+    ON = bool(enabled)
     _STATE.configure(
         enabled=enabled,
         flags=flags,

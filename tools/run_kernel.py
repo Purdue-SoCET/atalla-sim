@@ -11,7 +11,13 @@ array, the four scratchpad pads with their DMA backends, and DRAM
     tools/run_kernel.py path/to/prog.elf     # a linked program from the compiler
     tools/run_kernel.py softmax --golden     # also run the functional sim and compare
     tools/run_kernel.py gemm -- --rows 16    # arguments after -- go to the build script
+    tools/run_kernel.py gemm --report        # where the cycles went, unit by unit
     tools/run_kernel.py gemm --perf-json gemm.json --timeline   # the monitor's report
+
+A plain run prints the cycle count and nothing else: the performance monitor
+and the other recorders are attached only for the options that need them
+(--report, --perf-json, --timeline, --activity), so they cost nothing
+otherwise.
 
 A kernel name is built with the functional sim's own build script,
 third_party/atalla-functional-sim/kernels/build_<name>.py.
@@ -155,6 +161,9 @@ def main() -> None:
     ap.add_argument("--activity", metavar="PATH",
                     help="record which blocks are busy each cycle: a .html path draws the "
                          "activity view (tools/activity_view.py), anything else saves the trace")
+    ap.add_argument("--report", action="store_true",
+                    help="print the performance monitor's report: where the cycles went, "
+                         "unit utilisation, and the AXI / DRAM summaries")
     ap.add_argument("--perf-json", metavar="PATH",
                     help="write the performance monitor's report as JSON")
     ap.add_argument("--timeline", action="store_true",
@@ -214,6 +223,7 @@ def main() -> None:
     plat = build_atalla_platform(instr, data, dram_latency=args.dram_latency,
                                  lane_count=args.lanes, systolic_array=args.array,
                                  burst_bytes=args.burst_bytes,
+                                 perf=bool(args.report or args.perf_json),
                                  activity=bool(args.activity), warm_icache=args.warm_icache,
                                  perf_timeline=args.timeline, init_sregs=init_sregs,
                                  describe_pc=describe_pc, dram_channel=dram_channel,
@@ -222,15 +232,16 @@ def main() -> None:
     cycles = plat.run_until_done(limit=args.limit)
     c = plat.core
     print("%s: %d cycles (%.1f s)" % (args.kernel, cycles, time.time() - t))
-    print()
-    print(plat.perf.summary())
-    print()
-    if plat.axi is not None:
-        print(plat.axi.summary(cycles))
+    if args.report:
         print()
-    if dram_channel is not None:
-        print(dram_channel.summary(through=plat.cycle - 1))
+        print(plat.perf.summary())
         print()
+        if plat.axi is not None:
+            print(plat.axi.summary(cycles))
+            print()
+        if dram_channel is not None:
+            print(dram_channel.summary(through=plat.cycle - 1))
+            print()
     if args.perf_json:
         plat.perf.to_json(args.perf_json, timeline=args.timeline)
         print("performance report written to %s" % args.perf_json)

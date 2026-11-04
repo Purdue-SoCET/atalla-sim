@@ -119,7 +119,7 @@ def values(rr, col):
 
 def run_platform(prog, data, warm_icache=True):
     """Warm icache by default: these tests time the vector side, not fetch."""
-    plat = build_atalla_platform(prog, data, warm_icache=warm_icache)
+    plat = build_atalla_platform(prog, data, warm_icache=warm_icache, history=True)
     plat.run_until_done(limit=200_000)
     return plat
 
@@ -143,7 +143,7 @@ def compare_to_golden(prog, data):
 # -- the register files ---------------------------------------------------------------
 
 def test_v0_reads_zero_and_m0_reads_every_lane():
-    c = SchedulerCore({})
+    c = SchedulerCore({}, history=True)
     assert c.decode2.vrf.read(0) == [0.0] * 32
     assert c.decode2.mrf.read(0) == 0xFFFFFFFF
 
@@ -302,7 +302,7 @@ def test_gemm_writes_back_and_lw_vi_reserves_nothing():
     pk = prologue() + [(vi("lw.vi", 0, 8 + k % 8, 0),) for k in range(32)]
     plat = build_atalla_platform(program(*pk, vv("gemm.vv", 20, 9, 0),
                                             vv("gemm.vv", 21, 10, 0), HALT),
-                                    tile_data(DRAM_IN, LOAD_ROWS, values))
+                                    tile_data(DRAM_IN, LOAD_ROWS, values), history=True)
     plat.run_until_done(limit=50_000)
     c = plat.core
     assert c.vector.stats["gsau_ops"] == 34

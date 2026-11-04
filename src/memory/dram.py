@@ -6,6 +6,7 @@ memory/bus.py) model latency and bandwidth.
 """
 
 from typing import Dict, Iterable, Optional, Tuple, Union
+from base import debug
 from base.debug import dprintf
 
 
@@ -64,7 +65,8 @@ class DRAM:
             dst += step
             remaining -= step
         if log:
-            dprintf("DRAM", f"read addr=0x{int(addr):x} len={int(length)}")
+            if debug.ON:
+                dprintf("DRAM", f"read addr=0x{int(addr):x} len={int(length)}")
         return bytes(out)
 
     def read(self, addr: int, length: int) -> bytes:
@@ -88,7 +90,8 @@ class DRAM:
             cur += step
             src += step
             remaining -= step
-        dprintf("DRAM", f"write addr=0x{int(addr):x} len={len(blob)}")
+        if debug.ON:
+            dprintf("DRAM", f"write addr=0x{int(addr):x} len={len(blob)}")
 
     def snapshot_addr(self, start_addr: int, end_addr: int, bytes_per_line: int = 16) -> None:
         """

@@ -71,7 +71,7 @@ def scalar_program(seed: int, small_cache: bool) -> dict:
            if small_cache else None)
     core = SchedulerCore(random_program(100 + seed if small_cache else seed,
                                         n=80 if small_cache else 60),
-                         data=DATA, dcache_config=cfg)
+                         data=DATA, dcache_config=cfg, history=True)
     cycles = core.run_until_done(limit=200_000)
     out = _core_state(core)
     out["cycles"] = cycles
@@ -87,7 +87,8 @@ def vector_program(seed: int) -> dict:
     def vals(rr, col, _r=random.Random(seed)):
         return _r.choice([-3.0, -1.5, -0.5, 0.0, 0.25, 1.0, 2.5, 4.0])
     plat = build_atalla_platform(random_vector_program(seed),
-                                 tile_data(DRAM_IN, LOAD_ROWS, vals), warm_icache=True)
+                                 tile_data(DRAM_IN, LOAD_ROWS, vals), warm_icache=True,
+                                 perf=True, history=True)
     return _platform_state(plat, plat.run_until_done(limit=200_000))
 
 
@@ -135,7 +136,8 @@ def kernel(name: str) -> dict:
         raise FileNotFoundError("no frozen program %s (make_snapshot.py builds it)" % frozen.name)
     instr, data = load_program_text(gzip.decompress(frozen.read_bytes()).decode())
     regs = c_entry_sregs(data) if name.endswith(".c") else None
-    plat = build_atalla_platform(instr, data, init_sregs=regs, strict=False)
+    plat = build_atalla_platform(instr, data, init_sregs=regs, strict=False,
+                                 perf=True, history=True)
     return _platform_state(plat, plat.run_until_done(limit=5_000_000))
 
 
