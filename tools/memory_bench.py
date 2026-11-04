@@ -24,9 +24,13 @@ reading; SP0, SP1, D$ writing) with axi_tb.sv's burst lengths
 (0 : 1-7 : 8-15 weighted 3 : 4 : 3) as fast as each master can.
 """
 
+import sys
+if sys.version_info < (3, 9):
+    sys.exit("atalla-sim needs Python 3.9 or newer; %s is %s"
+             % (sys.executable, sys.version.split()[0]))
+
 import argparse
 import random
-import sys
 import time
 from pathlib import Path
 

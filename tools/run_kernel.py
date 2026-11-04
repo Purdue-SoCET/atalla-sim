@@ -44,10 +44,14 @@ reference result from the compiler's harness.
     tools/run_kernel.py gemm --axi --dram-latency 0     # the bus alone, an ideal DRAM behind it
 """
 
+import sys
+if sys.version_info < (3, 9):
+    sys.exit("atalla-sim needs Python 3.9 or newer; %s is %s"
+             % (sys.executable, sys.version.split()[0]))
+
 import argparse
 import os
 import subprocess
-import sys
 import tempfile
 import time
 from pathlib import Path
@@ -111,13 +115,13 @@ def compare(plat, instr, data, reductions: str = "lanes", init_sregs=None) -> in
     return len(diffs)
 
 
-def main() -> None:
-    argv = sys.argv[1:]
+def main(argv=None) -> None:
+    argv = list(sys.argv[1:] if argv is None else argv)
     extra = []
     if "--" in argv:
         i = argv.index("--")
         argv, extra = argv[:i], argv[i + 1:]
-    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap = argparse.ArgumentParser(prog="atalla-sim run", description=__doc__.split("\n\n")[0])
     ap.add_argument("kernel", help="a kernel name (kernels/build_<name>.py), a .c program, "
                                    "a .in file or a .elf file")
     ap.add_argument("--elf", action="store_true",

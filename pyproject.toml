@@ -9,6 +9,10 @@ description = "Cycle-accurate simulator for the Atalla accelerator"
 requires-python = ">=3.9"
 dependencies = ["numpy"]
 
+[project.scripts]
+# `pip install -e .` puts the command on PATH (src/atalla/cli.py).
+atalla-sim = "atalla.cli:main"
+
 [project.optional-dependencies]
 test = ["pytest>=7"]
 plots = ["matplotlib"]

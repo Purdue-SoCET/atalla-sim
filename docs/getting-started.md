@@ -16,11 +16,16 @@ program, and compare the reports.
 git clone --recurse-submodules git@github.com:Purdue-SoCET/atalla-sim.git
 cd atalla-sim
 python3 -m venv .venv && source .venv/bin/activate
-pip install numpy pytest   # and matplotlib for the plotting tools
+pip install -e '.[test]'   # numpy, pytest and the `atalla-sim` command; '.[test,plots]' adds matplotlib
 make native          # optional, needs g++: about 5x faster, identical results
 make ramulator       # optional, needs a C++20 g++ and CMake: DDR4 timing (--dram ramulator)
+atalla-sim doctor    # checks all of the above and says how to fix what's missing
 pytest               # about two minutes
 ```
+
+`atalla-sim` is the command for everything below (`atalla-sim -h` lists the
+subcommands); `atalla-sim run` is `python tools/run_kernel.py`, and the
+examples use either.
 
 Python 3.9 or newer. Two submodules live in `third_party/`:
 
