@@ -38,6 +38,7 @@ from atalla.sysarr_tpu_system import (
     PHASE_AXI, PHASE_BACKEND, PHASE_CORE, PHASE_DRAM, PHASE_HARNESS, PHASE_SPAD, PHASE_SYSARR, PHASE_VLS,
     GSAUTPUBridge, RoundRobinBackendTicker, build_tpu_platform)
 from atalla.activity import ActivityProbe
+from atalla.hang import CHECK_EVERY, HANG_AFTER, SimulationHang, diagnose, progress_signature
 from atalla.perf_monitor import PerfMonitor
 from base.sched import CompositeClocked
 from memory.axi import BEAT_BYTES, AXIBus, AXIParams, FixedLatencyDRAM
@@ -117,15 +118,32 @@ class AtallaPlatform:
         self.root.tick(float(self.cycle))
         self.cycle += 1
 
-    def run_until_done(self, limit: int = 1_000_000) -> int:
+    def run_until_done(self, limit: int = 1_000_000, hang_after: Optional[int] = HANG_AFTER) -> int:
+        """Tick until the program halts and drains; return the cycles taken.
+
+        Raises RuntimeError after `limit` cycles, and SimulationHang (a
+        RuntimeError) as soon as nothing in the machine has moved for
+        `hang_after` cycles (None: never); both carry atalla/hang.py's report
+        of what each part is waiting on."""
         start = self.cycle
+        check_at, last_sig, last_change = start + CHECK_EVERY, None, start
         while not self.core.done:
             if self.cycle - start >= limit:
                 pc = self.core.pc
                 where = "%#x" % pc
                 if self.describe_pc is not None and self.describe_pc(pc) != where:
                     where += ", %s" % self.describe_pc(pc)
-                raise RuntimeError("no halt after %d cycles (pc %s)" % (limit, where))
+                raise RuntimeError("no halt after %d cycles (pc %s)\n%s"
+                                   % (limit, where, diagnose(self)))
+            if self.cycle >= check_at:
+                check_at += CHECK_EVERY
+                sig = progress_signature(self)
+                if sig != last_sig:
+                    last_sig, last_change = sig, self.cycle
+                elif hang_after is not None and self.cycle - last_change >= hang_after:
+                    raise SimulationHang("hung: nothing moved for %d cycles\n%s"
+                                         % (self.cycle - last_change,
+                                            diagnose(self, self.cycle - last_change)))
             self.tick()
         return self.cycle - start
 

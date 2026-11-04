@@ -272,7 +272,8 @@ test, put a `.c` file in `test_validation/` whose header says
 
 | symptom | meaning |
 |---|---|
-| `no halt after N cycles` | the program never reached `halt`: an endless loop, or waiting on something that never comes. The growing stall bucket names what. |
+| `hung: nothing moved for N cycles` | nothing in the machine did any work for `--hang-after` cycles (50,000 by default): decode 2 waits on something that will never come. The report under it names the packet, what it waits on (a busy register, a busy unit, a reservation), the registers held busy and every block still holding work. A "broke the hardware's packet rules" line means the RTL would drop part of a packet, typically losing a register write. |
+| `no halt after N cycles` | the program never reached `halt` within `--limit`, but kept doing work: usually an endless loop. The same report follows. |
 | `packets the RTL would mangle` | a packet uses more of some unit than the hardware has in a cycle; the real scheduler would drop part of it. With C, a compiler bug. |
 | `reference result: FAIL` with *a known compiler bug* | the compiler team already lists this kernel as failing. |
 | tests skipped: *functional sim unavailable* | the submodule is missing: `git submodule update --init`. |

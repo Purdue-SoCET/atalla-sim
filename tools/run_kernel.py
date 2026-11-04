@@ -59,6 +59,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from atalla.hang import HANG_AFTER                                # noqa: E402
 from scheduler import golden                                     # noqa: E402
 from scheduler.core import load_program_text                      # noqa: E402
 from scheduler.elf import ElfError, load_elf                       # noqa: E402
@@ -130,6 +131,9 @@ def main(argv=None) -> None:
     ap.add_argument("--golden", action="store_true",
                     help="also run the functional sim and compare the final state")
     ap.add_argument("--limit", type=int, default=5_000_000, help="cycle limit")
+    ap.add_argument("--hang-after", type=int, default=HANG_AFTER, metavar="N",
+                    help="stop, and report what every unit waits on, once nothing has moved "
+                         "for N cycles (default %(default)d; 0 never)")
     ap.add_argument("--dram-latency", type=int, default=6,
                     help="cycles from a DRAM request launching to its data returning")
     ap.add_argument("--dram", choices=["fixed", "ramulator"], default="fixed",
@@ -233,7 +237,10 @@ def main(argv=None) -> None:
                                  describe_pc=describe_pc, dram_channel=dram_channel,
                                  axi=args.axi, strict=False)
     t = time.time()
-    cycles = plat.run_until_done(limit=args.limit)
+    try:
+        cycles = plat.run_until_done(limit=args.limit, hang_after=args.hang_after or None)
+    except RuntimeError as exc:
+        sys.exit("%s: %s" % (args.kernel, exc))
     c = plat.core
     print("%s: %d cycles (%.1f s)" % (args.kernel, cycles, time.time() - t))
     if args.report:
