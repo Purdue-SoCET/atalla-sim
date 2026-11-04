@@ -293,6 +293,9 @@ def main(argv=None) -> None:
     ap.add_argument("--save-asm", metavar="PATH",
                     help="for a .c program: keep the compiler's assembly (the profile and "
                          "other reports refer to its line numbers)")
+    ap.add_argument("--trace", metavar="PATH",
+                    help="write the execution trace (packets issued, register writes; "
+                         "src/atalla/trace.py) for atalla-sim compare-rtl")
     ap.add_argument("--report", action="store_true",
                     help="print the performance monitor's report: where the cycles went, "
                          "unit utilisation, and the AXI / DRAM summaries")
@@ -342,6 +345,7 @@ def main(argv=None) -> None:
                                  activity=bool(args.activity),
                                  check=bool(args.check),
                                  profile=bool(args.profile or args.profile_json),
+                                 trace=bool(args.trace),
                                  perf_timeline=args.timeline, init_sregs=init_sregs,
                                  describe_pc=describe_pc, strict=False)
     writes = lockstep.attach(plat) if args.golden else None
@@ -399,6 +403,9 @@ def main(argv=None) -> None:
         compare(plat, instr, data, red, init_sregs, writes)
     if args.check:
         print(plat.check.summary())
+    if args.trace:
+        plat.tracer.write(args.trace)
+        print("trace written to %s" % args.trace)
     if args.profile:
         print(plat.profile.summary(top=args.profile))
     if args.profile_json:

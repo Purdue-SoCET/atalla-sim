@@ -4,6 +4,7 @@
    docs/
    ├── getting-started.md  install, run, read the report, explore a design
    ├── known-differences.md where the model differs from the RTL and the functional sim
+   ├── rtl-traces.md       compare a run with an RTL simulation, cycle by cycle
    ├── architecture/     what is modelled, and how to change it
    │   ├── scheduler.md       the scheduler, running programs, kernel status
    │   ├── vector-core.md     the vector core: shape, cycle, API
@@ -44,7 +45,7 @@ run a program, read the report, explore a design.
 | run a C or assembly program, and read its report | [architecture/scheduler.md](architecture/scheduler.md) |
 | see which units are busy, cycle by cycle | [getting-started.md §2](getting-started.md#see-which-units-work-when) |
 | change the machine's parameters (lanes, caches, DRAM, array) | [getting-started.md §Machine configurations](getting-started.md#machine-configurations), [architecture/scheduler.md §Platform](architecture/scheduler.md#platform) |
-| compare with an RTL simulation or the functional sim | [known-differences.md](known-differences.md) |
+| compare with an RTL simulation or the functional sim | [known-differences.md](known-differences.md), [rtl-traces.md](rtl-traces.md) |
 | know which kernels give correct results | [architecture/scheduler.md §Kernels](architecture/scheduler.md#kernels) |
 | understand the tick/cycle model | [architecture/base-classes.md](architecture/base-classes.md) |
 | add or change a component | [architecture/base-classes.md §8](architecture/base-classes.md#8-writing-a-component) |

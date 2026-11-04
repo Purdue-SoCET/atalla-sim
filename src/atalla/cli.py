@@ -3,6 +3,7 @@
     atalla-sim run KERNEL [options]   run a program on the whole machine (tools/run_kernel.py)
     atalla-sim sweep KERNEL --param KEY=V1,V2   one program over a grid of machine parameters
     atalla-sim new-component NAME     a new clocked component and its test, from the template
+    atalla-sim compare-rtl A.trace B.trace   where an RTL trace and atalla-sim's part ways
     atalla-sim doctor                 check the installation: what works, what's missing, how to fix it
     atalla-sim --version              the version, ISA fingerprint, RTL followed, submodule commits
 
@@ -60,6 +61,30 @@ def _new_component(argv):
     return new_component.main(argv)
 
 
+def _compare_rtl(argv):
+    import argparse
+    from atalla import trace
+    ap = argparse.ArgumentParser(prog="atalla-sim compare-rtl",
+                                 description="Compare two execution traces (an RTL simulation's "
+                                             "and `atalla-sim run --trace`'s): where they part "
+                                             "ways, and the events around it. The format is in "
+                                             "src/atalla/trace.py.")
+    ap.add_argument("a", help="a trace, e.g. the RTL's")
+    ap.add_argument("b", help="another, e.g. atalla-sim's")
+    ap.add_argument("--limit", type=int, default=10, help="differences listed (default 10)")
+    ap.add_argument("--window", type=int, default=3, help="cycles of context (default 3)")
+    ap.add_argument("--no-align", action="store_true",
+                    help="compare cycles as written, instead of lining up the first issue")
+    args = ap.parse_args(argv)
+    try:
+        text, status = trace.report(args.a, args.b, args.limit, args.window,
+                                    align=not args.no_align)
+    except (OSError, ValueError) as exc:
+        sys.exit(str(exc))
+    print(text)
+    return status
+
+
 def _version(argv):
     from atalla import version
     print(version.text())
@@ -76,6 +101,7 @@ COMMANDS = {
     "run": (_run, "run a program on the whole machine (a kernel name, .c, .in or .elf)"),
     "sweep": (_sweep, "run one program over a grid of machine parameters (CSV, plot)"),
     "new-component": (_new_component, "write a new clocked component and its test from the template"),
+    "compare-rtl": (_compare_rtl, "compare two execution traces (RTL vs atalla-sim run --trace)"),
     "doctor": (_doctor, "check the installation and say how to fix what's missing"),
     "version": (_version, "the version, ISA fingerprint, RTL followed and submodule commits"),
 }
