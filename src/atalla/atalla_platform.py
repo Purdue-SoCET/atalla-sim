@@ -39,6 +39,7 @@ from atalla.sysarr_tpu_system import (
     GSAUTPUBridge, RoundRobinBackendTicker, build_tpu_platform)
 from atalla.activity import ActivityProbe
 from atalla.check import DependencyChecker
+from atalla.profile import Profiler
 from atalla.hang import CHECK_EVERY, HANG_AFTER, SimulationHang, diagnose, progress_signature
 from atalla.perf_monitor import PerfMonitor
 from base.sched import CompositeClocked
@@ -109,6 +110,8 @@ class AtallaPlatform:
     activity: Optional[ActivityProbe] = None
     #: The dependency checker (atalla/check.py), with check=True.
     check: Optional[DependencyChecker] = None
+    #: The per-packet profile (atalla/profile.py), with profile=True.
+    profile: Optional[Profiler] = None
     #: Names a pc for messages, e.g. "main_block3+20" (ElfProgram.describe).
     describe_pc: Optional[Callable[[int], str]] = None
     #: The DRAM model the masters or the AXI bus send to, when there is one.
@@ -156,7 +159,7 @@ def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]
                           dram_latency: int = 6, burst_bytes: int = DRAM_BURST_BYTES,
                           warm_icache: bool = False, perf: bool = False,
                           perf_timeline: bool = False, activity: bool = False,
-                          check: bool = False,
+                          check: bool = False, profile: bool = False,
                           init_sregs: Optional[Dict[int, int]] = None,
                           describe_pc: Optional[Callable[[int], str]] = None,
                           dram_channel: Any = None,
@@ -173,7 +176,9 @@ def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]
     (atalla/activity.py) as platform.activity, which records every block's
     state each cycle for tools/activity_view.py. `check` attaches a
     DependencyChecker (atalla/check.py) as platform.check, which reports
-    accesses nothing in the hardware orders. `init_sregs` presets scalar
+    accesses nothing in the hardware orders. `profile` attaches a Profiler
+    (atalla/profile.py) as platform.profile, which charges every cycle to
+    the packet responsible (and attaches the monitor it reads). `init_sregs` presets scalar
     registers, as a loader would (c_entry_sregs for compiled C).
     `describe_pc` names a pc in error messages (ElfProgram.describe).
     `dram_channel` (a RamulatorDRAM) times DRAM instead of `dram_latency`.
@@ -235,7 +240,7 @@ def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]
                           backends=backends, vls_bridges=parts.vls_bridges,
                           sysarr_bridge=sysarr_bridge, ports=ports, root=root,
                           describe_pc=describe_pc, dram_channel=dram_channel, axi=bus)
-    if perf or perf_timeline or activity:
+    if perf or perf_timeline or activity or profile:
         # Last in every cycle: it observes and changes nothing.
         plat.perf = PerfMonitor(plat, timeline=perf_timeline or activity)
         root.add_child(plat.perf, phase=PHASE_HARNESS)
@@ -243,6 +248,10 @@ def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]
         # After the monitor, whose per-cycle bucket it records.
         plat.activity = ActivityProbe(plat)
         root.add_child(plat.activity, phase=PHASE_HARNESS)
+    if profile:
+        # After the monitor, whose bucket it charges to a packet.
+        plat.profile = Profiler(plat)
+        root.add_child(plat.profile, phase=PHASE_HARNESS)
     if check:
         plat.check = DependencyChecker(plat)
         root.add_child(plat.check, phase=PHASE_HARNESS)

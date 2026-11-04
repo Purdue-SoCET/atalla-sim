@@ -143,6 +143,31 @@ monitor's cycle buckets; click it to jump there.
 `python tools/activity_view.py gemm.json` draws it later. The blocks and
 what "active" means for each are in `src/atalla/activity.py`.
 
+### Find the packets that cost the most
+
+```bash
+python tools/run_kernel.py softmax.c --profile 8 --save-asm softmax.s
+```
+
+charges every cycle to the packet responsible -- the one issuing, the one
+decode 2 holds while it stalls, the one being fetched while the frontend
+waits -- and prints the packets that took the most, with what they waited on:
+
+```
+where the cycles went, by packet (top 8 of 105 packets; 657 cycles):
+  cycles      %   issued  pc                        packet / waits
+     133  20.2%        0  halt                      (after halt.s: draining work in flight and dcache writebacks)
+      37   5.6%        1  0xf0 (asm line 50)        scpad.ld x11, x10, x9
+                                                      stall:hazard:scalar_load 28, frontend:icache 7, frontend:refill 1
+      17   2.6%        2  0x118 (asm line 59)       addi.s x11, x0, 1
+                                                      stall:hazard:sdma 14, frontend:icache 1
+```
+
+The wait names are the monitor's cycle buckets (`--report` explains them).
+For a C program the line numbers refer to the compiler's assembly, which
+`--save-asm` keeps; the same `asm line N` appears in the hang report and the
+dependency check. `--profile-json PATH` writes every packet's row.
+
 ### Check a program's dependencies
 
 ```bash

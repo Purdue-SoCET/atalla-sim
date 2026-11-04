@@ -94,6 +94,9 @@ class PerfMonitor(Clocked):
         self._mul_ops_seen = 0
         self.timeline: List[str] = []
         self.timeline_busy: List[List[str]] = []
+        #: This cycle's bucket, for observers ticked after the monitor
+        #: (atalla/profile.py); None before the first cycle and after halt.
+        self.last_bucket: Optional[str] = None
 
     # -- one cycle --------------------------------------------------------------------
     def tick(self, time: Optional[float] = None) -> None:
@@ -102,9 +105,11 @@ class PerfMonitor(Clocked):
             return
         core = self.p.core
         if core.done_at is not None and cycle > core.done_at:
+            self.last_bucket = None
             return
         self.cycles += 1
         bucket = self._bucket(core)
+        self.last_bucket = bucket
         self.buckets[bucket] += 1
         busy = self._busy_units(core, cycle)
         self.busy.update(busy)

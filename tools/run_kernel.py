@@ -198,6 +198,14 @@ def main(argv=None) -> None:
                          "shape); exits 1 if any element is more than --ulps BF16 steps off")
     ap.add_argument("--ulps", type=float, default=1,
                     help="with --expect: allowed error in BF16 steps (default %(default)g)")
+    ap.add_argument("--profile", nargs="?", const=15, type=int, metavar="N",
+                    help="charge every cycle to the packet responsible and print the N "
+                         "packets that took the most (default 15), with what they waited on")
+    ap.add_argument("--profile-json", metavar="PATH",
+                    help="write the whole per-packet profile as JSON")
+    ap.add_argument("--save-asm", metavar="PATH",
+                    help="for a .c program: keep the compiler's assembly (the profile and "
+                         "other reports refer to its line numbers)")
     ap.add_argument("--report", action="store_true",
                     help="print the performance monitor's report: where the cycles went, "
                          "unit utilisation, and the AXI / DRAM summaries")
@@ -255,6 +263,12 @@ def main(argv=None) -> None:
         if init_sregs is not None:
             init_sregs = entry_sregs(data, [(a, a + tensors.nbytes(shape, dt))
                                             for a, shape, dt, _ in outputs])
+    if args.save_asm:
+        source = getattr(program, "source", None) if c_path is not None else None
+        if source is None:
+            sys.exit("--save-asm is for a .c program assembled from the compiler's assembly")
+        Path(args.save_asm).write_text(source)
+        print("assembly written to %s" % args.save_asm)
     if args.save:
         Path(args.save).write_text(to_in_text(instr, data))
         print("program image written to %s" % args.save)
@@ -279,6 +293,7 @@ def main(argv=None) -> None:
                                  perf=bool(args.report or args.perf_json),
                                  activity=bool(args.activity), warm_icache=args.warm_icache,
                                  check=bool(args.check),
+                                 profile=bool(args.profile or args.profile_json),
                                  perf_timeline=args.timeline, init_sregs=init_sregs,
                                  describe_pc=describe_pc, dram_channel=dram_channel,
                                  axi=args.axi, strict=False)
@@ -334,6 +349,11 @@ def main(argv=None) -> None:
         compare(plat, instr, data, red, init_sregs, writes)
     if args.check:
         print(plat.check.summary())
+    if args.profile:
+        print(plat.profile.summary(top=args.profile))
+    if args.profile_json:
+        plat.profile.to_json(args.profile_json)
+        print("profile written to %s" % args.profile_json)
     reader = tensors.plat_reader(plat)
     for addr, shape, dtype, path in outputs:
         y = tensors.read(reader, addr, shape, dtype)

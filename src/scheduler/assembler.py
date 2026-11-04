@@ -71,6 +71,15 @@ class Program:
     #: Packets the compiler emitted, and packets added (bootstrap, li.s).
     packets: int = 0
     added_packets: int = 0
+    #: Packet address -> the source line of its first instruction (assembled
+    #: programs only), and the source itself.
+    lines: Dict[int, int] = field(default_factory=dict)
+    source: Optional[str] = None
+
+    def describe(self, pc: int) -> str:
+        """`pc` with its assembly line when known, e.g. "asm line 312"."""
+        line = self.lines.get(int(pc))
+        return "asm line %d" % line if line else "%#x" % int(pc)
 
 
 # -- parsing ------------------------------------------------------------------------------
@@ -278,6 +287,10 @@ def assemble(text: str) -> Program:
         for w in words:
             value = (value << INST_W) | w
         prog.instr[pc] = value
+        lines = [ins.line for ins in pkt if ins.line]
+        if lines:
+            prog.lines[pc] = min(lines)
+    prog.source = text
     return prog
 
 
