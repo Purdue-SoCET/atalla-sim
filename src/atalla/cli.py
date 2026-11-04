@@ -1,6 +1,7 @@
 """The `atalla-sim` command: one entry point for the simulator's tools.
 
     atalla-sim run KERNEL [options]   run a program on the whole machine (tools/run_kernel.py)
+    atalla-sim view TRACE.json        the activity viewer (also --join, --empty, --serve)
     atalla-sim sweep KERNEL --param KEY=V1,V2   one program over a grid of machine parameters
     atalla-sim new-component NAME     a new clocked component and its test, from the template
     atalla-sim compare-rtl A.trace B.trace   where an RTL trace and atalla-sim's part ways
@@ -51,6 +52,10 @@ def _tool(name: str):
 
 def _run(argv):
     return _tool("run_kernel").main(argv)
+
+
+def _view(argv):
+    return _tool("activity_view").main(argv)
 
 
 def _sweep(argv):
@@ -108,6 +113,9 @@ def _model(argv):
     ap.add_argument("--reference", metavar="NPY", help="the framework's output, to compare with")
     ap.add_argument("--config", metavar="NAME|PATH", help="the machine (default atalla-0x01)")
     ap.add_argument("--report-json", metavar="PATH", help="write the report as JSON")
+    ap.add_argument("--activity", metavar="PATH",
+                    help="record which blocks work when in every accelerator operation, as "
+                         "one workload: a .html page, or a .json for atalla-sim view")
     args = ap.parse_args(argv)
     try:
         plan = model_runner.Plan.load(args.plan)
@@ -119,11 +127,21 @@ def _model(argv):
             inputs = {"arg%d" % k: rng.normal(0, 0.5, size=shape).astype(np.float32)
                       for k, (_, shape, _) in enumerate(plan.inputs)}
         ref = np.load(args.reference) if args.reference else None
-        report = model_runner.run_model(args.plan, inputs, config.platform_kwargs(cfg), ref,
-                                        config.summary(cfg))
+        kw = config.platform_kwargs(cfg)
+        if args.activity:
+            kw["activity"] = True
+        report = model_runner.run_model(args.plan, inputs, kw, ref, config.summary(cfg))
     except (OSError, ValueError, KeyError, config.ConfigError) as exc:
         sys.exit("atalla-sim model: %s" % exc)
     print(model_runner.summary(report))
+    work = report.pop("activity", None)
+    if args.activity:
+        out = __import__("pathlib").Path(args.activity)
+        if out.suffix == ".html":
+            out.write_text(_tool("activity_view").render(work))
+        else:
+            out.write_text(json.dumps(work, separators=(",", ":")))
+        print("activity of %d operations written to %s" % (len(work["layers"]), out))
     if args.report_json:
         Path = __import__("pathlib").Path
         Path(args.report_json).write_text(json.dumps(report, indent=1, default=float))
@@ -144,6 +162,7 @@ def _doctor(argv):
 #: and return an exit status (None is 0).
 COMMANDS = {
     "run": (_run, "run a program on the whole machine (a kernel name, .c, .in or .elf)"),
+    "view": (_view, "the activity viewer: draw a trace, join a workload, or serve a folder"),
     "sweep": (_sweep, "run one program over a grid of machine parameters (CSV, plot)"),
     "new-component": (_new_component, "write a new clocked component and its test from the template"),
     "compare-rtl": (_compare_rtl, "compare two execution traces (RTL vs atalla-sim run --trace)"),

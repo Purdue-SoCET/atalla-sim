@@ -145,6 +145,10 @@ class Runner:
         self.records: List[OpRecord] = []
         self._build = kernel_builder
         self._images: Dict[Tuple, Dict[int, int]] = {}
+        #: With activity: (layer name, activity trace) per accelerator operation.
+        self.activity = bool(self.platform_kw.pop("activity", False))
+        self.traces: List[Tuple[str, dict]] = []
+        self._op = None
 
     # The functional sim's hand-written kernels, built at a size.
     def _kernel(self, name: str, args: List[str]) -> Dict[int, int]:
@@ -161,7 +165,10 @@ class Runner:
             k.write(CFG + 4 * i, np.array([a]), "u32")
         for addr, x in inputs:
             k.write(addr, x)
-        r = k.run(**self.platform_kw)
+        r = k.run(activity=self.activity, **self.platform_kw)
+        if self.activity:
+            label = "#%d %s" % (self._op, name)
+            self.traces.append((label, r.plat.activity.trace({"program": label})))
         return r.read(out_addr, out_shape), r.cycles
 
     def matmul(self, a, b, c) -> Tuple[np.ndarray, int, str]:
@@ -223,6 +230,7 @@ class Runner:
                 raise PlanError("input %s has shape %s, the plan says %s" % (key, x.shape, shape))
             vals[vid] = _bf16(x)
         for i, op in enumerate(self.plan.ops):
+            self._op = i
             name, attrs = op["name"], op.get("attributes", "")
             args = [vals[o] for o in op["operands"]]
             res = op["results"]
@@ -330,6 +338,10 @@ def run_model(plan_path, inputs: Dict[str, np.ndarray], platform_kw=None,
     if reference is not None:
         report["output_vs_reference"] = _jsonable(tensors.compare(outs[0], reference))
     report["outputs"] = [o.tolist() for o in outs]
+    if sim.activity:
+        report["activity"] = {"version": 1, "workload": Path(str(plan_path)).name,
+                              "meta": {"plan": str(plan_path)},
+                              "layers": [{"name": n, "trace": t} for n, t in sim.traces]}
     return report
 
 

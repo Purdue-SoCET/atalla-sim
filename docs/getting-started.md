@@ -140,8 +140,29 @@ drawing, a timeline has a row per block and, on top, the performance
 monitor's cycle buckets; click it to jump there.
 
 `--activity gemm.json` saves the recording instead;
-`python tools/activity_view.py gemm.json` draws it later. The blocks and
-what "active" means for each are in `src/atalla/activity.py`.
+`atalla-sim view gemm.json` draws it later. The blocks and what "active"
+means for each are in `src/atalla/activity.py`.
+
+**A whole workload.** Several runs -- a model's layers, say -- join into one
+timeline, with a band marking where each starts and a table of the layers
+(cycles, share, busiest blocks; click one to zoom to it):
+
+```bash
+atalla-sim view --join mlp gemm.json add.json relu.json -o mlp.html
+atalla-sim model examples/model/mlp.plan.json --activity mlp.html   # every operation of a model
+```
+
+**Sharing.** Every page is self-contained: send the `.html`. For a team,
+host the viewer once and point it at traces:
+
+```bash
+atalla-sim view --empty -o viewer.html     # the viewer alone: open or drop a trace on it
+atalla-sim view --serve traces/            # a folder of traces on http://127.0.0.1:8000/
+```
+
+The viewer opens a trace you pick or drop on it (it is read in the browser,
+not uploaded), or the one at `viewer.html?trace=URL` when it is hosted next
+to its traces (GitHub Pages, a lab web server).
 
 ### Find the packets that cost the most
 
