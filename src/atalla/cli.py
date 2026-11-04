@@ -4,6 +4,7 @@
     atalla-sim sweep KERNEL --param KEY=V1,V2   one program over a grid of machine parameters
     atalla-sim new-component NAME     a new clocked component and its test, from the template
     atalla-sim compare-rtl A.trace B.trace   where an RTL trace and atalla-sim's part ways
+    atalla-sim model PLAN.json        run a model's operation plan op by op (a stub ahead of atalla-graph)
     atalla-sim doctor                 check the installation: what works, what's missing, how to fix it
     atalla-sim --version              the version, ISA fingerprint, RTL followed, submodule commits
 
@@ -85,6 +86,50 @@ def _compare_rtl(argv):
     return status
 
 
+def _model(argv):
+    import argparse
+    import json
+    root = _repo_root()
+    for p in (str(root / "src"),):
+        if p not in sys.path:
+            sys.path.insert(0, p)
+    import numpy as np
+    from atalla import config, model_runner
+    ap = argparse.ArgumentParser(prog="atalla-sim model",
+                                 description="Run a model's operation plan (atalla-graph's "
+                                             "--plan-json) op by op on atalla-sim. A stub "
+                                             "ahead of atalla-graph: see "
+                                             "src/atalla/model_runner.py for what it covers.")
+    ap.add_argument("plan", help="the plan JSON (schema atalla-graph-plan-v1)")
+    ap.add_argument("--inputs", metavar="NPZ",
+                    help="arg0, arg1, ... in the plan's input order (and const<id> for "
+                         "constants the plan has no data for); random if not given")
+    ap.add_argument("--seed", type=int, default=0, help="for random inputs")
+    ap.add_argument("--reference", metavar="NPY", help="the framework's output, to compare with")
+    ap.add_argument("--config", metavar="NAME|PATH", help="the machine (default atalla-0x01)")
+    ap.add_argument("--report-json", metavar="PATH", help="write the report as JSON")
+    args = ap.parse_args(argv)
+    try:
+        plan = model_runner.Plan.load(args.plan)
+        cfg = config.load(args.config)
+        if args.inputs:
+            inputs = dict(np.load(args.inputs))
+        else:
+            rng = np.random.default_rng(args.seed)
+            inputs = {"arg%d" % k: rng.normal(0, 0.5, size=shape).astype(np.float32)
+                      for k, (_, shape, _) in enumerate(plan.inputs)}
+        ref = np.load(args.reference) if args.reference else None
+        report = model_runner.run_model(args.plan, inputs, config.platform_kwargs(cfg), ref,
+                                        config.summary(cfg))
+    except (OSError, ValueError, KeyError, config.ConfigError) as exc:
+        sys.exit("atalla-sim model: %s" % exc)
+    print(model_runner.summary(report))
+    if args.report_json:
+        Path = __import__("pathlib").Path
+        Path(args.report_json).write_text(json.dumps(report, indent=1, default=float))
+        print("report written to %s" % args.report_json)
+
+
 def _version(argv):
     from atalla import version
     print(version.text())
@@ -102,6 +147,7 @@ COMMANDS = {
     "sweep": (_sweep, "run one program over a grid of machine parameters (CSV, plot)"),
     "new-component": (_new_component, "write a new clocked component and its test from the template"),
     "compare-rtl": (_compare_rtl, "compare two execution traces (RTL vs atalla-sim run --trace)"),
+    "model": (_model, "run a model's operation plan (atalla-graph --plan-json) op by op"),
     "doctor": (_doctor, "check the installation and say how to fix what's missing"),
     "version": (_version, "the version, ISA fingerprint, RTL followed and submodule commits"),
 }
