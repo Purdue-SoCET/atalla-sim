@@ -86,7 +86,12 @@ against the functional sim (lanes reduction order):
   the program kept waiting on.
 - `reference result` compares DRAM with the kernel's numpy answer.
 - `--golden` also runs the functional sim on the identical program and
-  compares every register and DRAM halfword.
+  compares every register and DRAM halfword. Before that it names the
+  *first* register write where the two part ways -- which write to which
+  register, at which cycle, made by which packet -- so a wrong result points
+  at the instruction that went wrong, not just at the final state. A
+  difference that never reaches the output still shows here (a load that
+  read a row before its DMA landed, then was overwritten).
 
 What `run_kernel.py` runs:
 

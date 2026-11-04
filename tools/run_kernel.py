@@ -59,7 +59,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from atalla import tensors                                        # noqa: E402
+from atalla import lockstep, tensors                              # noqa: E402
 from atalla.hang import HANG_AFTER                                # noqa: E402
 from atalla.kernel import entry_sregs                             # noqa: E402
 from scheduler import golden                                     # noqa: E402
@@ -105,12 +105,19 @@ def build_kernel(name: str, extra, out_dir: Path) -> Path:
     return out
 
 
-def compare(plat, instr, data, reductions: str = "lanes", init_sregs=None) -> int:
-    """Run the functional sim on the same program and print where the
-    platform's final state differs (golden.differences). Returns how many.
+def compare(plat, instr, data, reductions: str = "lanes", init_sregs=None, writes=None) -> int:
+    """Run the functional sim on the same program and print the first
+    register write where the two part ways (atalla/lockstep.py, when `writes`
+    recorded the platform's) and where the final state differs
+    (golden.differences). Returns how many final-state differences.
     reductions="lanes": the functional sim reduces in the lane model's
     order; "functional": its own sequential fp32 sum."""
-    g = golden.run_golden_state(instr, data, reductions=reductions, init_sregs=init_sregs)
+    trace = [] if writes is not None else None
+    g = golden.run_golden_state(instr, data, reductions=reductions, init_sregs=init_sregs,
+                                trace=trace)
+    if writes is not None:
+        div = lockstep.first_divergence(writes, trace)
+        print("  " + lockstep.describe(div, instr, plat.describe_pc).replace("\n", "\n  "))
     diffs = golden.differences(plat, g)
     for line in diffs[:20]:
         print("  " + line)
@@ -131,7 +138,9 @@ def main(argv=None) -> None:
                     help="for a .c program: compile and link it to an ELF and run that, "
                          "instead of assembling the compiler's assembly")
     ap.add_argument("--golden", action="store_true",
-                    help="also run the functional sim and compare the final state")
+                    help="also run the functional sim on the same image: report the first "
+                         "register write where the two differ, and every difference in the "
+                         "final registers and DRAM")
     ap.add_argument("--limit", type=int, default=5_000_000, help="cycle limit")
     ap.add_argument("--hang-after", type=int, default=HANG_AFTER, metavar="N",
                     help="stop, and report what every unit waits on, once nothing has moved "
@@ -273,6 +282,7 @@ def main(argv=None) -> None:
                                  perf_timeline=args.timeline, init_sregs=init_sregs,
                                  describe_pc=describe_pc, dram_channel=dram_channel,
                                  axi=args.axi, strict=False)
+    writes = lockstep.attach(plat) if args.golden else None
     t = time.time()
     try:
         cycles = plat.run_until_done(limit=args.limit, hang_after=args.hang_after or None)
@@ -321,7 +331,7 @@ def main(argv=None) -> None:
             sys.exit("functional sim unavailable: %s" % golden.load_error)
         red = "functional" if args.functional_reductions else "lanes"
         print("against the functional sim (%s reduction order):" % red)
-        compare(plat, instr, data, red, init_sregs)
+        compare(plat, instr, data, red, init_sregs, writes)
     if args.check:
         print(plat.check.summary())
     reader = tensors.plat_reader(plat)

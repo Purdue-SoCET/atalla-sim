@@ -50,6 +50,11 @@ class Result(Memory):
     plat: object = None
     #: The functional sim's DRAM, with run(golden=True).
     golden: Optional[Memory] = None
+    #: With run(golden=True): the first register write where atalla-sim and
+    #: the functional sim differ (atalla/lockstep.py), None if none.
+    divergence: Optional[object] = None
+    #: ... and that, as a sentence.
+    divergence_text: str = ""
 
 
 def entry_sregs(data: Dict[int, int], outputs=()) -> Dict[int, int]:
@@ -118,11 +123,18 @@ class Kernel:
         regs = self.entry_sregs() if self.c_entry else None
         plat = build_atalla_platform(self.instr, self.data, init_sregs=regs,
                                      strict=platform_kw.pop("strict", False), **platform_kw)
+        writes = None
+        if golden:
+            from atalla import lockstep
+            writes = lockstep.attach(plat)
         cycles = plat.run_until_done(limit=limit)
         res = Result(reader=tensors.plat_reader(plat), cycles=cycles, plat=plat)
         if golden:
             from scheduler import golden as g
+            trace: list = []
             state = g.run_golden_state(self.instr, self.data, init_sregs=regs,
-                                       reductions="lanes")
+                                       reductions="lanes", trace=trace)
             res.golden = Memory(reader=golden_reader(state["mem"]))
+            res.divergence = lockstep.first_divergence(writes, trace)
+            res.divergence_text = lockstep.describe(res.divergence, self.instr)
         return res
