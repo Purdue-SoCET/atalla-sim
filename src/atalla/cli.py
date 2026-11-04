@@ -2,6 +2,7 @@
 
     atalla-sim run KERNEL [options]   run a program on the whole machine (tools/run_kernel.py)
     atalla-sim doctor                 check the installation: what works, what's missing, how to fix it
+    atalla-sim --version              the version, ISA fingerprint, RTL followed, submodule commits
 
 `pip install -e .` from the repository puts `atalla-sim` on PATH; without
 installing, `python -m atalla.cli` from `src/` (or `PYTHONPATH=src`) does the
@@ -48,6 +49,11 @@ def _run(argv):
     return _tool("run_kernel").main(argv)
 
 
+def _version(argv):
+    from atalla import version
+    print(version.text())
+
+
 def _doctor(argv):
     from atalla import doctor
     return doctor.main(argv)
@@ -58,6 +64,7 @@ def _doctor(argv):
 COMMANDS = {
     "run": (_run, "run a program on the whole machine (a kernel name, .c, .in or .elf)"),
     "doctor": (_doctor, "check the installation and say how to fix what's missing"),
+    "version": (_version, "the version, ISA fingerprint, RTL followed and submodule commits"),
 }
 
 
@@ -76,6 +83,8 @@ def main(argv=None) -> None:
         print(usage())
         sys.exit(0 if argv else 2)
     name, rest = argv[0], argv[1:]
+    if name == "--version":
+        name = "version"
     if name not in COMMANDS:
         sys.exit("atalla-sim: unknown command %r\n\n%s" % (name, usage()))
     status = COMMANDS[name][0](rest)

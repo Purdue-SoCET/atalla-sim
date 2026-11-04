@@ -104,6 +104,7 @@ class Profiler(Clocked):
                     "", "", "", "", ", ".join("%s %d" % kv for kv in list(r["waits"].items())[:4])))
         return "\n".join(lines)
 
-    def to_json(self, path: str) -> None:
+    def to_json(self, path: str, config: Optional[dict] = None) -> None:
+        """{"config": the machine (atalla/config.py), "packets": report()}."""
         with open(path, "w") as f:
-            json.dump(self.report(), f, indent=1)
+            json.dump({"config": config, "packets": self.report()}, f, indent=1)

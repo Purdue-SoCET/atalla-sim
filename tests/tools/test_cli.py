@@ -62,3 +62,11 @@ def test_an_old_python_gets_a_message_not_a_traceback(monkeypatch):
     with pytest.raises(SystemExit) as e:
         cli.require_python()
     assert "needs Python 3.9" in str(e.value)
+
+
+def test_version_names_the_isa_and_the_rtl_followed():
+    p = atalla_sim("--version")
+    assert p.returncode == 0, p.stdout
+    assert p.stdout.startswith("atalla-sim ")
+    assert "ISA: " in p.stdout and " opcodes, table " in p.stdout
+    assert "scheduler_integration_SP26_joshklug" in p.stdout

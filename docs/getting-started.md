@@ -202,6 +202,28 @@ checked run takes the same cycles. Rules and limits: `src/atalla/check.py`.
 
 ## 3. Explore a design
 
+### Machine configurations
+
+A design point is a file in `configs/`:
+
+```bash
+python tools/run_kernel.py gemm --config atalla-0x01        # the default machine
+python tools/run_kernel.py gemm --config atalla-0x01-ddr4   # with the AXI bus and Ramulator DDR4
+python tools/run_kernel.py gemm --config my-design.toml --lanes 8   # flags override the file
+```
+
+`configs/atalla-0x01.toml` lists every key with its default and what it
+means: the lanes, the array, the data cache, the load/store queue, scalar
+execute latencies, the DRAM model and its parameters, the AXI bus's sizes.
+Your own file needs only the keys it changes; an unknown key is an error, so
+a typo can't leave a parameter at its default unnoticed. `--report` prints
+the resolved machine on one line, and `--perf-json`, `--profile-json` and
+`--activity` record all of it next to the results. `atalla-sim --version`
+says which simulator, ISA and RTL produced them.
+
+When comparing with an RTL simulation or the functional simulator, read
+[known-differences.md](known-differences.md) first.
+
 ### From the command line
 
 | flag | default | |

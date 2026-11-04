@@ -333,8 +333,12 @@ class PerfMonitor(Clocked):
                   % ("%.2f" % ai if ai is not None else "n/a")]
         return "\n".join(lines)
 
-    def to_json(self, path: str, timeline: bool = False) -> None:
+    def to_json(self, path: str, timeline: bool = False, config: Optional[dict] = None) -> None:
+        """The report as JSON; `config`, the machine configuration
+        (atalla/config.py), goes in with it."""
         out = self.report()
+        if config is not None:
+            out["config"] = config
         if timeline and self.timeline_on:
             out["timeline"] = {"bucket": self.timeline, "busy": self.timeline_busy}
         with open(path, "w") as f:

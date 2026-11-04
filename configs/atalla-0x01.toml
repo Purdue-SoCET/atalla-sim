@@ -1,0 +1,55 @@
+# Atalla 0x01 as atalla-sim models it by default.
+#
+#   atalla-sim run gemm --config atalla-0x01        (a name looks here, in configs/)
+#   atalla-sim run gemm --config my-design.toml     (or any path)
+#
+# Every key is optional: a missing one keeps the value below. Command-line
+# flags (--lanes, --dram-latency, ...) override the file. Every report
+# (--report, --perf-json, --activity, --profile-json) records the resolved
+# configuration. tests/atalla/test_config.py checks this file against
+# build_atalla_platform's own defaults, so the two can't drift apart.
+
+name = "atalla-0x01"
+description = "the default machine: MEISSA array, 16 lanes, fixed-latency DRAM"
+
+[core]
+lane_count = 16                # vector lanes; each holds 32 / lane_count elements
+systolic_array = "meissa"      # "meissa" (the RTL's) or "tpu"
+lsu_depth = 4                  # scalar load/store queue entries
+warm_icache = false            # start with the whole program in the icache
+icache_first_beat_wait = 0
+icache_beat_wait = 0
+
+[core.ex_latency]              # scalar execute latencies by mnemonic, e.g. "div.s" = 66
+# (empty: DEFAULT_LATENCY in src/scheduler/execute.py)
+
+[dcache]                       # DCacheConfig, src/scheduler/dcache.py
+size_bytes = 4096
+ways = 4
+line_bytes = 64
+mshrs = 8
+targets_per_mshr = 8
+sram_read_latency = 1
+sram_write_latency = 4
+beat_bytes = 8
+first_beat_wait = 0
+write_wait = 0
+
+[memory]
+dram = "fixed"                 # "fixed" (dram_latency cycles) or "ramulator" (DDR4, `make ramulator`)
+dram_latency = 6               # with dram = "fixed": cycles from a request to its data
+burst_bytes = 8                # bytes per DRAM request (the RTL's 64-bit interface)
+axi = "auto"                   # the memory_FA26 AXI bus: true, false, or "auto" (with ramulator)
+ramulator_config = "rtl"       # with dram = "ramulator": a DRAM_CONFIGS name, src/memory/ramulator.py
+
+[memory.ramulator]             # with dram = "ramulator": overrides, e.g. nCL = 22, read_buffer = 64
+
+[memory.axi_params]            # AXIParams, src/memory/axi.py (with the AXI bus)
+ar_depth = 4
+aw_depth = 3
+w_depth = 31
+driver_beats = 4
+drain_per_cycle = 8
+burst_slots = 8192
+single_depth = 8192
+beat_bytes = 8

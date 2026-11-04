@@ -59,7 +59,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from atalla import lockstep, tensors                              # noqa: E402
+from atalla import config, lockstep, tensors                      # noqa: E402
 from atalla.hang import HANG_AFTER                                # noqa: E402
 from atalla.kernel import entry_sregs                             # noqa: E402
 from scheduler import golden                                     # noqa: E402
@@ -67,8 +67,7 @@ from scheduler.core import load_program_text                      # noqa: E402
 from scheduler.elf import ElfError, load_elf                       # noqa: E402
 from atalla.atalla_platform import build_atalla_platform, c_entry_sregs  # noqa: E402
 from scheduler.assembler import to_in_text                        # noqa: E402
-from memory.dram import DRAM_BURST_BYTES                          # noqa: E402
-from memory.ramulator import DRAM_CONFIGS, RamulatorDRAM                 # noqa: E402
+from memory.ramulator import DRAM_CONFIGS                                # noqa: E402
 import c_kernels                                                  # noqa: E402
 
 SIM = golden.SUBMODULE_PATH
@@ -125,6 +124,41 @@ def compare(plat, instr, data, reductions: str = "lanes", init_sregs=None, write
     return len(diffs)
 
 
+def machine_config(args) -> dict:
+    """The --config file with the command line's explicit flags applied."""
+    cfg = config.load(args.config)
+    core, mem = {}, {}
+    if args.lanes is not None:
+        core["lane_count"] = args.lanes
+    if args.array is not None:
+        core["systolic_array"] = args.array
+    if args.warm_icache:
+        core["warm_icache"] = True
+    if args.dram_latency is not None:
+        mem["dram_latency"] = args.dram_latency
+    if args.burst_bytes is not None:
+        mem["burst_bytes"] = args.burst_bytes
+    if args.dram is not None:
+        mem["dram"] = args.dram
+    if args.axi is not None:
+        mem["axi"] = args.axi
+    if args.dram_config is not None:
+        mem["ramulator_config"] = args.dram_config
+    if args.dram_param:
+        params = {}
+        for item in args.dram_param:
+            name, eq, value = item.partition("=")
+            if not eq or not value:
+                raise ValueError("--dram-param takes NAME=VALUE, not %r" % item)
+            params[name] = int(value) if value.lstrip("-").isdigit() else value
+        mem["ramulator"] = {**cfg["memory"]["ramulator"], **params}
+    cfg = config.override(cfg, {"core": core, "memory": mem})
+    if (args.dram_param or args.dram_config) and cfg["memory"]["dram"] != "ramulator":
+        raise ValueError("--dram-config and --dram-param need --dram ramulator "
+                         "(or a config with dram = \"ramulator\")")
+    return cfg
+
+
 def main(argv=None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
     extra = []
@@ -145,9 +179,12 @@ def main(argv=None) -> None:
     ap.add_argument("--hang-after", type=int, default=HANG_AFTER, metavar="N",
                     help="stop, and report what every unit waits on, once nothing has moved "
                          "for N cycles (default %(default)d; 0 never)")
-    ap.add_argument("--dram-latency", type=int, default=6,
+    ap.add_argument("--config", metavar="NAME|PATH",
+                    help="the machine: a configs/NAME.toml or a .toml path (default "
+                         "atalla-0x01); the flags below override it")
+    ap.add_argument("--dram-latency", type=int, default=None,
                     help="cycles from a DRAM request launching to its data returning")
-    ap.add_argument("--dram", choices=["fixed", "ramulator"], default="fixed",
+    ap.add_argument("--dram", choices=["fixed", "ramulator"], default=None,
                     help="DRAM timing: a fixed --dram-latency, or Ramulator 2's DDR4 model "
                          "(build it with `make ramulator`)")
     ap.add_argument("--axi", action=argparse.BooleanOptionalAction, default=None,
@@ -155,7 +192,7 @@ def main(argv=None) -> None:
                          "(default: with --dram ramulator; --no-axi drives the DRAM "
                          "directly, --axi with --dram fixed puts a fixed-latency DRAM "
                          "behind the bus)")
-    ap.add_argument("--dram-config", choices=list(DRAM_CONFIGS), default="rtl",
+    ap.add_argument("--dram-config", choices=list(DRAM_CONFIGS), default=None,
                     help="with --dram ramulator: rtl (memory_FA26's Ramulator wrapper, "
                          "DDR4-3200W), ddr4-1600 or ddr_cntrl (the DDR controller's "
                          "dram_pkg.vh timings, branch ddr_cntrl_final); src/memory/ramulator.py "
@@ -164,10 +201,10 @@ def main(argv=None) -> None:
                     help="with --dram ramulator: override one value of the config or of "
                          "Ramulator's DDR4 model, e.g. read_buffer=64, preset=DDR4_2400R, "
                          "nCL=12; repeatable")
-    ap.add_argument("--lanes", type=int, default=16, help="vector lanes (must divide 32)")
-    ap.add_argument("--array", choices=["meissa", "tpu"], default="meissa",
+    ap.add_argument("--lanes", type=int, default=None, help="vector lanes (must divide 32)")
+    ap.add_argument("--array", choices=["meissa", "tpu"], default=None,
                     help="the systolic array: MEISSA (the RTL's) or the TPU-style array")
-    ap.add_argument("--burst-bytes", type=int, default=DRAM_BURST_BYTES,
+    ap.add_argument("--burst-bytes", type=int, default=None,
                     help="bytes per DRAM request, for every DRAM master "
                          "(default: the RTL's 64-bit interface)")
     ap.add_argument("--warm-icache", action="store_true",
@@ -273,30 +310,19 @@ def main(argv=None) -> None:
         Path(args.save).write_text(to_in_text(instr, data))
         print("program image written to %s" % args.save)
 
-    dram_channel = None
-    if args.dram == "ramulator":
-        params = {}
-        for item in args.dram_param:
-            name, eq, value = item.partition("=")
-            if not eq or not value:
-                sys.exit("--dram-param takes NAME=VALUE, not %r" % item)
-            params[name] = int(value) if value.lstrip("-").isdigit() else value
-        try:
-            dram_channel = RamulatorDRAM(args.dram_config, **params)
-        except (RuntimeError, ValueError) as exc:
-            sys.exit(str(exc))
-    elif args.dram_param or args.dram_config != "rtl":
-        sys.exit("--dram-config and --dram-param need --dram ramulator")
-    plat = build_atalla_platform(instr, data, dram_latency=args.dram_latency,
-                                 lane_count=args.lanes, systolic_array=args.array,
-                                 burst_bytes=args.burst_bytes,
+    try:
+        cfg = machine_config(args)
+        kw = config.platform_kwargs(cfg)
+    except (config.ConfigError, RuntimeError, ValueError, TypeError) as exc:
+        sys.exit(str(exc))
+    dram_channel = kw.get("dram_channel")
+    plat = build_atalla_platform(instr, data, **kw,
                                  perf=bool(args.report or args.perf_json),
-                                 activity=bool(args.activity), warm_icache=args.warm_icache,
+                                 activity=bool(args.activity),
                                  check=bool(args.check),
                                  profile=bool(args.profile or args.profile_json),
                                  perf_timeline=args.timeline, init_sregs=init_sregs,
-                                 describe_pc=describe_pc, dram_channel=dram_channel,
-                                 axi=args.axi, strict=False)
+                                 describe_pc=describe_pc, strict=False)
     writes = lockstep.attach(plat) if args.golden else None
     t = time.time()
     try:
@@ -306,6 +332,7 @@ def main(argv=None) -> None:
     c = plat.core
     print("%s: %d cycles (%.1f s)" % (args.kernel, cycles, time.time() - t))
     if args.report:
+        print("machine: %s" % config.summary(cfg))
         print()
         print(plat.perf.summary())
         print()
@@ -316,13 +343,15 @@ def main(argv=None) -> None:
             print(dram_channel.summary(through=plat.cycle - 1))
             print()
     if args.perf_json:
-        plat.perf.to_json(args.perf_json, timeline=args.timeline)
+        plat.perf.to_json(args.perf_json, timeline=args.timeline, config=cfg)
         print("performance report written to %s" % args.perf_json)
     if args.activity:
-        meta = dict(program=Path(args.kernel).name, array=args.array, lanes=args.lanes,
-                    burst_bytes=args.burst_bytes, dram=args.dram, axi=plat.axi is not None)
-        if args.dram == "fixed":
-            meta["dram_latency"] = args.dram_latency
+        core, mem = cfg["core"], cfg["memory"]
+        meta = dict(program=Path(args.kernel).name, array=core["systolic_array"],
+                    lanes=core["lane_count"], burst_bytes=mem["burst_bytes"], dram=mem["dram"],
+                    axi=plat.axi is not None, machine=config.summary(cfg), config=cfg)
+        if mem["dram"] == "fixed":
+            meta["dram_latency"] = mem["dram_latency"]
         if args.activity.endswith(".html"):
             import activity_view
             Path(args.activity).write_text(activity_view.render(plat.activity.trace(meta)))
@@ -352,7 +381,7 @@ def main(argv=None) -> None:
     if args.profile:
         print(plat.profile.summary(top=args.profile))
     if args.profile_json:
-        plat.profile.to_json(args.profile_json)
+        plat.profile.to_json(args.profile_json, config=cfg)
         print("profile written to %s" % args.profile_json)
     reader = tensors.plat_reader(plat)
     for addr, shape, dtype, path in outputs:
