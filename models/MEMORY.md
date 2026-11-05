@@ -6,8 +6,8 @@ Living codebase notes for the graph-to-ELF work. Update this file as new behavio
 
 - `atalla-model-runner` is the active implementation repository. Keep commits here only.
 - `aihw-ppci-compiler` is checked out on `atalla-arch` at `351b5fabf76fa3352ebc2e9571e9793d53c7cbe6` (latest kernel validation status is documented in `test_validation_kernels/KERNEL_STATUS.md`). Keep compiler source changes out of this task; only runner commits are allowed.
-- Current runner support is schedule emission plus source-binding metadata: `atalla-graph/run_schedule.py` writes `graph_schedule.c`, `dram.bin`, and `kernel_manifest.json`. The manifest references one compiler source per operation type and records that adapters are still required.
-- The runner has no `codegen/c_emitter.py` or per-op kernel builders. `atalla-graph/kernel_backend.py` now maps graph ops to shared compiler validation source paths; it does not copy or adapt the source bodies. In `atalla-models`, the per-node `.c` generation used by validation is in `atalla-graph/codegen/c_emitter.py`; its C builders are loaded from `functional_sim/kernels`.
+- Current runner support writes `graph_schedule.c`, `dram.bin`, and `kernel_manifest.json`. Shared callable add/multiply/scalar-multiply/ReLU implementations now live in `kernels/src/elementwise.c`; the manifest gates linkability by operation and shape support in `kernels/capabilities.json`.
+- The runner has no legacy `codegen/c_emitter.py` or per-node kernel builders. `atalla-graph/kernel_backend.py` binds graph ops to shared library sources and records compiler validation sources as references only. `kernels/` defines the schedule ABI, capability table, and first shared elementwise implementations. In `atalla-models`, legacy per-node `.c` generation was in `atalla-graph/codegen/c_emitter.py`; its C builders were loaded from `functional_sim/kernels`.
 
 ## Current graph schedule and memory
 
@@ -58,5 +58,14 @@ Read `past-years-reports/AtallaGraph_SystemsSoftware_Report_Final.pdf` (and comp
 - The runner allocator stores every rank-2 tensor as 32x32 tiles with a 32-element row stride, while validation `add.c`/`relu.c` process 4x32 contiguous rows (the encoded control words are fixed). Even when a graph tensor has a 4x32 logical shape, its storage is still a padded 32x32 tile, so its row stride differs.
 - `gemm_tiled_pipelined.c` fixes the compute tile to 4x4 and its SDMA controls assume 8-wide matrices. Runner descriptors use 32x32 tiles and contain only tile base addresses, not the packed matrix buffers expected by that test.
 - `conv_pipelined.c` is a GEMM over an im2col matrix, not a direct NCHW convolution kernel. The old emitter explicitly materializes im2col and transposed/flattened weights; current runner allocation does neither.
-- Therefore a callable wrapper alone cannot safely turn these files into graph kernels. A valid adapter needs either a compiler-side generic kernel ABI, or runner data-layout/packing and schedule changes that reproduce each template's expected SDMA layout. It must reject incompatible graphs. No compiler files were changed.
+- Therefore a callable wrapper alone cannot safely turn these files into graph kernels. The runner now has its own callable ABI and elementwise implementation derived from the validated vector patterns. Matrix, convolution, and pooling remain unsupported pending library implementations and explicit graph-layout handling. No compiler files were changed.
 - The PPCI linker layout puts `.data` at `0x80000`, while graph addresses begin at zero; including `dram.bin` as an ELF C object is not sufficient without moving graph allocations/config to a non-overlapping linker region and proving emitted section addresses.
+
+
+## Kernel package and compiler-team workflow
+
+- `kernels/kernels.h` is the C descriptor/function ABI included by generated schedules. Descriptors carry shape, tile grid, and per-tile DRAM byte addresses. `kernels/include/sdma.h` centralizes the SDMA control-word fields and 32x32 presets.
+- `kernels/src/elementwise.c` processes padded 32x32 BF16 tiles; supported broadcasts and shape preconditions are declared in `kernels/capabilities.json`.
+- `kernels/Makefile` compiles the shared object through the selected compiler submodule; generated objects stay under ignored `kernels/build/`.
+- `kernels/prompt.md` guides compiler optimization review and propagation into the library. `kernels/COMPILER_BASELINE` records the last reviewed compiler source revision; advance it only after review and validation.
+- GEMM, convolution, and pooling remain unavailable; their declarations reserve the schedule ABI, not implementations. `kernel_manifest.json` must continue to reject graphs requiring them.

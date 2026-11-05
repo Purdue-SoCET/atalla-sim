@@ -585,6 +585,20 @@ def _render_kernel_calls(
             calls.append(rendered)
     return calls
 
+
+def _propagate_kernel_errors(calls: List[str]) -> List[str]:
+    """Turn nonzero shared-kernel status into an error from run_graph."""
+    checked: List[str] = []
+    for call_block in calls:
+        for line in call_block.splitlines():
+            stripped = line.strip()
+            if stripped.endswith(");") and "_kernel(" in stripped:
+                expression = stripped[:-1]
+                checked.append(f"    if ({expression} != 0) return -1;\n")
+            elif line:
+                checked.append(f"    {stripped}\n")
+    return checked
+
 #main entry point 
 def emit(gm: GraphModule) -> str:
     scaled_mul = _detect_scaled_args(gm)
@@ -595,7 +609,9 @@ def emit(gm: GraphModule) -> str:
     }
 
     tensor_specs, specs_by_node = _collect_tensor_specs(gm, scaled_mul)
-    calls = _render_kernel_calls(gm, specs_by_node, scaled_mul, attr_nodes)
+    calls = _propagate_kernel_errors(
+        _render_kernel_calls(gm, specs_by_node, scaled_mul, attr_nodes)
+    )
 
     pieces: List[str] = [
         "#include \"kernels/kernels.h\"\n\n"

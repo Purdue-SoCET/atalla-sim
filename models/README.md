@@ -1,9 +1,10 @@
 # atalla-model-runner
 
-Schedule-only model frontend for Atalla. The graph capture, lowering, tile planning,
-DRAM allocation, and schedule emitter are ported from `atalla-models/atalla-graph`.
-The runner emits the scheduled graph as `graph_schedule.c` plus its tiled `dram.bin`;
-it does not generate C kernel implementations. It also writes `kernel_manifest.json`, which maps graph operations to shared validation source files without copying those files per node and records adapter/layout blockers.
+Graph-to-schedule frontend and shared kernel package for Atalla. The graph capture,
+lowering, tile planning, DRAM allocation, and schedule emitter are ported from
+`atalla-models/atalla-graph`. The runner emits `graph_schedule.c`, its tiled
+`dram.bin`, and `kernel_manifest.json`. Shared callable elementwise kernels live in
+`kernels/`; the manifest records implemented operations and unsupported graph cases.
 
 The `aihw-ppci-compiler` submodule is checked out at the latest `atalla-arch` revision selected for this runner and contains the optimized validation kernels used downstream.
 
@@ -24,4 +25,15 @@ python atalla-graph/run_schedule.py --model alexnet_small --scale 0.01 --out-dir
 ```
 
 Supported models are `basic` and `alexnet_small`. Schedule lowering is partial for
-operators that do not yet have a `generate_schedule.py` lowering. The manifest is a source-binding/preflight artifact; it does not mean the standalone validation programs can yet be linked as graph kernels.
+operators without a `generate_schedule.py` lowering. The current kernel package
+implements tiled elementwise add, multiply, scalar multiply, and ReLU. Matrix,
+convolution, and pooling kernels are listed as unsupported until their graph layouts
+and callable implementations are complete. ELF compilation and DRAM-image
+packaging are also still pending, so the manifest never reports a graph as linked.
+
+## Kernel contributor entry point
+
+Compiler contributors can work in `kernels/` without changing FX or graph-memory
+code. Read [kernels/README.md](kernels/README.md) for the ABI and capability map, and
+[kernels/prompt.md](kernels/prompt.md) for a review workflow that propagates compiler
+optimizations from validation kernels into the shared library.

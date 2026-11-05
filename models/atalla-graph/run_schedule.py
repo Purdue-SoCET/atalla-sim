@@ -45,8 +45,10 @@ def run_schedule(graph_module: GraphModule, example_input: torch.Tensor, out_dir
     code = emit(allocated)
     output_path = out_dir / "graph_schedule.c"
     output_path.write_text(code)
-    compiler_root = Path(__file__).resolve().parents[1] / "aihw-ppci-compiler"
-    manifest = build_kernel_manifest(allocated, compiler_root)
+    repo_root = Path(__file__).resolve().parents[1]
+    compiler_root = repo_root / "aihw-ppci-compiler"
+    kernel_root = repo_root / "kernels"
+    manifest = build_kernel_manifest(allocated, kernel_root, compiler_root)
     manifest_path = out_dir / "kernel_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
     kernel_calls = [line.strip() for line in code.splitlines() if "_kernel(" in line]
@@ -56,7 +58,12 @@ def run_schedule(graph_module: GraphModule, example_input: torch.Tensor, out_dir
     if len(kernel_calls) > 8:
         print(f"  ... ({len(kernel_calls) - 8} more)")
     print("Schedule emission is partial for ops without a generate_schedule lowering.")
-    print(f"Kernel source bindings: {len(manifest['bindings'])}; adapter/layout blockers recorded in {manifest_path}")
+    print(
+        f"Kernel source bindings: {len(manifest['bindings'])}; "
+        f"kernel coverage: {manifest['kernel_coverage']}; ELF linkable: {manifest['linkable']}"
+    )
+    if not manifest["linkable"]:
+        print(f"Kernel capability report: {manifest_path}: {manifest['link_blocker']}")
     return output_path
 
 

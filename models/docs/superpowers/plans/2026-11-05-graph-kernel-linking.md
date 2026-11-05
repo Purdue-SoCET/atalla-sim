@@ -4,7 +4,7 @@
 
 **Goal:** Emit a single Atalla ELF for a model graph using shared optimized compiler kernels and an integrated graph DRAM image.
 
-**Architecture:** The FX graph becomes a graph manifest/config table and one schedule entry point. Runner-owned adapters reconcile graph tensor metadata with the standalone validation-kernel ABI; the compiler submodule is read-only. A single build command compiles the graph and shared kernel entry points, then links them with a known data layout.
+**Architecture:** The FX graph emits shared-kernel calls through a stable descriptor ABI. `kernels/` contains callable Atalla C implementations and capability metadata; compiler validation sources remain read-only optimization references. The runner owns graph metadata and data packaging, while compiler contributors can change kernel implementations in the isolated package.
 
 **Tech Stack:** Python, PyTorch FX, PPCI `atalla_cc`/`ld`, C, Atalla ISA.
 
@@ -13,7 +13,7 @@
 ## Global constraints
 
 - Make commits only in `atalla-model-runner`.
-- Keep the compiler submodule unchanged and pinned.
+- Keep the compiler submodule contents unchanged at the selected `atalla-arch` revision.
 - Do not generate a distinct kernel body for every FX node.
 - Surface unsupported op geometry/layout at build time.
 - Preserve the existing schedule-only CLI while adding an explicit link/build CLI.
@@ -35,13 +35,17 @@
 - [x] Record current runner flow, graph allocator layout, old `xmas` wiring, validation source ABI, and report findings.
 - [x] Keep verified mismatches and unsupported geometry visible in the memory file.
 
-### Task 2: Add a shared kernel adapter and invocation manifest
+### Task 2: Build the shared kernel package and invocation manifest
 
-**Files:** `atalla-graph/kernel_backend.py`, `atalla-graph/scripts/generate_schedule.py`, runner-owned adapter source/templates
+**Files:** `kernels/kernels.h`, `kernels/include/sdma.h`, `kernels/capabilities.json`, `kernels/src/elementwise.c`, `kernels/README.md`, `kernels/prompt.md`, `atalla-graph/kernel_backend.py`, `atalla-graph/run_schedule.py`
 
-- [x] Map currently classified FX ops to shared compiler validation-kernel source paths and optimized variants in `kernel_backend.py`.
-- [x] Record per-node operation and tensor shapes in `kernel_manifest.json`; addresses/strides/config records remain future work.
-- [ ] Adapt each source once into a callable symbol and reject geometry the source cannot cover. (Blocked until the graph tile layout is reconciled with fixed validation SDMA layouts.)
+- [x] Define a public `GlobalTile` descriptor ABI and schedule-compatible kernel declarations.
+- [x] Implement shared add, multiply, scalar multiply, and ReLU tile kernels; publish their geometry in `capabilities.json`.
+- [x] Emit per-node bindings and gate kernel coverage based on implemented operation and shape compatibility; report ELF linkability separately.
+- [x] Add a standalone object build target, compiler contributor docs, and optimization propagation prompt.
+- [ ] Implement GEMM, convolution, pooling, and other mapped graph operations against the shared tile ABI.
+- [x] Make schedule calls propagate kernel error status.
+- [ ] Reject every unsupported broadcast/layout before C emission.
 
 ### Task 3: Package graph data and link the ELF
 
