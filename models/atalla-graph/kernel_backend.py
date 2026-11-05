@@ -58,6 +58,15 @@ def _classify(gm: GraphModule, node: Node) -> str | None:
     return None
 
 
+def _inputs_layout_compatible(inputs: list[Node]) -> bool:
+    for node in inputs:
+        if node.op == "call_method" and str(node.target).strip("'") in _VIEW_METHODS:
+            return False
+        if node.op == "call_function" and node.target is operator.getitem:
+            return False
+    return True
+
+
 def _shape_compatible(operation: str, inputs: list[list[int] | None], output: list[int] | None) -> bool:
     if output is None or not inputs or inputs[0] != output:
         return False
@@ -103,9 +112,10 @@ def build_kernel_manifest(
         source = capability.get("source")
         source_exists = bool(source and (kernel_root / source).is_file())
         implemented = bool(capability["implemented"] and source_exists)
-        input_shapes = [_shape(arg) for arg in node.all_input_nodes]
+        input_nodes = list(node.all_input_nodes)
+        input_shapes = [_shape(arg) for arg in input_nodes]
         output_shape = _shape(node)
-        compatible = implemented and _shape_compatible(operation, input_shapes, output_shape)
+        layout_compatible = _inputs_layout_compatible(input_nodes)
         if implemented:
             library_sources.add(str(source))
         reference = capability.get("reference")
@@ -119,12 +129,14 @@ def build_kernel_manifest(
             "library_source": source if implemented else None,
             "validation_reference": reference if reference_exists else None,
             "implemented": implemented,
-            "shape_compatible": compatible,
+            "shape_compatible": _shape_compatible(operation, input_shapes, output_shape),
+            "layout_compatible": layout_compatible,
             "supports": capability.get("supports"),
         })
 
     kernels_supported = not unsupported and all(
-        item["implemented"] and item["shape_compatible"] for item in bindings
+        item["implemented"] and item["shape_compatible"] and item["layout_compatible"]
+        for item in bindings
     )
     if not kernels_supported:
         kernel_blocker = "At least one graph operation is unsupported or incompatible with its library kernel."

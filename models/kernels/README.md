@@ -13,7 +13,9 @@ kernel ABI and Atalla-specific tile transfers and compute.
 - `prompt.md`: compiler-team workflow for analyzing compiler and validation-kernel changes.
 
 The elementwise routines consume padded row-major 32x32 BF16 tiles, matching the
-current runner allocator. Add and multiply require matching shapes/tile grids; add also supports a rank-1
+current runner allocator. They require canonical contiguous tile order; transpose,
+permute, and sliced view inputs are rejected by the capability manifest because
+`GlobalTile` does not yet carry strides or offsets. Add and multiply require matching shapes/tile grids; add also supports a rank-1
 right-hand bias matching the output’s trailing dimension. Scalar multiply and ReLU
 require matching input/output shapes. ReLU ignores its optional bias argument. Each function returns
 zero on success and a negative value when the descriptor tile counts disagree.

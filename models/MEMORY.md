@@ -65,7 +65,7 @@ Read `past-years-reports/AtallaGraph_SystemsSoftware_Report_Final.pdf` (and comp
 ## Kernel package and compiler-team workflow
 
 - `kernels/kernels.h` is the C descriptor/function ABI included by generated schedules. Descriptors carry shape, tile grid, and per-tile DRAM byte addresses. `kernels/include/sdma.h` centralizes the SDMA control-word fields and 32x32 presets.
-- `kernels/src/elementwise.c` processes padded 32x32 BF16 tiles; supported broadcasts and shape preconditions are declared in `kernels/capabilities.json`.
+- `kernels/src/elementwise.c` processes padded 32x32 BF16 tiles; supported broadcasts and shape preconditions are declared in `kernels/capabilities.json`. `kernel_backend.py` rejects view inputs because the current `GlobalTile` ABI has no stride/offset fields and the allocator aliases views.
 - `kernels/Makefile` compiles the shared object through the selected compiler submodule; generated objects stay under ignored `kernels/build/`.
 - `kernels/prompt.md` guides compiler optimization review and propagation into the library. `kernels/COMPILER_BASELINE` records the last reviewed compiler source revision; advance it only after review and validation.
 - GEMM, convolution, and pooling remain unavailable; their declarations reserve the schedule ABI, not implementations. `kernel_manifest.json` must continue to reject graphs requiring them.
