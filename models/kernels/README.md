@@ -1,49 +1,36 @@
 # Atalla graph kernels
 
-This directory is the shared, callable kernel package for `atalla-model-runner`.
-Kernel code here is independent of FX/PyTorch. The runner owns graph lowering,
-node ordering, addresses, and per-node descriptors; this package owns the graph
-kernel ABI and Atalla-specific tile transfers and compute.
+`kernels/` is the callable library linked into graph ELFs. `kernels.h` is the
+public `GlobalTile` ABI; each descriptor has logical shape, tile grid, and
+absolute DRAM addresses for padded 32x32 BF16 tiles. The runner creates the
+schedule and data image; kernel code contains Atalla memory and compute logic.
 
-## Layout
+- `src/elementwise.c`: add, multiply, scalar multiply, and ReLU.
+- `src/matmul.c`: rank-2 tiled GEMM, using `load_weights` and `gemm` from the
+  compiler's tiled validation program.
+- `src/spatial.c`: rank-4 NCHW convolution through runtime im2col packing and
+  GEMM, rank-4 max pooling, and rank-4 to rank-2 flattening.
+- `include/sdma.h`: SDMA control-word encoding and 32x32 presets.
+- `capabilities.json`: operation/source map used to reject unsupported graphs.
+- `prompt.md`: compiler-team workflow for propagating new optimizations.
 
-- `kernels.h`: public descriptor and function ABI used by generated schedules.
-- `include/sdma.h`: shared SDMA control-word field encoding and tile presets.
-- `src/elementwise.c`: shared add, multiply, scalar multiply, and ReLU tile kernels.
-- `prompt.md`: compiler-team workflow for analyzing compiler and validation-kernel changes.
+The spatial adapter uses packed 32-bit scalar loads/stores for BF16 values
+because the selected Atalla C frontend does not parse `short`. Its 32x32 GEMM
+scratch buffers are shared across sequential graph calls. `spatial.c` builds at
+`-O0` because the current compiler's `-O2` clean pass crashes on its nested
+loops; other sources build at `-O2`. The graph schedule remains the only per-model
+C source, and no per-node kernel copies are created.
 
-The elementwise routines consume padded row-major 32x32 BF16 tiles, matching the
-current runner allocator. They require canonical contiguous tile order; transpose,
-permute, and sliced view inputs are rejected by the capability manifest because
-`GlobalTile` does not yet carry strides or offsets. Add and multiply require matching shapes/tile grids; add also supports a rank-1
-right-hand bias matching the output’s trailing dimension. Scalar multiply and ReLU
-require matching input/output shapes. ReLU ignores its optional bias argument. Each function returns
-zero on success and a negative value when the descriptor tile counts disagree.
+Build the library with `make -C kernels`, or build a whole model with
+`python build_model.py --model basic`. The compiler submodule stays unchanged.
+Standalone validation files under `aihw-ppci-compiler/test_validation_kernels`
+are optimization references, not callable graph kernels. Compiler contributors
+can edit these library sources directly and use `prompt.md` to review and
+propagate new compiler behavior.
 
-## Build
-
-From the repository root, compile the current library object with:
-
-```bash
-make -C kernels
-```
-
-The object is written under the ignored `kernels/build/` directory. This is a
-compile-only step; graph-level golden validation is not wired to the package yet. Override
-`PYTHON`, `COMPILER`, or `BUILD_DIR` for a local compiler checkout or build path.
-
-## Compiler-team workflow
-
-Kernel sources are ordinary Atalla C and can be optimized independently from the
-FX graph pipeline. Keep public signatures in `kernels.h` stable; record a deliberate
-ABI change there and update the generated schedule and manifest together. Preserve
-a clear baseline implementation when adding a specialized variant, and document the
-variant's required tile layout and geometry beside its dispatch entry.
-
-The current compiler validation programs remain standalone goldens and optimization
-references. They are not included into this library and are not copied per graph
-node. The package currently implements elementwise kernels; matrix, convolution,
-and pooling declarations remain unavailable until their graph tile/data-layout
-contracts are implemented. The reviewed compiler revision is tracked in `COMPILER_BASELINE` and
-`capabilities.json`; the compiler submodule remains unchanged. The runner manifest must keep those operations marked
-unsupported so an ELF build cannot silently resolve them to placeholder behavior.
+Current boundaries: matrix kernels support rank-2 BF16 tensors; spatial kernels
+support rank-4 NCHW inputs. Max pooling accepts unit dilation and no ceil mode.
+Average pooling, layer normalization, GELU, attention, and other operators are
+not implemented. The build manifest must reject such graphs rather than link a
+placeholder function. A linked ELF proves layout and symbol resolution; graph
+numerical equivalence still needs simulator or hardware execution.

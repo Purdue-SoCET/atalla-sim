@@ -41,7 +41,7 @@ def build_graph(model: nn.Module, example_input: torch.Tensor) -> GraphModule:
 def run_schedule(graph_module: GraphModule, example_input: torch.Tensor, out_dir: Path) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     placeholder_data = {"x": example_input.bfloat16().clone()}
-    allocated = allocate_memory(graph_module, str(out_dir / "dram.bin"), placeholder_data)
+    allocated = allocate_memory(graph_module, str(out_dir / "dram.bin"), placeholder_data, base_addr=0x80000)
     code = emit(allocated)
     output_path = out_dir / "graph_schedule.c"
     output_path.write_text(code)
@@ -57,7 +57,8 @@ def run_schedule(graph_module: GraphModule, example_input: torch.Tensor, out_dir
         print(f"  {call[:100]}")
     if len(kernel_calls) > 8:
         print(f"  ... ({len(kernel_calls) - 8} more)")
-    print("Schedule emission is partial for ops without a generate_schedule lowering.")
+    if manifest["unsupported"]:
+        print("Schedule emission omitted unsupported graph operations; see the manifest.")
     print(
         f"Kernel source bindings: {len(manifest['bindings'])}; "
         f"kernel coverage: {manifest['kernel_coverage']}; ELF linkable: {manifest['linkable']}"

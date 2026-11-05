@@ -134,10 +134,10 @@ def assign_address(node: Node, next_addr: int) -> Tuple[int, int, int]:
     return aligned_addr, allocation_size, aligned_addr + allocation_size
 
 
-def allocate_memory(gm: GraphModule, bin_path: str, placeholder_data: Optional[Dict[str, torch.Tensor]] = None) -> GraphModule:
+def allocate_memory(gm: GraphModule, bin_path: str, placeholder_data: Optional[Dict[str, torch.Tensor]] = None, base_addr: int = 0) -> GraphModule:
     placeholder_data = placeholder_data or {}
-    next_addr = 0
-    written = 0
+    next_addr = base_addr
+    written = base_addr
 
     with open(bin_path, "wb") as dram_file:
         for node in gm.graph.nodes:
@@ -150,12 +150,19 @@ def allocate_memory(gm: GraphModule, bin_path: str, placeholder_data: Optional[D
                 # Treat non-bf16 tensors (e.g., attention bias indices) as compile-time constants.
                 continue
             view_src = _view_source(node)
-            if view_src is not None and "dram_addr" in view_src.meta:
+            materialized = None
+            if view_src is not None and node.op == "call_method" and node.target == "transpose":
+                source_value = tensor_for_node(view_src, gm, placeholder_data)
+                if source_value is not None:
+                    materialized = source_value.transpose(int(node.args[1]), int(node.args[2]))
+            if view_src is not None and materialized is None and "dram_addr" in view_src.meta:
                 node.meta["dram_addr"] = view_src.meta["dram_addr"]
                 node.meta["bytes"] = view_src.meta["bytes"]
                 continue
             start, size, next_addr = assign_address(node, next_addr)
-            tensor_value = tensor_for_node(node, gm, placeholder_data)
+            if materialized is not None:
+                node.meta["materialized_view"] = True
+            tensor_value = materialized if materialized is not None else tensor_for_node(node, gm, placeholder_data)
             payload = tensor_bytes(tensor_value, size) if tensor_value is not None else bytes(size)
             written = _write_binary_payload(dram_file, written, start, payload)
 

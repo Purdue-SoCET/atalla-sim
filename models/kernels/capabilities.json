@@ -27,25 +27,25 @@
       "supports": "same input/output shape and tile grid"
     },
     "matmul": {
-      "implemented": false,
-      "source": null,
+      "implemented": true,
+      "source": "src/matmul.c",
       "abi_symbol": "matmul_kernel",
       "reference": "aihw-ppci-compiler/test_validation_kernels/gemm_tiled_pipelined.c",
-      "supports": null
+      "supports": "rank-2 BF16 matrices with 32x32 padded tiles; transpose views of constant weights are materialized"
     },
     "conv2d": {
-      "implemented": false,
-      "source": null,
+      "implemented": true,
+      "source": "src/spatial.c",
       "abi_symbol": "conv_kernel",
       "reference": "aihw-ppci-compiler/test_validation_kernels/conv_pipelined.c",
-      "supports": null
+      "supports": "rank-4 NCHW BF16 convolution packed into shared 32x32 GEMM blocks"
     },
     "max_pool2d": {
-      "implemented": false,
-      "source": null,
+      "implemented": true,
+      "source": "src/spatial.c",
       "abi_symbol": "maxpool_kernel",
       "reference": "aihw-ppci-compiler/test_validation_kernels/maxpool_2x2.c",
-      "supports": null
+      "supports": "rank-4 NCHW BF16 max pooling, unit dilation, no ceil mode"
     },
     "avg_pool2d": {
       "implemented": false,
@@ -53,6 +53,12 @@
       "abi_symbol": "avgpool_kernel",
       "reference": null,
       "supports": null
+    },
+    "flatten": {
+      "implemented": true,
+      "source": "src/spatial.c",
+      "abi_symbol": "flatten_kernel",
+      "supports": "rank-4 NCHW to rank-2 flatten from dimension 1"
     }
   },
   "compiler_reference_revision": "351b5fabf76fa3352ebc2e9571e9793d53c7cbe6"

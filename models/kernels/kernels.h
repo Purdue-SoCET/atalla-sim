@@ -43,6 +43,7 @@ int maxpool_kernel(const GlobalTile *input, GlobalTile *output,
                    int kernel_h, int kernel_w, int stride_h, int stride_w,
                    int pad_h, int pad_w, int dilation_h, int dilation_w,
                    int ceil_mode);
+int flatten_kernel(const GlobalTile *input, GlobalTile *output);
 int avgpool_kernel(const GlobalTile *input, GlobalTile *output,
                    int kernel_h, int kernel_w, int stride_h, int stride_w,
                    int pad_h, int pad_w, int global_pool);

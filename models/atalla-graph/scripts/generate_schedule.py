@@ -480,6 +480,10 @@ def _render_call(
         return None
     if node.target in IGNORED_FUNCTIONS:
         return None
+    if node.target is torch.flatten:
+        src = _tensor_ref(_get_node_arg(node, 0), specs)
+        dst = _tensor_ref(node, specs)
+        return f"    flatten_kernel({src}, {dst});\n"
     if node.target in MATMUL_TARGETS:
         lhs = _tensor_ref(_get_node_arg(node, 0), specs)
         rhs = _tensor_ref(_get_node_arg(node, 1), specs)
@@ -507,18 +511,28 @@ def _render_call(
             tensor_ref = rhs_ref if lhs_scalar is not None else lhs_ref
             if tensor_ref is None or scalar is None:
                 raise ValueError(f"Mul node {node.name} lacks tensor operand for scalar multiply")
-            return f"    mul_scalar_kernel({tensor_ref}, {dst}, {scalar:.6g}f);\n"
+            return f"    mul_scalar_kernel({tensor_ref}, {dst}, {scalar:.6f});\n"
         if lhs_ref is None or rhs_ref is None:
             raise ValueError(f"Mul node {node.name} lacks tensor operands")
         return f"    mul_kernel({lhs_ref}, {rhs_ref}, {dst});\n"
     if node.target in ADD_TARGETS:
         lhs, rhs, alpha = _add_operands(node, specs, scaled_mul)
         dst = _tensor_ref(node, specs)
-        return f"    add_kernel({lhs}, {rhs}, {dst}, {alpha:.6g}f);\n"
+        return f"    add_kernel({lhs}, {rhs}, {dst}, {alpha:.6f});\n"
     if node.target in RELU_TARGETS:
         src = _tensor_ref(_get_node_arg(node, 0), specs)
         dst = _tensor_ref(node, specs)
         return f"    relu_kernel({src}, {dst}, NULL);\n"
+    if node.target is F.max_pool2d:
+        input_node = _get_node_arg(node, 0)
+        kernel = _as_pair(node.kwargs.get("kernel_size", node.args[1] if len(node.args) > 1 else 1))
+        stride_value = node.kwargs.get("stride", node.args[2] if len(node.args) > 2 else None)
+        stride = _as_pair(stride_value if stride_value is not None else kernel)
+        padding = _as_pair(node.kwargs.get("padding", node.args[3] if len(node.args) > 3 else 0))
+        dilation = _as_pair(node.kwargs.get("dilation", node.args[4] if len(node.args) > 4 else 1))
+        ceil_flag = 1 if node.kwargs.get("ceil_mode", node.args[5] if len(node.args) > 5 else False) else 0
+        return _format_maxpool_call(_tensor_ref(input_node, specs), _tensor_ref(node, specs),
+                                    kernel, stride, padding, dilation, ceil_flag)
     if node.target in CONV_TARGETS:
         input_node = _get_node_arg(node, 0)
         weight_node = node.args[1]

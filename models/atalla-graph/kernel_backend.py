@@ -35,6 +35,8 @@ def _classify(gm: GraphModule, node: Node) -> str | None:
         return "relu"
     if target is F.conv2d:
         return "conv2d"
+    if target is torch.flatten:
+        return "flatten"
     if target is F.max_pool2d:
         return "max_pool2d"
     if target is F.avg_pool2d:
@@ -60,7 +62,7 @@ def _classify(gm: GraphModule, node: Node) -> str | None:
 
 def _inputs_layout_compatible(inputs: list[Node]) -> bool:
     for node in inputs:
-        if node.op == "call_method" and str(node.target).strip("'") in _VIEW_METHODS:
+        if node.op == "call_method" and str(node.target).strip("'") in _VIEW_METHODS and not node.meta.get("materialized_view"):
             return False
         if node.op == "call_function" and node.target is operator.getitem:
             return False
@@ -68,7 +70,24 @@ def _inputs_layout_compatible(inputs: list[Node]) -> bool:
 
 
 def _shape_compatible(operation: str, inputs: list[list[int] | None], output: list[int] | None) -> bool:
-    if output is None or not inputs or inputs[0] != output:
+    if output is None or not inputs:
+        return False
+    if operation == "conv2d":
+        return (len(inputs) >= 2 and inputs[0] is not None and inputs[1] is not None
+                and len(inputs[0]) == len(inputs[1]) == len(output) == 4
+                and inputs[0][0] == output[0] and inputs[1][0] == output[1])
+    if operation == "max_pool2d":
+        return inputs[0] is not None and len(inputs[0]) == len(output) == 4 and inputs[0][:2] == output[:2]
+    if operation == "flatten":
+        return (inputs[0] is not None and len(inputs[0]) == 4 and len(output) == 2
+                and inputs[0][0] == output[0]
+                and inputs[0][1] * inputs[0][2] * inputs[0][3] == output[1])
+    if operation == "matmul":
+        return (len(inputs) >= 2 and inputs[0] is not None and inputs[1] is not None
+                and len(inputs[0]) == len(inputs[1]) == len(output) == 2
+                and inputs[0][1] == inputs[1][0]
+                and output == [inputs[0][0], inputs[1][1]])
+    if inputs[0] != output:
         return False
     if operation in ("relu", "mul_scalar"):
         return True
@@ -82,6 +101,24 @@ def _shape_compatible(operation: str, inputs: list[list[int] | None], output: li
             rhs is not None and len(rhs) == 1 and len(output) > 1 and rhs[0] == output[-1]
         )
     return False
+
+
+def _parameters_compatible(gm: GraphModule, node: Node, operation: str) -> bool:
+    if operation == "max_pool2d":
+        if node.op == "call_module":
+            module = gm.get_submodule(str(node.target))
+            return (module.dilation == 1 or module.dilation == (1, 1)) and not module.ceil_mode
+        dilation = node.kwargs.get("dilation", node.args[4] if len(node.args) > 4 else 1)
+        ceil_mode = node.kwargs.get("ceil_mode", node.args[5] if len(node.args) > 5 else False)
+        return (dilation == 1 or dilation == (1, 1)) and not ceil_mode
+    if operation == "conv2d":
+        groups = int(node.kwargs.get("groups", 1))
+        return groups >= 1
+    if operation == "flatten":
+        start = node.args[1] if len(node.args) > 1 else node.kwargs.get("start_dim", 0)
+        end = node.args[2] if len(node.args) > 2 else node.kwargs.get("end_dim", -1)
+        return start == 1 and end == -1
+    return True
 
 
 def build_kernel_manifest(
@@ -116,6 +153,7 @@ def build_kernel_manifest(
         input_shapes = [_shape(arg) for arg in input_nodes]
         output_shape = _shape(node)
         layout_compatible = _inputs_layout_compatible(input_nodes)
+        parameters_compatible = _parameters_compatible(gm, node, operation)
         if implemented:
             library_sources.add(str(source))
         reference = capability.get("reference")
@@ -131,11 +169,12 @@ def build_kernel_manifest(
             "implemented": implemented,
             "shape_compatible": _shape_compatible(operation, input_shapes, output_shape),
             "layout_compatible": layout_compatible,
+            "parameters_compatible": parameters_compatible,
             "supports": capability.get("supports"),
         })
 
     kernels_supported = not unsupported and all(
-        item["implemented"] and item["shape_compatible"] and item["layout_compatible"]
+        item["implemented"] and item["shape_compatible"] and item["layout_compatible"] and item["parameters_compatible"]
         for item in bindings
     )
     if not kernels_supported:
@@ -153,7 +192,5 @@ def build_kernel_manifest(
         "unsupported": unsupported,
         "kernel_coverage": kernels_supported,
         "linkable": False,
-        "link_blocker": kernel_blocker or (
-            "ELF compilation and DRAM-image packaging are not implemented yet."
-        ),
+        "link_blocker": kernel_blocker or "Schedule emitted; run build_model.py to compile and link its ELF.",
     }
