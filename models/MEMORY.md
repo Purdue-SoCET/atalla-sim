@@ -5,9 +5,9 @@ Living codebase notes for the graph-to-ELF work. Update this file as new behavio
 ## Repository boundaries
 
 - `atalla-model-runner` is the active implementation repository. Keep commits here only.
-- `aihw-ppci-compiler` is a submodule pinned at `fda4960406fe17ca2a2379be20ea875462b321d2` (`gemm 512, 1024 variants`). Do not commit changes in that repository.
-- Current runner support is schedule emission only: `atalla-graph/run_schedule.py` writes `graph_schedule.c` and `dram.bin`.
-- The runner has no `codegen/c_emitter.py` or per-op kernel builders. In `atalla-models`, the per-node `.c` generation used by validation is in `atalla-graph/codegen/c_emitter.py`; its C builders are loaded from `functional_sim/kernels`.
+- `aihw-ppci-compiler` is checked out on `atalla-arch` at `351b5fabf76fa3352ebc2e9571e9793d53c7cbe6` (latest kernel validation status is documented in `test_validation_kernels/KERNEL_STATUS.md`). Keep compiler source changes out of this task; only runner commits are allowed.
+- Current runner support is schedule emission plus source-binding metadata: `atalla-graph/run_schedule.py` writes `graph_schedule.c`, `dram.bin`, and `kernel_manifest.json`. The manifest references one compiler source per operation type and records that adapters are still required.
+- The runner has no `codegen/c_emitter.py` or per-op kernel builders. `atalla-graph/kernel_backend.py` now maps graph ops to shared compiler validation source paths; it does not copy or adapt the source bodies. In `atalla-models`, the per-node `.c` generation used by validation is in `atalla-graph/codegen/c_emitter.py`; its C builders are loaded from `functional_sim/kernels`.
 
 ## Current graph schedule and memory
 
@@ -23,8 +23,8 @@ Living codebase notes for the graph-to-ELF work. Update this file as new behavio
 
 - Each file defines `main()` and calls `atalla_halt()`; they are standalone programs.
 - They read a fixed config-table base `0x3c` and several use compile-time shape/layout constants.
-- Examples at the pinned compiler revision: `add.c` uses 4 rows x 32 columns; `relu.c` uses 4 x 32; `softmax.c` uses one 32-column row; `maxpool.c` uses an 8x8 input and 4x8 output; `conv_baseline.c` fixes M=4, K_FLAT=27, K_OUT=4; `gemm_tiled_*` fixes TILE=4 while reading matrix dimensions/tile counts from the config table. `maxpool_2x2.c` is another specialized 8x8 test.
-- `gemm_tiled_pipelined.c` and `conv_pipelined.c` are selected optimized variants; the test files still have validation-sized geometry and some tests are known to have limitations in later compiler history.
+- Examples at the runner’s recorded compiler revision: `add.c` uses 4 rows x 32 columns; `relu.c` uses 4 x 32; `softmax.c` uses one 32-column row; `maxpool.c` uses an 8x8 input and 4x8 output; `conv_baseline.c` fixes M=4, K_FLAT=27, K_OUT=4; `gemm_tiled_*` fixes TILE=4 while reading matrix dimensions/tile counts from the config table. `maxpool_2x2.c` is another specialized 8x8 test.
+- `gemm_tiled_pipelined.c` and `conv_pipelined.c` are optimized validation variants. The current latest `atalla-arch` checkout reports all 12 validation kernels passing against numerical goldens, but they remain fixed-geometry standalone programs rather than graph-callable kernels.
 - They cannot be called from the emitted graph as-is: their `main`/halt behavior, fixed geometries, and config ABI do not match `GlobalTile*` arguments. Reuse needs a callable adapter/config ABI, plus shape/layout compatibility checks.
 
 ## Previous whole-graph attempt (`../xmas`)
@@ -50,3 +50,13 @@ Read `past-years-reports/AtallaGraph_SystemsSoftware_Report_Final.pdf` (and comp
 - Ensure each required graph op/model shape is compatible with the selected pre-made kernel algorithm; fail early for unsupported layouts instead of emitting a misleading ELF.
 - Produce a single ELF with resolved function/global relocations and a documented mapping for the DRAM image and config table. Do not assume linking `dram.bin` happens automatically.
 - Keep the compiler submodule unchanged; runner-owned adapters/build scripts should contain this integration work.
+
+
+## Adapter feasibility update (2026-11-05, latest atalla-arch checkout)
+
+- The validation C files are not parameterized kernel libraries. Their SDMA control words encode row count, vector width, and DRAM row stride in immediates; changing only `ROWS` or the config table does not retarget the transfer geometry.
+- The runner allocator stores every rank-2 tensor as 32x32 tiles with a 32-element row stride, while validation `add.c`/`relu.c` process 4x32 contiguous rows (the encoded control words are fixed). Even when a graph tensor has a 4x32 logical shape, its storage is still a padded 32x32 tile, so its row stride differs.
+- `gemm_tiled_pipelined.c` fixes the compute tile to 4x4 and its SDMA controls assume 8-wide matrices. Runner descriptors use 32x32 tiles and contain only tile base addresses, not the packed matrix buffers expected by that test.
+- `conv_pipelined.c` is a GEMM over an im2col matrix, not a direct NCHW convolution kernel. The old emitter explicitly materializes im2col and transposed/flattened weights; current runner allocation does neither.
+- Therefore a callable wrapper alone cannot safely turn these files into graph kernels. A valid adapter needs either a compiler-side generic kernel ABI, or runner data-layout/packing and schedule changes that reproduce each template's expected SDMA layout. It must reject incompatible graphs. No compiler files were changed.
+- The PPCI linker layout puts `.data` at `0x80000`, while graph addresses begin at zero; including `dram.bin` as an ELF C object is not sufficient without moving graph allocations/config to a non-overlapping linker region and proving emitted section addresses.

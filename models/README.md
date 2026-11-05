@@ -3,10 +3,9 @@
 Schedule-only model frontend for Atalla. The graph capture, lowering, tile planning,
 DRAM allocation, and schedule emitter are ported from `atalla-models/atalla-graph`.
 The runner emits the scheduled graph as `graph_schedule.c` plus its tiled `dram.bin`;
-it does not generate C kernel implementations.
+it does not generate C kernel implementations. It also writes `kernel_manifest.json`, which maps graph operations to shared validation source files without copying those files per node and records adapter/layout blockers.
 
-The `aihw-ppci-compiler` submodule is pinned to the compiler revision used by
-`atalla-models` and contains the optimized kernels used downstream.
+The `aihw-ppci-compiler` submodule is checked out at the latest `atalla-arch` revision selected for this runner and contains the optimized validation kernels used downstream.
 
 ## Setup
 
@@ -25,4 +24,4 @@ python atalla-graph/run_schedule.py --model alexnet_small --scale 0.01 --out-dir
 ```
 
 Supported models are `basic` and `alexnet_small`. Schedule lowering is partial for
-operators that do not yet have a `generate_schedule.py` lowering.
+operators that do not yet have a `generate_schedule.py` lowering. The manifest is a source-binding/preflight artifact; it does not mean the standalone validation programs can yet be linked as graph kernels.

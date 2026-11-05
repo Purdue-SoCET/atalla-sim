@@ -33,15 +33,15 @@
 **Files:** `MEMORY.md`, `docs/kernel-linking-design.md`
 
 - [x] Record current runner flow, graph allocator layout, old `xmas` wiring, validation source ABI, and report findings.
-- [ ] Keep verified mismatches and unsupported geometry visible in the memory file.
+- [x] Keep verified mismatches and unsupported geometry visible in the memory file.
 
 ### Task 2: Add a shared kernel adapter and invocation manifest
 
 **Files:** `atalla-graph/kernel_backend.py`, `atalla-graph/scripts/generate_schedule.py`, runner-owned adapter source/templates
 
-- [ ] Map each supported FX op to a compiler validation-kernel source and optimized variant.
-- [ ] Represent node-specific tensor addresses, shapes, strides, and op parameters as invocation records.
-- [ ] Adapt each source once into a callable symbol and reject geometry the source cannot cover.
+- [x] Map currently classified FX ops to shared compiler validation-kernel source paths and optimized variants in `kernel_backend.py`.
+- [x] Record per-node operation and tensor shapes in `kernel_manifest.json`; addresses/strides/config records remain future work.
+- [ ] Adapt each source once into a callable symbol and reject geometry the source cannot cover. (Blocked until the graph tile layout is reconciled with fixed validation SDMA layouts.)
 
 ### Task 3: Package graph data and link the ELF
 

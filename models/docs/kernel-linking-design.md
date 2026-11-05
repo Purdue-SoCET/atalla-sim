@@ -14,13 +14,13 @@
 
 ## Design
 
-The graph pass retains `GlobalTile` metadata (logical shape, tile grid, tile addresses) and lowers each supported node to a typed invocation record. A shared entry point for each operation consumes records and routes to the selected optimized implementation. The adapter isolates the test-kernel ABI (`main`, fixed config base, shape constants) from the graph ABI; the compiler repository remains unchanged.
+The graph pass retains `GlobalTile` metadata (logical shape, tile grid, tile addresses) and lowers each supported node to a typed invocation record. The validation files cannot yet be adapted by a callable wrapper alone: their immediate SDMA control words and loop bounds encode their fixed validation layout, while the runner uses 32x32 padded tiles. GEMM additionally expects an 8-wide matrix layout and 4x4 compute tiles, and convolution consumes im2col input. A safe adapter must therefore validate/repack the graph data layout or the templates must gain a generic callable ABI. Until that boundary exists, the build must reject the mismatch rather than emit calls that appear linked but compute incorrect data. The compiler repository remains unchanged.
 
-The build tool emits graph code, adapter translation units, and the model DRAM payload, compiles them with the pinned `aihw-ppci-compiler`, and links one ELF. The linker/data layout reserves the fixed config area and places graph payload at a documented base; generated references must be relocatable or derived from linker symbols. The ELF and standalone `dram.bin` must represent the same payload and address map until the ELF loader path is confirmed end to end.
+A future build tool must emit graph code, compatible adapter translation units, and the model DRAM payload, then compile/link them with the pinned `aihw-ppci-compiler`. Before linking, the graph allocator and linker layout must agree on a non-overlapping config and tensor address map. The ELF and standalone `dram.bin` must represent the same payload and address map until the ELF loader path is confirmed end to end.
 
 ## Constraints and risks
 
-- Current test files are validation-sized, not a complete generic kernel library. The adapter must reject unsupported operation geometry/layout instead of silently generating incorrect code.
+- The latest `atalla-arch` checkout reports all 12 validation kernels passing numerical validation, but the test files remain validation-sized rather than a generic kernel library. Their fixed SDMA controls and tile geometry cannot be made graph-callable by renaming `main` or changing config words. A repacking or generic-kernel step is required; unsupported operation geometry/layout must be rejected.
 - GEMM expects weight/layout and SDMA strides that may differ from the graph's tiled representation; convolution tests may expect im2col-like inputs. These must be explicitly reconciled.
 - The graph allocator currently assigns monotonically increasing 2 KiB tiles from address zero, while the report describes liveness reuse. The config table at `0x3c`, graph tensors, and compiler `.data` at `0x80000` must not overlap.
 - The current schedule generator calls generic `*_kernel` symbols, while the old `xmas` per-node files export `*_main`; linking objects alone does not connect them.

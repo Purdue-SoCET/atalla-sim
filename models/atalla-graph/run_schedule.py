@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import json
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,7 @@ from graph.memoryallocator import allocate_memory
 from graph.fx_capture import normalize_ops
 from graph.tile_planner import plan_tiles
 from scripts.generate_schedule import emit
+from kernel_backend import build_kernel_manifest
 
 
 def load_model(name: str, scale: float = 0.01):
@@ -43,6 +45,10 @@ def run_schedule(graph_module: GraphModule, example_input: torch.Tensor, out_dir
     code = emit(allocated)
     output_path = out_dir / "graph_schedule.c"
     output_path.write_text(code)
+    compiler_root = Path(__file__).resolve().parents[1] / "aihw-ppci-compiler"
+    manifest = build_kernel_manifest(allocated, compiler_root)
+    manifest_path = out_dir / "kernel_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
     kernel_calls = [line.strip() for line in code.splitlines() if "_kernel(" in line]
     print(f"Schedule: {len(code.splitlines())} lines, {len(kernel_calls)} kernel calls -> {output_path}")
     for call in kernel_calls[:8]:
@@ -50,6 +56,7 @@ def run_schedule(graph_module: GraphModule, example_input: torch.Tensor, out_dir
     if len(kernel_calls) > 8:
         print(f"  ... ({len(kernel_calls) - 8} more)")
     print("Schedule emission is partial for ops without a generate_schedule lowering.")
+    print(f"Kernel source bindings: {len(manifest['bindings'])}; adapter/layout blockers recorded in {manifest_path}")
     return output_path
 
 
