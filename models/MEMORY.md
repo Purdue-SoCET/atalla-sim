@@ -173,3 +173,10 @@ The following findings supersede the earlier numerical limitations:
 
 - The runner now mounts `atalla-sim` beside `aihw-ppci-compiler` as a pinned submodule. `verify_model.py` and focused numerical tests default to the runner-local simulator.
 - Build and numerical verification require only the two direct submodules. The simulator's nested compiler, functional simulator, and Ramulator submodules serve its own optional tooling; the runner uses its direct compiler submodule.
+
+## Compiler baseline review (2026-11-05)
+
+- The pinned `aihw-ppci-compiler` `atalla-arch` revision is `351b5fabf76fa3352ebc2e9571e9793d53c7cbe6`, exactly the revision in `kernels/COMPILER_BASELINE`; `git diff <baseline>..HEAD` is empty. The submodule URL changed, but the pinned source revision did not.
+- Reviewed `test_validation_kernels/KERNEL_STATUS.md` and the current `add.c`, `relu.c`, `gemm_tiled_pipelined.c`, `conv_pipelined.c`, and `maxpool_2x2.c` against runner elementwise, matmul, and spatial code. Their standalone fixed-geometry setup is not a graph ABI change. No new compiler optimization, ISA, syntax, or packetization delta is available to propagate. The runner retains explicit masked merges, padded 32x32 tile movement, packed weight order, and DMA dependencies.
+- Focused `test_matmul`, `test_convolution`, `test_maxpool`, and `test_relu`: 4 passed in 23.09s. `verify_model.py --model basic` linked and ran the local simulator: status 0, 41,063 cycles, all nine scheduled results passed with cosine 1.0 and zero absolute error. No full spatial-model run was needed because no library or compiler source changed.
+- `kernels/COMPILER_BASELINE`, capabilities, and ABI remain unchanged. The existing unsupported operations and layout limits still apply.
