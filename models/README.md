@@ -43,8 +43,9 @@ python verify_model.py --model alexnet_small --out-dir out/graph
 The verifier builds and loads the actual ELF, runs with strict simulator
 packet checks, requires status zero, and compares every scheduled result
 with the same BF16 PyTorch graph. `numerical_report.json` records per-node
-maximum absolute error, tolerances, cycle count, and the ELF SHA256. The full
-spatial model takes longer; progress is printed every 100,000 cycles. Set
+cosine similarity, maximum and mean absolute error, tolerances, cycle count,
+and the ELF SHA256. The full spatial model takes longer; progress is printed
+every 100,000 cycles. Set
 `--sim-root`, `--seed`, `--scale`, or `--limit` as needed.
 
 To run a built ELF directly:
@@ -53,7 +54,10 @@ To run a built ELF directly:
 python ../atalla-sim/tools/run_kernel.py out/graph/output.elf
 ```
 
-Focused library tests compile small graphs and check their simulator outputs:
+Focused library tests compile small graphs, check cosine similarity (> 0.99
+for nonzero outputs) and absolute error against PyTorch, and cover the reusable
+kernel cases. The metric helper follows the functional simulator convention
+(cosine is zero when either vector has zero norm). Run them with:
 
 ```bash
 python -m pip install pytest

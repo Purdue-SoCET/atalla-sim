@@ -152,3 +152,19 @@ The following findings supersede the earlier numerical limitations:
 - Compiler remains at 351b5fabf76fa3352ebc2e9571e9793d53c7cbe6 with no source
   changes. Simulator source is unchanged; its documented native accelerator
   extension was built locally for execution.
+
+## Cosine metrics in runner validation (2026-11-05)
+
+- The functional simulator's `core/kernel_ops.py::compare_cosine_max_mean`
+  returns cosine similarity, max absolute error, and mean absolute error in
+  float64; cosine is zero when either operand has zero norm. Runner-owned
+  `validation_metrics.py` follows this convention and rejects shape mismatches.
+- `verify_model.py` now writes/prints those three metrics per scheduled output
+  while retaining its PyTorch `allclose` correctness test. The focused pytest
+  suite checks cosine >0.99 for nonzero outputs plus absolute error, and tests
+  helper behavior on perturbed vectors, zero norms, and shape mismatches.
+- Verification: combined metric and kernel suite reported 20 passed in 177.24s;
+  rebuilt `basic` reported cosine 1.0 and zero max/mean error for all nine
+  scheduled results. The shell wrapper used a reserved zsh variable after
+  pytest had completed, so its shell exit was nonzero despite pytest's explicit
+  `20 passed` result; use no `status` variable in zsh command wrappers.

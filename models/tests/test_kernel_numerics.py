@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SIM = Path(os.environ.get('ATALLA_SIM_ROOT', ROOT.parent / 'atalla-sim'))
 sys.path[:0] = [str(ROOT), str(SIM / 'src')]
 import build_model
+from validation_metrics import compare_cosine_max_mean
 from scheduler.elf import load_elf
 from atalla.atalla_platform import build_atalla_platform, c_entry_sregs
 
@@ -57,6 +58,9 @@ def run_case(model, x, directory, *, limit=500_000, atol=0.003, rtol=0.02):
     with torch.no_grad():
         expected = model(x).float().numpy()
     actual = read_tensor(platform, (directory / 'graph_schedule.c').read_text(), output.name, expected.shape)
+    cosine, _, _ = compare_cosine_max_mean(actual, expected)
+    if np.linalg.norm(expected) > 0:
+        assert cosine > 0.99, f"cosine similarity too low: {cosine:.6f}"
     np.testing.assert_allclose(actual, expected, atol=atol, rtol=rtol)
     return platform
 

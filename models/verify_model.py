@@ -11,6 +11,7 @@ import time
 import numpy as np
 import torch
 import build_model
+from validation_metrics import compare_cosine_max_mean
 
 
 def read_tensor(platform, info):
@@ -73,16 +74,17 @@ def verify(model_name, out_dir, sim_root, seed=42, scale=.01, limit=10_000_000, 
         if info['storage_layout']!=0:continue
         actual=read_tensor(platform,info)
         reference=expected[name]
-        error=np.abs(actual-reference)
+        cosine, max_error, mean_error = compare_cosine_max_mean(actual, reference)
         passed=bool(np.allclose(actual,reference,atol=atol,rtol=rtol,equal_nan=True))
-        results.append(dict(node=name,operation=binding['operation'],passed=passed,max_abs=float(np.max(error))))
+        results.append(dict(node=name,operation=binding['operation'],passed=passed,
+            cosine_similarity=cosine,max_abs=max_error,mean_abs=mean_error))
     report=dict(model=model_name,seed=seed,scale=scale,cycles=platform.cycle,status=status,
         elf_sha256=hashlib.sha256(elf.read_bytes()).hexdigest(),
         atol=atol,rtol=rtol,passed=all(r['passed'] for r in results),results=results)
     (out_dir/'numerical_report.json').write_text(json.dumps(report,indent=2)+'\n')
     manifest['numerical_validation']={key:report[key] for key in ('passed','cycles','atol','rtol','elf_sha256')}
     (out_dir/'kernel_manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
-    for r in results:print(f"{'PASS' if r['passed'] else 'FAIL'} {r['node']}: max abs error {r['max_abs']:.6g}")
+    for r in results:print(f"{'PASS' if r['passed'] else 'FAIL'} {r['node']}: cos {r['cosine_similarity']:.6f}; max abs {r['max_abs']:.6g}; mean abs {r['mean_abs']:.6g}")
     print(f"{model_name}: {'PASS' if report['passed'] else 'FAIL'}; {platform.cycle:,} cycles; status {status}")
     return report
 
