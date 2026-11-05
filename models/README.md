@@ -1,12 +1,19 @@
 # atalla-model-runner
 
 Schedule-only model frontend for Atalla. The graph capture, lowering, tile planning,
-DRAM allocation, and C schedule emitter are ported from `atalla-models/atalla-graph`.
-This runner does not include the emulator validation pipeline.
+DRAM allocation, and schedule emitter are ported from `atalla-models/atalla-graph`.
+The runner emits the scheduled graph as `graph_schedule.c` plus its tiled `dram.bin`;
+it does not generate C kernel implementations.
 
-## Requirements
+The `aihw-ppci-compiler` submodule is pinned to the compiler revision used by
+`atalla-models` and contains the optimized kernels used downstream.
 
-Python 3.10+ with PyTorch and NumPy installed.
+## Setup
+
+```bash
+git submodule update --init --recursive
+python -m pip install torch numpy
+```
 
 ## Emit a schedule
 
@@ -17,6 +24,5 @@ python atalla-graph/run_schedule.py --model basic --out-dir out/basic
 python atalla-graph/run_schedule.py --model alexnet_small --scale 0.01 --out-dir out/alexnet
 ```
 
-Each run writes `graph_schedule.c` and a tiled `dram.bin` into the output directory.
 Supported models are `basic` and `alexnet_small`. Schedule lowering is partial for
 operators that do not yet have a `generate_schedule.py` lowering.
