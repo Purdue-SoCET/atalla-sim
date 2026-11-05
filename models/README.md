@@ -7,11 +7,16 @@ emits one graph schedule and embeds all initialized tensor data in the ELF.
 ## Build
 
 ```bash
-git submodule update --init --recursive
+git submodule update --init aihw-ppci-compiler atalla-sim
 python -m pip install torch numpy
 python build_model.py --model basic --out-dir out/basic
 python build_model.py --model alexnet_small --scale 0.01 --out-dir out/graph
 ```
+
+The compiler submodule is needed to build; the simulator submodule is needed
+to execute and verify. Their nested submodules are optional for this workflow; initialize those separately for their own validation
+tools. The simulator's native extension is optional and can be built with
+`make -C atalla-sim native` for faster execution.
 
 The output directory contains `output.elf`, `dram.bin`, `graph_schedule.c`,
 `kernel_manifest.json`, `tensor_manifest.json`, a linker layout, objects, and
@@ -33,7 +38,7 @@ active. The compiler submodule has no source modifications.
 
 ## Execute and check numerical results
 
-With the sibling `atalla-sim` checkout available:
+The pinned `atalla-sim` submodule runs the linked ELF:
 
 ```bash
 python verify_model.py --model basic --out-dir out/basic
@@ -51,7 +56,7 @@ every 100,000 cycles. Set
 To run a built ELF directly:
 
 ```bash
-python ../atalla-sim/tools/run_kernel.py out/graph/output.elf
+python atalla-sim/tools/run_kernel.py out/graph/output.elf
 ```
 
 Focused library tests compile small graphs, check cosine similarity (> 0.99

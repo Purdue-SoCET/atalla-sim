@@ -5,7 +5,7 @@ Living codebase notes for the graph-to-ELF work. Update this file as new behavio
 ## Repository boundaries
 
 - `atalla-model-runner` is the active implementation repository. Keep commits here only.
-- `aihw-ppci-compiler` is checked out on `atalla-arch` at `351b5fabf76fa3352ebc2e9571e9793d53c7cbe6` (latest kernel validation status is documented in `test_validation_kernels/KERNEL_STATUS.md`). Keep compiler source changes out of this task; only runner commits are allowed.
+- `aihw-ppci-compiler` is pinned at `351b5fabf76fa3352ebc2e9571e9793d53c7cbe6` (latest kernel validation status is documented in `test_validation_kernels/KERNEL_STATUS.md`). Keep compiler source changes out of this task; only runner commits are allowed.
 - Current runner support writes `graph_schedule.c`, `dram.bin`, and `kernel_manifest.json`. Shared callable add/multiply/scalar-multiply/ReLU implementations now live in `kernels/src/elementwise.c`; the manifest gates linkability by operation and shape support in `kernels/capabilities.json`.
 - The runner has no legacy `codegen/c_emitter.py` or per-node kernel builders. `atalla-graph/kernel_backend.py` binds graph ops to shared library sources and records compiler validation sources as references only. `kernels/` defines the schedule ABI, capability table, and first shared elementwise implementations. In `atalla-models`, legacy per-node `.c` generation was in `atalla-graph/codegen/c_emitter.py`; its C builders were loaded from `functional_sim/kernels`.
 
@@ -15,7 +15,7 @@ Living codebase notes for the graph-to-ELF work. Update this file as new behavio
 - `graph/memoryallocator.py`: `TILE_HEIGHT = TILE_WIDTH = 32`; one BF16 tile is 2,048 bytes. Tensor bytes are laid out as row-major 32x32 tiles, with edge padding. Current runner allocator assigns monotonically increasing addresses from zero; it does not implement the liveness reuse described in the AtallaGraph report.
 - `generate_schedule.py`: reads each node's `dram_addr`, `bytes`, BF16 shape and tile counts. It emits C `GlobalTile` descriptors whose `tiles[]` contain the DRAM base address of each tile. The descriptor also records logical shape and tiles-per-dimension. A view/transpose may alias its source address.
 - Schedule calls are graph operations such as `matmul_kernel(&A, &B, &C)` and `add_kernel(&lhs, &rhs, &dst, alpha)`. These are generic graph-kernel APIs, not entry points in `test_validation_kernels`.
-- The per-node C files in `../xmas` have config loads from address `0x3c` (decimal 60). Their config words are per-kernel runtime GMEM addresses and dimensions; constants such as SDMA control values, row/column bounds and loop counts encode the selected memory geometry.
+- The per-node C files in the former external `xmas` experiment have config loads from address `0x3c` (decimal 60). Their config words are per-kernel runtime GMEM addresses and dimensions; constants such as SDMA control values, row/column bounds and loop counts encode the selected memory geometry.
 
 ## Existing standalone compiler kernels
 
@@ -27,7 +27,7 @@ Living codebase notes for the graph-to-ELF work. Update this file as new behavio
 - `gemm_tiled_pipelined.c` and `conv_pipelined.c` are optimized validation variants. The current latest `atalla-arch` checkout reports all 12 validation kernels passing against numerical goldens, but they remain fixed-geometry standalone programs rather than graph-callable kernels.
 - They cannot be called from the emitted graph as-is: their `main`/halt behavior, fixed geometries, and config ABI do not match `GlobalTile*` arguments. Reuse needs a callable adapter/config ABI, plus shape/layout compatibility checks.
 
-## Previous whole-graph attempt (`../xmas`)
+## Previous whole-graph attempt (the former external `xmas` experiment)
 
 - `graph_schedule.c` defines graph `GlobalTile` descriptors and calls generic `*_kernel` names.
 - `kernels.h` declares these generic names. `kernels.c` in the attempt contains no-op stubs, so graph calls do not dispatch to the generated `add_1_main`, `relu_main`, etc.
@@ -37,7 +37,7 @@ Living codebase notes for the graph-to-ELF work. Update this file as new behavio
 
 ## Architecture report findings
 
-Read `past-years-reports/AtallaGraph_SystemsSoftware_Report_Final.pdf` (and compiler/scheduler reports):
+The earlier AtallaGraph systems software report and companion compiler/scheduler reports describe:
 
 - Atalla uses 32x32 BF16 tiles, explicit DRAM-to-scratchpad movement, and statically planned addresses; the report describes tensor inputs/parameters as preinitialized DRAM data and intermediates as graph-allocated addresses.
 - Tile layout is row-major over tiles and row-major within each tile, with padded edge tiles occupying a full 2 KiB.
@@ -168,3 +168,8 @@ The following findings supersede the earlier numerical limitations:
   scheduled results. The shell wrapper used a reserved zsh variable after
   pytest had completed, so its shell exit was nonzero despite pytest's explicit
   `20 passed` result; use no `status` variable in zsh command wrappers.
+
+## Self-contained checkout (2026-11-05)
+
+- The runner now mounts `atalla-sim` beside `aihw-ppci-compiler` as a pinned submodule. `verify_model.py` and focused numerical tests default to the runner-local simulator.
+- Build and numerical verification require only the two direct submodules. The simulator's nested compiler, functional simulator, and Ramulator submodules serve its own optional tooling; the runner uses its direct compiler submodule.

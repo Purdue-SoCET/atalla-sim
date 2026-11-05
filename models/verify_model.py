@@ -93,7 +93,7 @@ if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--model',choices=('basic','alexnet_small'),default='basic')
     parser.add_argument('--out-dir',type=Path,default=Path('out/graph'))
-    parser.add_argument('--sim-root',type=Path,default=Path(__file__).resolve().parent.parent/'atalla-sim')
+    parser.add_argument('--sim-root',type=Path,default=Path(__file__).resolve().parent/'atalla-sim')
     parser.add_argument('--seed',type=int,default=42)
     parser.add_argument('--scale',type=float,default=.01)
     parser.add_argument('--limit',type=int,default=10_000_000)
