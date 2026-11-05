@@ -1,7 +1,7 @@
 #ifndef ATALLA_KERNELS_H
 #define ATALLA_KERNELS_H
 
-/* Shared graph descriptor ABI. Addresses are byte offsets in the graph DRAM image. */
+/* Shared graph descriptor ABI. Addresses are absolute byte addresses in ELF data. */
 #define ATALLA_MAX_RANK 8
 #define ATALLA_TILE_HEIGHT 32
 #define ATALLA_TILE_WIDTH 32
@@ -20,19 +20,22 @@ typedef struct GlobalTile {
     int tiles_per_dim[ATALLA_MAX_RANK];
     int count;
     TileDesc32 *tiles;
+    int storage_layout; /* 0: canonical, 1: GEMM stream, 2: grouped conv GEMM stream */
+    int gather_addr; /* Convolution address plan; 0 for other tensors. */
 } GlobalTile;
 
-/* Elementwise kernels accept equal-shaped, identically tiled BF16 tensors. */
+/* Elementwise tensors use canonical BF16 tiles. Scalar arguments carry IEEE
+ * FP32 bits as int, as required by the hardware vector-scalar operand port. */
 int add_kernel(const GlobalTile *lhs, const GlobalTile *rhs,
-               GlobalTile *output, float alpha);
+               GlobalTile *output, int alpha_bits);
 int mul_kernel(const GlobalTile *lhs, const GlobalTile *rhs,
                GlobalTile *output);
 int mul_scalar_kernel(const GlobalTile *input, GlobalTile *output,
-                      float scalar);
+                      int scalar_bits);
 int relu_kernel(const GlobalTile *input, GlobalTile *output,
                 const GlobalTile *bias);
 
-/* These signatures reserve the graph schedule ABI; capability-gated until implemented. */
+/* Matrix and spatial kernels; see capabilities.json for layout requirements. */
 int matmul_kernel(const GlobalTile *lhs, const GlobalTile *rhs,
                   GlobalTile *output);
 int conv_kernel(const GlobalTile *input, const GlobalTile *weight,

@@ -40,8 +40,21 @@ def build_graph(model: nn.Module, example_input: torch.Tensor) -> GraphModule:
 
 def run_schedule(graph_module: GraphModule, example_input: torch.Tensor, out_dir: Path) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
-    placeholder_data = {"x": example_input.bfloat16().clone()}
+    placeholder_data = {str(node.target): example_input.bfloat16().clone()
+                        for node in graph_module.graph.nodes if node.op == "placeholder"}
     allocated = allocate_memory(graph_module, str(out_dir / "dram.bin"), placeholder_data, base_addr=0x80000)
+    tensors = {}
+    for node in allocated.graph.nodes:
+        meta = node.meta.get("tensor_meta")
+        if "dram_addr" in node.meta and meta is not None and meta.dtype == torch.bfloat16:
+            tensors[node.name] = {
+                "address": int(node.meta["dram_addr"], 16),
+                "shape": list(meta.shape), "bytes": node.meta["bytes"],
+                "storage_layout": node.meta.get("storage_layout", 0),
+                "gather_addr": node.meta.get("gather_addr", 0),
+                "gather_bytes": node.meta.get("gather_bytes", 0),
+            }
+    (out_dir / "tensor_manifest.json").write_text(json.dumps(tensors, indent=2) + "\n")
     code = emit(allocated)
     output_path = out_dir / "graph_schedule.c"
     output_path.write_text(code)

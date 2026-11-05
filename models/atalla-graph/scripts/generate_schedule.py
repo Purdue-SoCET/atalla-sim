@@ -17,6 +17,7 @@ import argparse
 import builtins
 import operator
 import re
+import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -32,6 +33,10 @@ from graph.memoryallocator import (
     VIEW_FUNCTIONS,
     VIEW_METHODS,
 )
+
+def _scalar_bits(value: float) -> int:
+    return struct.unpack("<I", struct.pack("<f", float(value)))[0]
+
 
 MAX_RANK = 8
 
@@ -232,11 +237,14 @@ class TensorSpec:
     shape: List[int]
     tiles_per_dim: List[int]
     base_addr: int
+    storage_layout: int = 0
+    storage_tile_count: int = 0
+    gather_addr: int = 0
     count: int = field(init=False)
     tiles: List[int] = field(init=False)
 
     def __post_init__(self) -> None:
-        self.count = max(1, _tile_count(self.tiles_per_dim))
+        self.count = self.storage_tile_count or max(1, _tile_count(self.tiles_per_dim))
         self.tiles = [self.base_addr + i * TILE_BYTES for i in range(self.count)]
 
 
@@ -257,7 +265,7 @@ def _tensor_spec_for(node: Node) -> TensorSpec:
     tiles = _tiles_for_shape(shape)
 
     expected_bytes = int(node.meta.get("bytes", 0))
-    actual_bytes = _tile_count(tiles) * TILE_BYTES
+    actual_bytes = int(node.meta.get("storage_tile_count", _tile_count(tiles))) * TILE_BYTES
     if expected_bytes and expected_bytes != actual_bytes:
         raise ValueError(
             f"Node {node.name} reserve mismatch: meta bytes={expected_bytes}, "
@@ -269,6 +277,9 @@ def _tensor_spec_for(node: Node) -> TensorSpec:
         shape=shape,
         tiles_per_dim=tiles,
         base_addr=base_addr,
+        storage_layout=int(node.meta.get("storage_layout", 0)),
+        storage_tile_count=int(node.meta.get("storage_tile_count", 0)),
+        gather_addr=int(node.meta.get("gather_addr", 0)),
     )
 
 
@@ -289,6 +300,8 @@ def _render_tensor(spec: TensorSpec) -> str:
         f"    .tiles_per_dim = {{{tiles_init}}},\n"
         f"    .count = {spec.count},\n"
         f"    .tiles = tensor_{spec.identifier}_tiles,\n"
+        f"    .storage_layout = {spec.storage_layout},\n"
+        f"    .gather_addr = {spec.gather_addr}u,\n"
         f"}};\n"
     )
     # The selected compiler's LABEL lowering dereferences a global once.
@@ -427,7 +440,7 @@ def _render_call(
             if bias_node is None:
                 raise ValueError(f"Missing get_attr node for {bias_attr}")
             add_call = (
-                f"    add_kernel({dst}, {_tensor_ref(bias_node, specs)}, {dst}, 1.0f);\n"
+                f"    add_kernel({dst}, {_tensor_ref(bias_node, specs)}, {dst}, 1065353216);\n"
             )
             return matmul_call + add_call
         if isinstance(module, torch.nn.MaxPool2d):
@@ -515,14 +528,14 @@ def _render_call(
             tensor_ref = rhs_ref if lhs_scalar is not None else lhs_ref
             if tensor_ref is None or scalar is None:
                 raise ValueError(f"Mul node {node.name} lacks tensor operand for scalar multiply")
-            return f"    mul_scalar_kernel({tensor_ref}, {dst}, {scalar:.6f});\n"
+            return f"    mul_scalar_kernel({tensor_ref}, {dst}, {_scalar_bits(scalar)});\n"
         if lhs_ref is None or rhs_ref is None:
             raise ValueError(f"Mul node {node.name} lacks tensor operands")
         return f"    mul_kernel({lhs_ref}, {rhs_ref}, {dst});\n"
     if node.target in ADD_TARGETS:
         lhs, rhs, alpha = _add_operands(node, specs, scaled_mul)
         dst = _tensor_ref(node, specs)
-        return f"    add_kernel({lhs}, {rhs}, {dst}, {alpha:.6f});\n"
+        return f"    add_kernel({lhs}, {rhs}, {dst}, {_scalar_bits(alpha)});\n"
     if node.target in RELU_TARGETS:
         src = _tensor_ref(_get_node_arg(node, 0), specs)
         dst = _tensor_ref(node, specs)

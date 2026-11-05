@@ -88,3 +88,67 @@ Read `past-years-reports/AtallaGraph_SystemsSoftware_Report_Final.pdf` (and comp
 - A numerical comparison of the executed `basic` ELF against PyTorch still fails. In particular, the first matrix result differs, and the first bias add leaves the first output unchanged. The simulator documentation identifies standalone compiler GEMM weight orientation and SDMA dependency issues. Do not claim graph numerical correctness from an ELF load or clean halt; further kernel/compiler work is required.
 
 - A temporary simulator probe repacked each constant matrix tile as reversed rows of its transpose (matching the documented `lw.vi` shift order) while keeping the original GEMM code. The first `basic` GEMM still differed from PyTorch (`max abs` about 1.88), so weight order alone is not the remaining numerical fix. No probe changes were committed to kernel code or the compiler.
+
+## Numerical correctness work (2026-11-05)
+
+The following findings supersede the earlier numerical limitations:
+
+- `basic` now runs in `atalla-sim` with strict packet checks, returns zero,
+  and every one of its nine scheduled results matches BF16 PyTorch exactly.
+  `verify_model.py` reproduces this and writes `numerical_report.json`.
+- Scalar vector operands must carry FP32 register bits. The selected frontend
+  lowers `float` to BF16 bits, which made the add kernel's scalar multiplier
+  effectively zero. The ABI now passes FP32 bits as int and uses explicit
+  register bit preservation in the leaf kernel.
+- Hardware `lw.vi` shifts each vector into weight column zero. GEMM must load
+  logical weight columns in reverse order. The allocator prepackages constant
+  rank-2 weights as layout 1 and grouped convolution weights as layout 2. The
+  original OIHW logical shape and packed physical tile count are both explicit.
+- The GEMM test proved activation DMA read stale weight data when scratch base
+  zero was put in a different register. Inline assembly now returns a token
+  after reading the held DMA register; consumers cannot run before completion.
+- Scalar staging writes remain dirty in the write-back dcache. They cannot
+  feed DMA, and scalar result stores are invisible to later graph DMA until
+  eviction. Spatial staging and result writes now use vector scratchpad paths.
+- `kernels/compile.py` configures the target's existing callee-save mechanism
+  (x9, x11, x18..x27). The backend's empty callee-save set corrupted live
+  variables across calls. No compiler files are modified.
+- CleanPass also discarded the non-first-K accumulator phi edge in the spatial
+  leaf function. The multi-K convolution test observed exactly the final K
+  contribution plus bias. Both spatial sources now use the normal O2 passes
+  with only this cleanup omitted, preserving and verifying the phi edges.
+- Convolution, max pooling, flattening, a spatial-to-linear graph, grouped
+  convolution without bias, tensor multiply tails, scalar scaling, and matrix
+  tails have focused simulator/PyTorch tests in the runner. Full spatial-model
+  verification is performed with the same verifier, not the simulator's broad
+  pytest suite.
+- Spatial staging is unrolled four lanes at a time; 32-lane unrolling hit
+  unsupported mask-register spilling. These are shared source routines,
+  not per-node generated kernel copies.
+
+- Convolution now stores an address-only im2col plan after the tensor payloads
+  in `dram.bin`. `GlobalTile.gather_addr` points to this plan. Each entry is an
+  absolute BF16 element address or `0xffffffff` for padding. Plans order batch,
+  group, spatial blocks, K blocks, active rows, and 32 lanes; output-channel
+  tiles reuse them. The runtime still reads current activations and computes
+  every result. This moves repeated coordinate arithmetic out of the scalar
+  simulator without generating per-model kernel code or caching results.
+
+## Final simulator numerical verification (2026-11-05)
+
+- `python verify_model.py --model basic --out-dir out/basic`: status 0,
+  41,220 cycles, all nine scheduled results exactly equal BF16 PyTorch.
+- `python verify_model.py --model alexnet_small --out-dir out/graph --limit 20000000`
+  (default seed 42, scale 0.01): status 0, 5,222,676 cycles, all 22 scheduled
+  results passed at atol 0.01 / rtol 0.03. Largest intermediate absolute error
+  was 0.0078125; final output maximum absolute error was 0.00048828125. This is
+  numerically checked BF16 execution, not a claim of bit-exact AlexNet output.
+  The full simulator run took about 21 minutes; avoid repeating it for changes
+  covered by focused cases. Reports and ELF hashes are in the output directories.
+- Focused runner pytest: 15 tests passed together, then the added batched /
+  channel-tiled / strided / dilated convolution and multiple-spatial-block
+  convolution tests each passed (17 total). `make -B -C kernels`, Python syntax
+  checks, and `git diff --check` passed. No broad atalla-sim pytest suite was run.
+- Compiler remains at 351b5fabf76fa3352ebc2e9571e9793d53c7cbe6 with no source
+  changes. Simulator source is unchanged; its documented native accelerator
+  extension was built locally for execution.

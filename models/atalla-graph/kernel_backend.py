@@ -113,7 +113,11 @@ def _parameters_compatible(gm: GraphModule, node: Node, operation: str) -> bool:
         return (dilation == 1 or dilation == (1, 1)) and not ceil_mode
     if operation == "conv2d":
         groups = int(node.kwargs.get("groups", 1))
-        return groups >= 1
+        if groups < 1:
+            return False
+        bias = node.args[2] if len(node.args) > 2 else node.kwargs.get("bias")
+        weight_shape = _shape(node.args[1])
+        return bias is None or groups == 1 or (weight_shape is not None and (weight_shape[0] // groups) % 32 == 0)
     if operation == "flatten":
         start = node.args[1] if len(node.args) > 1 else node.kwargs.get("start_dim", 0)
         end = node.args[2] if len(node.args) > 2 else node.kwargs.get("end_dim", -1)
@@ -148,14 +152,21 @@ def build_kernel_manifest(
         capability = operation_table[operation]
         source = capability.get("source")
         source_exists = bool(source and (kernel_root / source).is_file())
-        implemented = bool(capability["implemented"] and source_exists)
+        dependencies = capability.get("dependencies", [])
+        implemented = bool(capability["implemented"] and source_exists and all((kernel_root / name).is_file() for name in dependencies))
         input_nodes = list(node.all_input_nodes)
         input_shapes = [_shape(arg) for arg in input_nodes]
         output_shape = _shape(node)
         layout_compatible = _inputs_layout_compatible(input_nodes)
+        storage_compatible = all(arg.meta.get("storage_layout", 0) == 0 for arg in input_nodes)
+        if operation == "matmul":
+            storage_compatible = len(input_nodes) >= 2 and input_nodes[0].meta.get("storage_layout", 0) == 0 and input_nodes[1].meta.get("storage_layout") == 1
+        elif operation == "conv2d":
+            storage_compatible = len(input_nodes) >= 2 and input_nodes[0].meta.get("storage_layout", 0) == 0 and input_nodes[1].meta.get("storage_layout") == 2 and bool(node.meta.get("gather_addr"))
         parameters_compatible = _parameters_compatible(gm, node, operation)
         if implemented:
             library_sources.add(str(source))
+            library_sources.update(capability.get("dependencies", []))
         reference = capability.get("reference")
         reference_exists = bool(reference and (compiler_root.parent / reference).is_file())
         bindings.append({
@@ -170,11 +181,12 @@ def build_kernel_manifest(
             "shape_compatible": _shape_compatible(operation, input_shapes, output_shape),
             "layout_compatible": layout_compatible,
             "parameters_compatible": parameters_compatible,
+            "storage_compatible": storage_compatible,
             "supports": capability.get("supports"),
         })
 
     kernels_supported = not unsupported and all(
-        item["implemented"] and item["shape_compatible"] and item["layout_compatible"] and item["parameters_compatible"]
+        item["implemented"] and item["shape_compatible"] and item["layout_compatible"] and item["parameters_compatible"] and item["storage_compatible"]
         for item in bindings
     )
     if not kernels_supported:

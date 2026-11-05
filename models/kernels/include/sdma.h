@@ -13,4 +13,8 @@
 #define ATALLA_SDMA_TILE32_SID0 ATALLA_SDMA_CONTROL(0, 32, 32, 32)
 #define ATALLA_SDMA_TILE32_SID1 ATALLA_SDMA_CONTROL(1, 32, 32, 32)
 
+/* DMA call sites return an opaque scratch-base token through inline assembly.
+ * Vector loads consume that token to wait for the DMA's held rs1 register.
+ * Keep asm strings at the call sites: this compiler loses string constraints
+ * when they are expanded inside a preprocessor macro. */
 #endif

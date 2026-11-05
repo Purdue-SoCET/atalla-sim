@@ -32,7 +32,12 @@ in the shared kernels under `kernels/`.
 2. For each change, explain the semantic or architectural effect in plain terms.
    Separate algorithm changes from test-only setup, geometry constants, and harness
    changes. Cite file names and the specific expressions or instructions involved.
-3. Check whether `kernels/kernels.h` can express the required addresses, shapes,
+3. Read `kernels/compile.py` and the numerical contracts before changing kernels:
+   scalar vector operands carry FP32 bits; DMA consumers must depend on the held
+   base register; scalar cache writes are not visible to DMA until writeback;
+   packed weight streams supply columns in reverse order. Review the runner's
+   callee-save policy and omitted CleanPass before removing a workaround.
+   Check whether `kernels/kernels.h` can express the required addresses, shapes,
    strides, tile layout, and edge behavior. Check the current runner allocation
    contract: padded row-major 32x32 BF16 tiles, 2,048 bytes per tile, with tile base
    addresses in each `GlobalTile` descriptor.
@@ -47,7 +52,12 @@ in the shared kernels under `kernels/`.
    `kernels/COMPILER_BASELINE` with the supported geometry, data layout, selection
    rule, and reviewed compiler revision. Advance the baseline only after the review
    and required validation are complete. Keep unsupported cases explicit.
-7. Describe correctness and performance validation needed. Use the compiler's
+7. Run focused cases in `tests/test_kernel_numerics.py`, then
+   `python verify_model.py --model basic --out-dir out/basic` and the affected
+   spatial model. Each verifier compares every scheduled result with PyTorch and
+   records the ELF hash and tolerances in `numerical_report.json`. A full AlexNet
+   run takes longer; avoid running the simulator's broad pytest suite for a
+   library-only change. Describe correctness and performance validation needed. Use the compiler's
    numerical golden and packetization/performance data as evidence for the source
    change, then validate the library entry point with equivalent addresses, tile
    strides, tails, and graph descriptor shapes. Do not claim the library inherited

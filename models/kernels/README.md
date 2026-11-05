@@ -1,37 +1,82 @@
 # Atalla graph kernels
 
-`kernels/` is the callable library linked into graph ELFs. `kernels.h` is the
-public `GlobalTile` ABI; each descriptor has logical shape, tile grid, and
-absolute DRAM addresses for padded 32x32 BF16 tiles. The runner creates the
-schedule and data image; kernel code contains Atalla memory and compute logic.
+The library is independent of FX and PyTorch. `kernels.h` defines the callable
+ABI: logical shape, tile grid, physical tile addresses, and a storage-layout
+tag and an optional address-only gather plan. The runner supplies descriptors and initialized data; shared C sources
+perform memory transfers and computation.
 
 - `src/elementwise.c`: add, multiply, scalar multiply, and ReLU.
-- `src/matmul.c`: rank-2 tiled GEMM, using `load_weights` and `gemm` from the
-  compiler's tiled validation program.
-- `src/spatial.c`: rank-4 NCHW convolution through runtime im2col packing and
-  GEMM, rank-4 max pooling, and rank-4 to rank-2 flattening.
-- `include/sdma.h`: SDMA control-word encoding and 32x32 presets.
-- `capabilities.json`: operation/source map used to reject unsupported graphs.
-- `prompt.md`: compiler-team workflow for propagating new optimizations.
+- `src/matmul.c`: rank-2 tiled GEMM.
+- `src/spatial.c`: NCHW convolution orchestration, max pooling, and flattening.
+- `src/spatial_tiles.c`: shared vector staging, GEMM, result extraction, and
+  coherent result writes for spatial operations.
+- `compile.py`: explicit compatibility policy for the pinned compiler.
+- `capabilities.json`: implemented operations, source dependencies, and limits.
 
-The spatial adapter uses packed 32-bit scalar loads/stores for BF16 values
-because the selected Atalla C frontend does not parse `short`. Its 32x32 GEMM
-scratch buffers are shared across sequential graph calls. `elementwise.c` builds at `-O0` because its optimized nested shape checks
-lose a live descriptor pointer across calls in the current compiler.
-`spatial.c` builds at `-O0` because the current compiler's `-O2` clean pass crashes on its nested
-loops; the matrix source builds at `-O2`. All objects are packetized with `-p`. The graph schedule remains the only per-model
-C source, and no per-node kernel copies are created.
+## Numerical contracts
 
-Build the library with `make -C kernels`, or build a whole model with
-`python build_model.py --model basic`. The compiler submodule stays unchanged.
-Standalone validation files under `aihw-ppci-compiler/test_validation_kernels`
-are optimization references, not callable graph kernels. Compiler contributors
-can edit these library sources directly and use `prompt.md` to review and
-propagate new compiler behavior.
+`GlobalTile.storage_layout` is part of the public ABI:
 
-Current boundaries: matrix kernels support rank-2 BF16 tensors; spatial kernels
-support rank-4 NCHW inputs. Max pooling accepts unit dilation and no ceil mode.
-Average pooling, layer normalization, GELU, attention, and other operators are
-not implemented. The build manifest must reject such graphs rather than link a
-placeholder function. A linked ELF proves layout and symbol resolution; simulator execution of the basic graph currently differs from PyTorch, so
-these adapters require further numerical correction.
+| Value | Physical storage |
+|---|---|
+| 0 | Canonical padded row-major 32x32 BF16 tiles. |
+| 1 | Constant rank-2 GEMM weights: each logical KxN tile stores its columns as rows, last column first. Tile order remains K-major, N-minor. |
+| 2 | Constant OIHW convolution weights: flatten K within each group, form KxO matrices, then pack as layout 1; group-major, K-major, O-minor tiles. |
+
+Matrix and convolution outputs use layout 0. Convolution descriptors retain
+the logical OIHW shape but carry the actual packed tile count. Dynamic RHS
+matrices and weights shared with incompatible consumers are rejected until a
+runtime weight-transform path is provided.
+
+Vector-scalar operands use an integer containing the IEEE FP32 bit pattern.
+The selected C frontend's `float` is BF16, but the vector scalar port reads
+FP32 register bits. Inline assembly in the leaf kernels preserves those bits;
+passing a BF16 immediate directly would turn the multiplier into near-zero.
+
+A vector load must wait for the actual DMA completion. The inline assembly
+at each load returns an opaque scratch-base token after reading the DMA-held
+register; vector loads use that token rather than rematerializing zero.
+Keep these dependencies when changing scheduling or register allocation.
+
+Scalar stores are write-back cached and cannot safely feed DMA staging.
+Spatial input rows are constructed through vector operations into scratchpad
+0; accumulators remain in scratchpad 1. Weights use pad 2 and bias/result
+writes use pad 3. Convolution address plans contain input element addresses or padding markers,
+ordered by batch, group, spatial block, reduction block, row, and lane. The
+shared staging kernel reads current tensor values through those addresses;
+no convolution values are precomputed. Output-channel tiles reuse the plan.
+Scalar arrays passed between CPU functions are read through the same CPU cache. Final spatial results are written through scratchpad DMA,
+so later graph kernels see completed data. The graph uses distinct tensor
+allocations; no in-place scalar-cache/DMA aliases are assumed.
+
+Masked operations pass their merge vector explicitly. ReLU therefore does
+not depend on whichever vector register the allocator happens to choose.
+
+## Compiler policy and optimization
+
+```bash
+make -C kernels
+```
+
+`compile.py` uses the selected PPCI frontend, code generator, packetizer,
+relocations, and object format. It sets callee-save registers x9, x11, x18..x27
+because callers already assume those survive calls. The normal backend leaves
+that set empty. For spatial sources it runs the normal O2 sequence without
+CleanPass: that pass can crash or discard the accumulator's phi edge. These
+workarounds are explicit and should be reviewed against future compiler
+updates; do not silently patch the compiler submodule.
+
+The fixed staging loop handles four lanes per iteration. Fully unrolling all
+32 lanes causes this backend to spill masks, which it cannot encode. The
+result extraction uses explicit lane indices because the ISA requires an
+immediate index.
+
+Use focused cases in `tests/test_kernel_numerics.py`, then `verify_model.py`
+for the affected complete model. The reports record the exact ELF hash,
+tolerances, per-operation error, and cycle count. `prompt.md` describes how to
+propagate optimizations while preserving these contracts.
+
+Current limits: rank-2 matrix operands; rank-4 NCHW spatial operands; constant
+prepacked weights; max pooling with unit dilation and no ceil mode. Grouped
+convolution with bias requires channels per group divisible by 32. Average
+pooling, normalization, GELU, and attention remain unavailable.

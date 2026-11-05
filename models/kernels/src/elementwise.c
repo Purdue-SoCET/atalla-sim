@@ -12,38 +12,31 @@
 #define ALL_MASK         -1
 #define TILE_LAST_COL    31
 
-static int same_shape(const GlobalTile *a, const GlobalTile *b) {
-    int dim = 0;
-    if (a->rank != b->rank) return 0;
-    while (dim < a->rank) {
-        if (a->shape[dim] != b->shape[dim]) return 0;
-        if (a->tiles_per_dim[dim] != b->tiles_per_dim[dim]) return 0;
-        dim = dim + 1;
-    }
-    return a->count == b->count;
-}
-
-static int same_tile_grid(const GlobalTile *a, const GlobalTile *b,
-                          const GlobalTile *out) {
-    return same_shape(a, out) && same_shape(b, out);
-}
-
-static int add_shapes_supported(const GlobalTile *lhs, const GlobalTile *rhs,
-                                const GlobalTile *out) {
-    if (!same_shape(lhs, out)) return 0;
-    if (same_shape(rhs, out)) return 1;
-    if (rhs->rank == 1 && out->rank > 1 &&
-        rhs->shape[0] == out->shape[out->rank - 1] &&
-        rhs->tiles_per_dim[0] == out->tiles_per_dim[out->rank - 1]) return 2;
-    return 0;
-}
+/* Expand descriptor validation inside each leaf kernel. The selected compiler
+ * does not preserve all live scalar registers across nested helper calls. */
+#define CHECK_SAME_SHAPE(a, b) do { \
+    int dim = 0; \
+    if ((a)->rank != (b)->rank || (a)->count != (b)->count) return -1; \
+    while (dim < (a)->rank) { \
+        if ((a)->shape[dim] != (b)->shape[dim] || \
+            (a)->tiles_per_dim[dim] != (b)->tiles_per_dim[dim]) return -1; \
+        dim = dim + 1; \
+    } \
+} while (0)
 
 int add_kernel(const GlobalTile *lhs, const GlobalTile *rhs,
-               GlobalTile *output, float alpha) {
+               GlobalTile *output, int alpha_bits) {
+    float alpha;
+    asm("addi_s %0, %1, 0" : "=r"(alpha) : "r"(alpha_bits));
     int tile = 0;
     int mask = ALL_MASK;
-    int broadcast_rhs = add_shapes_supported(lhs, rhs, output);
-    if (!broadcast_rhs) return -1;
+    int broadcast_rhs = 1;
+    CHECK_SAME_SHAPE(lhs, output);
+    if (rhs->rank == 1 && output->rank > 1 && rhs->shape[0] == output->shape[output->rank - 1]) {
+        broadcast_rhs = 2;
+    } else {
+        CHECK_SAME_SHAPE(rhs, output);
+    }
 
     while (tile < output->count) {
         int sp = 0;
@@ -51,17 +44,19 @@ int add_kernel(const GlobalTile *lhs, const GlobalTile *rhs,
         int left_addr = lhs->tiles[tile].base_addr;
         int right_addr = rhs->tiles[right_tile].base_addr;
         int output_addr = output->tiles[tile].base_addr;
-        scpad_load(sp, left_addr, ATALLA_SDMA_TILE32_SID0);
-        scpad_load(sp, right_addr, ATALLA_SDMA_TILE32_SID1);
+        asm("scpad_ld %3, %1, %2\naddi_s %0, %3, 0" : "=r"(sp)
+            : "r"(left_addr), "r"(ATALLA_SDMA_TILE32_SID0), "r"(sp));
+        asm("scpad_ld %3, %1, %2\naddi_s %0, %3, 0" : "=r"(sp)
+            : "r"(right_addr), "r"(ATALLA_SDMA_TILE32_SID1), "r"(sp));
 
         int row = 0;
         while (row < ATALLA_TILE_HEIGHT) {
             int rhs_row = broadcast_rhs == 2 ? 0 : row;
-            vec left = vector_load(0, row, TILE_LAST_COL, 0);
-            vec right = vector_load(0, rhs_row, TILE_LAST_COL, 1);
+            vec left = vector_load(sp, row, TILE_LAST_COL, 0);
+            vec right = vector_load(sp, rhs_row, TILE_LAST_COL, 1);
             vec scaled = vec_op_masked("*", right, alpha, mask);
             vec result = vec_op_masked("+", left, scaled, mask);
-            vector_store(result, 0, row, TILE_LAST_COL, 0);
+            vector_store(result, sp, row, TILE_LAST_COL, 0);
             row = row + 1;
         }
         scpad_store(sp, output_addr, ATALLA_SDMA_TILE32_SID0);
@@ -74,22 +69,25 @@ int mul_kernel(const GlobalTile *lhs, const GlobalTile *rhs,
                GlobalTile *output) {
     int tile = 0;
     int mask = ALL_MASK;
-    if (!same_tile_grid(lhs, rhs, output)) return -1;
+    CHECK_SAME_SHAPE(lhs, output);
+    CHECK_SAME_SHAPE(rhs, output);
 
     while (tile < output->count) {
         int sp = 0;
         int left_addr = lhs->tiles[tile].base_addr;
         int right_addr = rhs->tiles[tile].base_addr;
         int output_addr = output->tiles[tile].base_addr;
-        scpad_load(sp, left_addr, ATALLA_SDMA_TILE32_SID0);
-        scpad_load(sp, right_addr, ATALLA_SDMA_TILE32_SID1);
+        asm("scpad_ld %3, %1, %2\naddi_s %0, %3, 0" : "=r"(sp)
+            : "r"(left_addr), "r"(ATALLA_SDMA_TILE32_SID0), "r"(sp));
+        asm("scpad_ld %3, %1, %2\naddi_s %0, %3, 0" : "=r"(sp)
+            : "r"(right_addr), "r"(ATALLA_SDMA_TILE32_SID1), "r"(sp));
 
         int row = 0;
         while (row < ATALLA_TILE_HEIGHT) {
-            vec left = vector_load(0, row, TILE_LAST_COL, 0);
-            vec right = vector_load(0, row, TILE_LAST_COL, 1);
+            vec left = vector_load(sp, row, TILE_LAST_COL, 0);
+            vec right = vector_load(sp, row, TILE_LAST_COL, 1);
             vec result = vec_op_masked("*", left, right, mask);
-            vector_store(result, 0, row, TILE_LAST_COL, 0);
+            vector_store(result, sp, row, TILE_LAST_COL, 0);
             row = row + 1;
         }
         scpad_store(sp, output_addr, ATALLA_SDMA_TILE32_SID0);
@@ -99,22 +97,25 @@ int mul_kernel(const GlobalTile *lhs, const GlobalTile *rhs,
 }
 
 int mul_scalar_kernel(const GlobalTile *input, GlobalTile *output,
-                      float scalar) {
+                      int scalar_bits) {
+    float scalar;
+    asm("addi_s %0, %1, 0" : "=r"(scalar) : "r"(scalar_bits));
     int tile = 0;
     int mask = ALL_MASK;
-    if (!same_shape(input, output)) return -1;
+    CHECK_SAME_SHAPE(input, output);
 
     while (tile < output->count) {
         int sp = 0;
         int input_addr = input->tiles[tile].base_addr;
         int output_addr = output->tiles[tile].base_addr;
-        scpad_load(sp, input_addr, ATALLA_SDMA_TILE32_SID0);
+        asm("scpad_ld %3, %1, %2\naddi_s %0, %3, 0" : "=r"(sp)
+            : "r"(input_addr), "r"(ATALLA_SDMA_TILE32_SID0), "r"(sp));
 
         int row = 0;
         while (row < ATALLA_TILE_HEIGHT) {
-            vec value = vector_load(0, row, TILE_LAST_COL, 0);
+            vec value = vector_load(sp, row, TILE_LAST_COL, 0);
             vec result = vec_op_masked("*", value, scalar, mask);
-            vector_store(result, 0, row, TILE_LAST_COL, 0);
+            vector_store(result, sp, row, TILE_LAST_COL, 0);
             row = row + 1;
         }
         scpad_store(sp, output_addr, ATALLA_SDMA_TILE32_SID0);
@@ -128,22 +129,23 @@ int relu_kernel(const GlobalTile *input, GlobalTile *output,
     int tile = 0;
     int mask = ALL_MASK;
     (void)bias;
-    if (!same_shape(input, output)) return -1;
+    CHECK_SAME_SHAPE(input, output);
 
     while (tile < output->count) {
         int sp = 0;
         int input_addr = input->tiles[tile].base_addr;
         int output_addr = output->tiles[tile].base_addr;
-        scpad_load(sp, input_addr, ATALLA_SDMA_TILE32_SID0);
+        asm("scpad_ld %3, %1, %2\naddi_s %0, %3, 0" : "=r"(sp)
+            : "r"(input_addr), "r"(ATALLA_SDMA_TILE32_SID0), "r"(sp));
 
-        vec zero_vec = vector_load(0, 0, TILE_LAST_COL, 0);
+        vec zero_vec = vector_load(sp, 0, TILE_LAST_COL, 0);
         zero_vec = vec_op_masked("*", zero_vec, 0.0, mask);
         int row = 0;
         while (row < ATALLA_TILE_HEIGHT) {
-            vec value = vector_load(0, row, TILE_LAST_COL, 0);
+            vec value = vector_load(sp, row, TILE_LAST_COL, 0);
             int negative = make_mask("<", value, zero_vec, mask);
-            vec result = vec_op_masked("*", value, 0.0, negative);
-            vector_store(result, 0, row, TILE_LAST_COL, 0);
+            vec result = vec_op_masked("*", value, 0.0, negative, value);
+            vector_store(result, sp, row, TILE_LAST_COL, 0);
             row = row + 1;
         }
         scpad_store(sp, output_addr, ATALLA_SDMA_TILE32_SID0);

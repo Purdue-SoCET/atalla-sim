@@ -74,7 +74,7 @@ def tensor_for_node(
 
     return None
 
-def tensor_bytes(tensor: torch.Tensor, allocation_size: int) -> bytes:
+def tensor_bytes(tensor: torch.Tensor, allocation_size: int, gemm_weight: bool = False) -> bytes:
     tensor = tensor.detach().cpu().contiguous()
     if tensor.ndim == 0:
         raise ValueError("Scalar tensor")
@@ -101,6 +101,8 @@ def tensor_bytes(tensor: torch.Tensor, allocation_size: int) -> bytes:
                 h_chunk = min(TILE_HEIGHT, height - row)
                 w_chunk = min(TILE_WIDTH, width - col)
                 tile[:h_chunk, :w_chunk] = matrix[row:row + h_chunk, col:col + w_chunk]
+                if gemm_weight:
+                    tile = tile.transpose(0, 1).flip(0).contiguous()
                 tiles.append(tile)
 
     raw = b"".join(
@@ -123,8 +125,8 @@ def _write_binary_payload(file, current_size: int, start_addr: int, payload: byt
     return current_size + len(payload)
 
 
-def assign_address(node: Node, next_addr: int) -> Tuple[int, int, int]:
-    bytes_needed = tensor_nbytes(node)
+def assign_address(node: Node, next_addr: int, storage_bytes: Optional[int] = None) -> Tuple[int, int, int]:
+    bytes_needed = tensor_nbytes(node) if storage_bytes is None else storage_bytes
     aligned_addr = align(next_addr, TILE_BYTES)
     allocation_size = align(bytes_needed, TILE_BYTES)
 
@@ -132,6 +134,48 @@ def assign_address(node: Node, next_addr: int) -> Tuple[int, int, int]:
     node.meta["bytes"] = allocation_size
 
     return aligned_addr, allocation_size, aligned_addr + allocation_size
+
+
+def convolution_gather_bytes(node: Node) -> bytes:
+    """Address-only im2col plan, reused by all output-channel tiles.
+
+    Each group stores spatial blocks, K blocks, active rows, then 32 addresses.
+    0xffffffff denotes padding. Values are gathered when the kernel executes.
+    """
+    source, weight = node.args[:2]
+    n, channels, height, width = source.meta["tensor_meta"].shape
+    out_height, out_width = node.meta["tensor_meta"].shape[-2:]
+    _, in_per_group, kh, kw = weight.meta["tensor_meta"].shape
+    def pair(value):
+        return (value, value) if isinstance(value, int) else tuple(value)
+    sh, sw = pair(node.kwargs.get("stride", 1))
+    ph, pw = pair(node.kwargs.get("padding", 0))
+    dh, dw = pair(node.kwargs.get("dilation", 1))
+    groups = int(node.kwargs.get("groups", 1))
+    base = int(source.meta["dram_addr"], 16)
+    th, tw = math.ceil(height/32), math.ceil(width/32)
+    total_k = in_per_group * kh * kw
+    addresses = []
+    for batch in range(n):
+        for group in range(groups):
+            for block in range(0, out_height*out_width, 32):
+                rows = min(32, out_height*out_width-block)
+                for k_block in range(0, total_k, 32):
+                    for row in range(rows):
+                        oy, ox = divmod(block+row, out_width)
+                        for lane in range(32):
+                            k = k_block+lane
+                            address = 0xffffffff
+                            if k < total_k:
+                                ic, remainder = divmod(k, kh*kw)
+                                ky, kx = divmod(remainder, kw)
+                                iy, ix = oy*sh-ph+ky*dh, ox*sw-pw+kx*dw
+                                if 0 <= iy < height and 0 <= ix < width:
+                                    plane = batch*channels + group*in_per_group + ic
+                                    tile = (plane*th + iy//32)*tw + ix//32
+                                    address = base+tile*TILE_BYTES + ((iy%32)*32+ix%32)*2
+                            addresses.append(address)
+    return np.asarray(addresses, dtype="<u4").tobytes()
 
 
 def allocate_memory(gm: GraphModule, bin_path: str, placeholder_data: Optional[Dict[str, torch.Tensor]] = None, base_addr: int = 0) -> GraphModule:
@@ -159,12 +203,40 @@ def allocate_memory(gm: GraphModule, bin_path: str, placeholder_data: Optional[D
                 node.meta["dram_addr"] = view_src.meta["dram_addr"]
                 node.meta["bytes"] = view_src.meta["bytes"]
                 continue
-            start, size, next_addr = assign_address(node, next_addr)
+            tensor_value = materialized if materialized is not None else tensor_for_node(node, gm, placeholder_data)
+            conv_payload = None
+            if tensor_value is not None and node.users and all(
+                user.op == "call_function" and user.target is torch.nn.functional.conv2d
+                and len(user.args) > 1 and user.args[1] is node for user in node.users):
+                group_counts = {int(user.kwargs.get("groups", 1)) for user in node.users}
+                if len(group_counts) == 1:
+                    groups = group_counts.pop()
+                    out_per_group = int(tensor_value.shape[0]) // groups
+                    chunks = []
+                    for group in range(groups):
+                        matrix = tensor_value[group*out_per_group:(group+1)*out_per_group].reshape(out_per_group, -1).T.contiguous()
+                        packed_size = math.ceil(matrix.shape[0]/32) * math.ceil(matrix.shape[1]/32) * TILE_BYTES
+                        chunks.append(tensor_bytes(matrix, packed_size, gemm_weight=True))
+                    conv_payload = b"".join(chunks)
+            start, size, next_addr = assign_address(node, next_addr, len(conv_payload) if conv_payload is not None else None)
             if materialized is not None:
                 node.meta["materialized_view"] = True
-            tensor_value = materialized if materialized is not None else tensor_for_node(node, gm, placeholder_data)
-            payload = tensor_bytes(tensor_value, size) if tensor_value is not None else bytes(size)
+            gemm_weight = tensor_value is not None and bool(node.users) and all(
+                user.op == "call_function" and user.target is torch.matmul
+                and len(user.args) > 1 and user.args[1] is node for user in node.users)
+            node.meta["storage_layout"] = 2 if conv_payload is not None else (1 if gemm_weight else 0)
+            node.meta["storage_tile_count"] = size // TILE_BYTES
+            payload = conv_payload if conv_payload is not None else (tensor_bytes(tensor_value, size, gemm_weight=gemm_weight) if tensor_value is not None else bytes(size))
             written = _write_binary_payload(dram_file, written, start, payload)
+
+        for node in gm.graph.nodes:
+            if node.op == "call_function" and node.target is torch.nn.functional.conv2d:
+                payload = convolution_gather_bytes(node)
+                start = align(next_addr, 4)
+                node.meta["gather_addr"] = start
+                node.meta["gather_bytes"] = len(payload)
+                written = _write_binary_payload(dram_file, written, start, payload)
+                next_addr = start + len(payload)
 
     gm.graph.lint()
     gm.recompile()
