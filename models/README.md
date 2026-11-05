@@ -27,7 +27,7 @@ Each output directory contains `output.elf`, `dram.bin`, `graph_schedule.c`,
 `kernel_manifest.json`, the generated linker layout, and compiler logs. `main`
 calls `run_graph` and halts. The ELF's writable segment begins at `0x80000`;
 `dram.bin` occupies its first bytes, so all scheduled tile addresses point into
-the loaded ELF segment. The linker resolves all graph and library symbols.
+the loaded ELF segment. The compiler packetizes each object with `-p` before linking, and the build checks every code symbol against the simulator's 20-byte packet boundary rule. The linker resolves all graph and library symbols.
 
 `basic` uses tiled GEMM, bias add, ReLU and residual add. `alexnet_small` also
 uses NCHW convolution, max pooling, and tiled flattening. The convolution
@@ -36,9 +36,10 @@ adapter packs im2col and weight blocks at runtime and uses the compiler's
 contributors to optimize. The compiler's optimizer currently crashes on this
 nested-loop spatial source at `-O2`, so `spatial.c` is compiled at `-O0`.
 
-The ELF build and section placement are checked during the command. Numerical
-execution against PyTorch has not yet been established for these graph kernels;
-the compiler validation programs test their standalone variants. Other graph
+The ELF build and section placement are checked during the command. Simulator execution of `basic` now halts successfully, but its output differs
+from PyTorch. The generic GEMM and elementwise adapters need numerical
+validation and correction before using the ELF for inference; standalone
+compiler validation does not establish graph correctness. Other graph
 operators, including layer normalization, GELU, attention, and average pooling,
 remain capability gated. The build stops if a graph contains unsupported nodes.
 

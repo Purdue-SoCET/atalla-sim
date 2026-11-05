@@ -16,9 +16,10 @@ schedule and data image; kernel code contains Atalla memory and compute logic.
 
 The spatial adapter uses packed 32-bit scalar loads/stores for BF16 values
 because the selected Atalla C frontend does not parse `short`. Its 32x32 GEMM
-scratch buffers are shared across sequential graph calls. `spatial.c` builds at
-`-O0` because the current compiler's `-O2` clean pass crashes on its nested
-loops; other sources build at `-O2`. The graph schedule remains the only per-model
+scratch buffers are shared across sequential graph calls. `elementwise.c` builds at `-O0` because its optimized nested shape checks
+lose a live descriptor pointer across calls in the current compiler.
+`spatial.c` builds at `-O0` because the current compiler's `-O2` clean pass crashes on its nested
+loops; the matrix source builds at `-O2`. All objects are packetized with `-p`. The graph schedule remains the only per-model
 C source, and no per-node kernel copies are created.
 
 Build the library with `make -C kernels`, or build a whole model with
@@ -32,5 +33,5 @@ Current boundaries: matrix kernels support rank-2 BF16 tensors; spatial kernels
 support rank-4 NCHW inputs. Max pooling accepts unit dilation and no ceil mode.
 Average pooling, layer normalization, GELU, attention, and other operators are
 not implemented. The build manifest must reject such graphs rather than link a
-placeholder function. A linked ELF proves layout and symbol resolution; graph
-numerical equivalence still needs simulator or hardware execution.
+placeholder function. A linked ELF proves layout and symbol resolution; simulator execution of the basic graph currently differs from PyTorch, so
+these adapters require further numerical correction.

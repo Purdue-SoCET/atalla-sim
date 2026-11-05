@@ -291,7 +291,11 @@ def _render_tensor(spec: TensorSpec) -> str:
         f"    .tiles = tensor_{spec.identifier}_tiles,\n"
         f"}};\n"
     )
-    return tile_block + "\n" + gt_block
+    # The selected compiler's LABEL lowering dereferences a global once.
+    # The extra global stores the descriptor address so that dereference
+    # produces the pointer expected by the callable kernel ABI.
+    ref_block = f"static GlobalTile *tensor_{spec.identifier}_ref = &tensor_{spec.identifier}_gt;\n"
+    return tile_block + "\n" + gt_block + ref_block
 
 
 # return the pointer string of a node's tensor
@@ -300,7 +304,7 @@ def _tensor_ref(node: Node, specs: Dict[Node, TensorSpec]) -> str:
         spec = specs[node]
     except KeyError as exc:
         raise KeyError(f"Missing tensor spec for node {node.name}") from exc
-    return f"&tensor_{spec.identifier}_gt"
+    return f"(GlobalTile *)&tensor_{spec.identifier}_ref"
 
 
 #  _tensor_ref but emites NULL when node is None (e.g: optional bias)

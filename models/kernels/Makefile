@@ -9,13 +9,13 @@ $(BUILD_DIR):
 	mkdir -p $@
 
 $(BUILD_DIR)/elementwise.o: src/elementwise.c kernels.h include/sdma.h | $(BUILD_DIR)
-	PYTHONPATH=../aihw-ppci-compiler $(PYTHON) $(COMPILER) -c $< -o $@ > $@.log 2>&1
+	PYTHONPATH=../aihw-ppci-compiler $(PYTHON) $(COMPILER) -O0 -p -c $< -o $@ > $@.log 2>&1
 
 clean:
 	rm -rf $(BUILD_DIR)
 
 $(BUILD_DIR)/matmul.o: src/matmul.c kernels.h include/sdma.h | $(BUILD_DIR)
-	PYTHONPATH=../aihw-ppci-compiler $(PYTHON) $(COMPILER) -c $< -o $@ > $@.log 2>&1
+	PYTHONPATH=../aihw-ppci-compiler $(PYTHON) $(COMPILER) -p -c $< -o $@ > $@.log 2>&1
 
 $(BUILD_DIR)/spatial.o: src/spatial.c kernels.h include/sdma.h | $(BUILD_DIR)
-	PYTHONPATH=../aihw-ppci-compiler $(PYTHON) $(COMPILER) -O0 -c $< -o $@ > $@.log 2>&1
+	PYTHONPATH=../aihw-ppci-compiler $(PYTHON) $(COMPILER) -O0 -p -c $< -o $@ > $@.log 2>&1

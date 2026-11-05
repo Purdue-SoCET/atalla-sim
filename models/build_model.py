@@ -27,7 +27,7 @@ DRAM_BASE = 0x80000
 
 def compile_c(source: Path, output: Path, opt_level: int = 2) -> None:
     env = dict(os.environ, PYTHONPATH=str(COMPILER))
-    command = [sys.executable, "-m", "ppci", "atalla_cc", "-m", "atalla", f"-O{opt_level}", "-I", str(ROOT), str(source), "-c", "-o", str(output)]
+    command = [sys.executable, "-m", "ppci", "atalla_cc", "-m", "atalla", f"-O{opt_level}", "-p", "-I", str(ROOT), str(source), "-c", "-o", str(output)]
     with output.with_suffix(".log").open("w") as log:
         result = subprocess.run(command, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
     if result.returncode:
@@ -67,7 +67,7 @@ def build(model_name: str, output_dir: Path, seed: int, scale: float) -> Path:
     for source in manifest["library_sources"]:
         src = ROOT / "kernels" / source
         obj = output_dir / (src.stem + ".o")
-        compile_c(src, obj, opt_level=0 if src.name == "spatial.c" else 2)
+        compile_c(src, obj, opt_level=0 if src.name in ("elementwise.c", "spatial.c") else 2)
         kernel_objs.append(obj)
     layout = output_dir / "graph_layout.mmap"
     data_capacity = (len(payload) + 0x40000 + 0xFFF) & ~0xFFF
@@ -81,6 +81,16 @@ def build(model_name: str, output_dir: Path, seed: int, scale: float) -> Path:
         linked = api.link([str(obj) for obj in objects], layout=layout_stream, entry="main")
     if linked.get_undefined_symbols():
         raise RuntimeError("ELF link left undefined symbols")
+    code = linked.get_section("code")
+    if code.size % 20:
+        raise RuntimeError("Linked code size is not a whole number of 20-byte packets")
+    for symbol in linked.symbols:
+        if symbol.defined and symbol.section == "code":
+            address = linked.get_symbol_id_value(symbol.id)
+            if (address - code.address) % 20:
+                raise RuntimeError(
+                    f"Code symbol {symbol.name} at 0x{address:X} is not on a packet boundary"
+                )
     api.objcopy(linked, None, "elf", str(elf))
     with elf.open("rb") as stream:
         elf_file = ElfFile.load(stream)
