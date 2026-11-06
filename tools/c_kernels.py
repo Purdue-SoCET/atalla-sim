@@ -36,8 +36,6 @@ code; build() warns when that happens (ElfLayoutWarning).
 """
 
 import importlib.util
-import os
-import subprocess
 import sys
 import tempfile
 import warnings
@@ -51,52 +49,14 @@ from atalla.atalla_platform import c_entry_sregs           # noqa: E402
 from scheduler import golden                                # noqa: E402
 from scheduler.assembler import Program, assemble           # noqa: E402
 from scheduler.elf import ElfProgram, load_elf, overlaps    # noqa: E402
-
-COMPILER = ROOT / "third_party" / "aihw-ppci-compiler"
+from atalla.toolchain import (COMPILER, CompileError,       # noqa: E402,F401
+                              compile_c, compile_elf)
 KERNELS = COMPILER / "test_validation_kernels"
 UNIT_TESTS = COMPILER / "test_validation"
 
 
-class CompileError(RuntimeError):
-    pass
-
-
 class ElfLayoutWarning(UserWarning):
     """A kernel's inputs land on its own code or data (fine here, not on the RTL)."""
-
-
-def compile_c(c_path: Path) -> str:
-    """atalla_cc -p -S: the packetized assembly, as text."""
-    if not (COMPILER / "ppci").is_dir():
-        raise CompileError("the compiler submodule isn't checked out: %s" % COMPILER)
-    with tempfile.TemporaryDirectory() as tmp:
-        out = Path(tmp) / (c_path.stem + ".s")
-        # The compiler imports its packetizer and latency table from its root.
-        env = dict(os.environ, PYTHONPATH=str(COMPILER))
-        p = subprocess.run([sys.executable, "-m", "ppci.cli.atalla_cc", "--machine", "atalla",
-                            "-O", "2", "-p", "-S", str(c_path), "-o", str(out)],
-                           cwd=str(COMPILER), env=env, capture_output=True, text=True)
-        if p.returncode != 0:
-            raise CompileError("atalla_cc failed on %s:\n%s"
-                               % (c_path.name, (p.stderr or p.stdout)[-3000:]))
-        return out.read_text()
-
-
-def compile_elf(c_path: Path) -> bytes:
-    """atalla_cc -p -o kernel.elf: compiled and linked with the compiler's own
-    driver and memory layout, as bytes."""
-    if not (COMPILER / "ppci").is_dir():
-        raise CompileError("the compiler submodule isn't checked out: %s" % COMPILER)
-    with tempfile.TemporaryDirectory() as tmp:
-        out = Path(tmp) / (c_path.stem + ".elf")
-        env = dict(os.environ, PYTHONPATH=str(COMPILER))
-        p = subprocess.run([sys.executable, str(COMPILER / "atalla_cc"), "-O", "2", "-p",
-                            str(c_path), "-o", str(out)],
-                           cwd=str(COMPILER), env=env, capture_output=True, text=True)
-        if p.returncode != 0 or not out.exists():
-            raise CompileError("atalla_cc failed on %s:\n%s"
-                               % (c_path.name, (p.stderr or p.stdout)[-3000:]))
-        return out.read_bytes()
 
 
 # -- the compiler's validation harness ----------------------------------------------------

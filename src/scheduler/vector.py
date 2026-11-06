@@ -203,6 +203,10 @@ class VectorSide:
         self._vlsu_holds: Dict[int, Deque] = {s: deque() for s in range(len(vc.vls_units))}
         self.sdma_busy = [False] * max(4, len(self.backends))
         self._sdma_done: List[int] = []           # rs1s whose SDMA finished
+        #: Optional observer, on_sdma("start" | "end", info), for when each
+        #: SDMA is handed to its scratchpad and when it completes
+        #: (atalla/sdma_log.py). None, the default, costs nothing.
+        self.on_sdma: Optional[Callable[[str, Dict], None]] = None
         self._vst_done: List[int] = []            # rs1s of vreg.st rows written
         #: Transpose requests in program order, ("push", vector) or
         #: ("pop", vd), not yet given to the unit; the vds of tpop.vi waiting
@@ -309,7 +313,7 @@ class VectorSide:
                 self._dispatch_lanes(o, ops)
         for o in pkt.sdma:
             if o.valid:
-                self._dispatch_sdma(o, issued.operands.get(("sdma", o.slot), {}))
+                self._dispatch_sdma(o, issued.operands.get(("sdma", o.slot), {}), issued.pc)
 
     def mts_op(self, issued) -> Tuple[Optional[VectorOp], Dict]:
         if issued is None:
@@ -427,7 +431,7 @@ class VectorSide:
             self.stats["vlsu_stores"] += 1
         assert vls.enqueue_issue(op), "VLSU %d issued while not ready" % o.sid
 
-    def _dispatch_sdma(self, o: SdmaOp, ops: Dict) -> None:
+    def _dispatch_sdma(self, o: SdmaOp, ops: Dict, pc: int = 0) -> None:
         meta = int(ops["rs3"]) & MASK32
         sid = (meta >> 30) & 3
         rows, cols = ((meta >> 25) & 0x1F) + 1, ((meta >> 20) & 0x1F) + 1
@@ -435,14 +439,23 @@ class VectorSide:
         stride = (full + 1 if full else cols) * 2
         be = self.backends[sid]
         rs1 = o.rs1_rd
+        row, dram_addr = self._row(ops["rs1"]), int(ops["rs2"]) & MASK32
+        hook, info = self.on_sdma, None
+        if hook is not None:
+            info = dict(op="scpad.st" if o.store else "scpad.ld", pc=int(pc), sid=sid,
+                        rs1=rs1, spad_row=row, dram_addr=dram_addr, rows=rows, cols=cols,
+                        dram_stride=stride, bytes=rows * cols * 2)
 
-        def done(_tx, _rs1=rs1, _sid=sid):
+        def done(_tx, _rs1=rs1, _sid=sid, _hook=hook, _info=info):
             self._sdma_done.append(_rs1)
             self.sdma_busy[_sid] = False
+            if _hook is not None:
+                _hook("end", _info)
 
         start = be.driver_to_backend_start_store if o.store else be.driver_to_backend_start_load
-        tx = start(self._row(ops["rs1"]), int(ops["rs2"]) & MASK32, rows, cols,
-                   callback=done, dram_stride=stride)
+        if hook is not None:
+            hook("start", info)
+        tx = start(row, dram_addr, rows, cols, callback=done, dram_stride=stride)
         assert tx >= 0, "scratchpad %d backend refused an SDMA" % sid
         self.sdma_busy[sid] = True
         self.stats["sdma_stores" if o.store else "sdma_loads"] += 1

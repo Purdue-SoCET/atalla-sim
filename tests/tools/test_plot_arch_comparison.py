@@ -3,6 +3,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("matplotlib")   # the plots extra: pip install -e '.[plots]'
+
 from tools.plot_arch_comparison import (
     Run, _contiguous_cluster, plot_bottleneck, plot_cycles,
     plot_kernel_speedup, plot_phase_breakdown)

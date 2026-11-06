@@ -1,0 +1,11 @@
+# Atalla 0x01 with memory_FA26's memory system: the AXI bus in front of
+# Ramulator 2's DDR4-3200W model (the "rtl" DRAM config). Needs `make ramulator`.
+# Keys not given here keep atalla-0x01.toml's values.
+
+name = "atalla-0x01-ddr4"
+description = "the default machine with the AXI bus and Ramulator 2 DDR4 timing"
+
+[memory]
+dram = "ramulator"
+ramulator_config = "rtl"
+axi = true

@@ -434,11 +434,13 @@ python tools/memory_bench.py table4 --config "DDR4 2ch 128b"
 
 ## Performance monitor
 
-`build_atalla_platform` attaches a `PerfMonitor` (`src/atalla/perf_monitor.py`)
-as `platform.perf`: a read-only observer, ticked last every cycle, that
-gathers metrics for workload and system analysis. `tools/run_kernel.py`
-prints its summary; `--perf-json PATH` writes the report, and `--timeline`
-adds the per-cycle record.
+`build_atalla_platform(perf=True)` attaches a `PerfMonitor`
+(`src/atalla/perf_monitor.py`) as `platform.perf`: a read-only observer,
+ticked last every cycle, that gathers metrics for workload and system
+analysis. It is off by default (it costs about 7% of run time), as is every
+other recorder. `tools/run_kernel.py --report` prints its summary;
+`--perf-json PATH` writes the report, and `--timeline` adds the per-cycle
+record.
 
 - **Where the cycles go.** Every cycle goes in one bucket, which together
   add up to the run: `issue` (a packet issued); `stall:hazard:<unit>` (decode

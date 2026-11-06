@@ -1,0 +1,312 @@
+{
+  "schema": "atalla-graph-plan-v1",
+  "functions": [
+    {
+      "name": "main",
+      "inputs": [
+        {
+          "id": 0,
+          "type": "tensor<2x4xbf16>"
+        },
+        {
+          "id": 1,
+          "type": "tensor<8x4xbf16>"
+        },
+        {
+          "id": 2,
+          "type": "tensor<8xbf16>"
+        },
+        {
+          "id": 3,
+          "type": "tensor<3x8xbf16>"
+        },
+        {
+          "id": 4,
+          "type": "tensor<3xbf16>"
+        }
+      ],
+      "operations": [
+        {
+          "name": "arith.constant",
+          "attributes": "{value = 0.000000e+00 : bf16}",
+          "operands": [],
+          "operand_types": [],
+          "results": [
+            {
+              "id": 5,
+              "type": "bf16"
+            }
+          ],
+          "region_operations": []
+        },
+        {
+          "name": "tensor.empty",
+          "attributes": "{}",
+          "operands": [],
+          "operand_types": [],
+          "results": [
+            {
+              "id": 6,
+              "type": "tensor<4x8xbf16>"
+            }
+          ],
+          "region_operations": []
+        },
+        {
+          "name": "linalg.transpose",
+          "attributes": "{permutation = array<i64: 1, 0>}",
+          "operands": [
+            1,
+            6
+          ],
+          "operand_types": [
+            "tensor<8x4xbf16>",
+            "tensor<4x8xbf16>"
+          ],
+          "results": [
+            {
+              "id": 7,
+              "type": "tensor<4x8xbf16>"
+            }
+          ],
+          "region_operations": []
+        },
+        {
+          "name": "tensor.empty",
+          "attributes": "{}",
+          "operands": [],
+          "operand_types": [],
+          "results": [
+            {
+              "id": 8,
+              "type": "tensor<2x8xbf16>"
+            }
+          ],
+          "region_operations": []
+        },
+        {
+          "name": "linalg.fill",
+          "attributes": "{operandSegmentSizes = array<i32: 1, 1>}",
+          "operands": [
+            5,
+            8
+          ],
+          "operand_types": [
+            "bf16",
+            "tensor<2x8xbf16>"
+          ],
+          "results": [
+            {
+              "id": 9,
+              "type": "tensor<2x8xbf16>"
+            }
+          ],
+          "region_operations": []
+        },
+        {
+          "name": "linalg.matmul",
+          "attributes": "{indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d2)>, affine_map<(d0, d1, d2) -> (d2, d1)>, affine_map<(d0, d1, d2) -> (d0, d1)>], operandSegmentSizes = array<i32: 2, 1>}",
+          "operands": [
+            0,
+            7,
+            9
+          ],
+          "operand_types": [
+            "tensor<2x4xbf16>",
+            "tensor<4x8xbf16>",
+            "tensor<2x8xbf16>"
+          ],
+          "results": [
+            {
+              "id": 10,
+              "type": "tensor<2x8xbf16>"
+            }
+          ],
+          "region_operations": [
+            {
+              "name": "arith.mulf",
+              "attributes": "{fastmath = #arith.fastmath<none>}"
+            },
+            {
+              "name": "arith.addf",
+              "attributes": "{fastmath = #arith.fastmath<none>}"
+            }
+          ]
+        },
+        {
+          "name": "linalg.generic",
+          "attributes": "{indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> (d1)>, affine_map<(d0, d1) -> (d0, d1)>], iterator_types = [#linalg.iterator_type<parallel>, #linalg.iterator_type<parallel>], operandSegmentSizes = array<i32: 2, 1>}",
+          "operands": [
+            10,
+            2,
+            8
+          ],
+          "operand_types": [
+            "tensor<2x8xbf16>",
+            "tensor<8xbf16>",
+            "tensor<2x8xbf16>"
+          ],
+          "results": [
+            {
+              "id": 11,
+              "type": "tensor<2x8xbf16>"
+            }
+          ],
+          "region_operations": [
+            {
+              "name": "arith.addf",
+              "attributes": "{fastmath = #arith.fastmath<none>}"
+            }
+          ]
+        },
+        {
+          "name": "linalg.generic",
+          "attributes": "{indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> (d0, d1)>], iterator_types = [#linalg.iterator_type<parallel>, #linalg.iterator_type<parallel>], operandSegmentSizes = array<i32: 1, 1>}",
+          "operands": [
+            11,
+            8
+          ],
+          "operand_types": [
+            "tensor<2x8xbf16>",
+            "tensor<2x8xbf16>"
+          ],
+          "results": [
+            {
+              "id": 12,
+              "type": "tensor<2x8xbf16>"
+            }
+          ],
+          "region_operations": [
+            {
+              "name": "arith.maximumf",
+              "attributes": "{fastmath = #arith.fastmath<none>}"
+            }
+          ]
+        },
+        {
+          "name": "tensor.empty",
+          "attributes": "{}",
+          "operands": [],
+          "operand_types": [],
+          "results": [
+            {
+              "id": 13,
+              "type": "tensor<8x3xbf16>"
+            }
+          ],
+          "region_operations": []
+        },
+        {
+          "name": "linalg.transpose",
+          "attributes": "{permutation = array<i64: 1, 0>}",
+          "operands": [
+            3,
+            13
+          ],
+          "operand_types": [
+            "tensor<3x8xbf16>",
+            "tensor<8x3xbf16>"
+          ],
+          "results": [
+            {
+              "id": 14,
+              "type": "tensor<8x3xbf16>"
+            }
+          ],
+          "region_operations": []
+        },
+        {
+          "name": "tensor.empty",
+          "attributes": "{}",
+          "operands": [],
+          "operand_types": [],
+          "results": [
+            {
+              "id": 15,
+              "type": "tensor<2x3xbf16>"
+            }
+          ],
+          "region_operations": []
+        },
+        {
+          "name": "linalg.fill",
+          "attributes": "{operandSegmentSizes = array<i32: 1, 1>}",
+          "operands": [
+            5,
+            15
+          ],
+          "operand_types": [
+            "bf16",
+            "tensor<2x3xbf16>"
+          ],
+          "results": [
+            {
+              "id": 16,
+              "type": "tensor<2x3xbf16>"
+            }
+          ],
+          "region_operations": []
+        },
+        {
+          "name": "linalg.matmul",
+          "attributes": "{indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d2)>, affine_map<(d0, d1, d2) -> (d2, d1)>, affine_map<(d0, d1, d2) -> (d0, d1)>], operandSegmentSizes = array<i32: 2, 1>}",
+          "operands": [
+            12,
+            14,
+            16
+          ],
+          "operand_types": [
+            "tensor<2x8xbf16>",
+            "tensor<8x3xbf16>",
+            "tensor<2x3xbf16>"
+          ],
+          "results": [
+            {
+              "id": 17,
+              "type": "tensor<2x3xbf16>"
+            }
+          ],
+          "region_operations": [
+            {
+              "name": "arith.mulf",
+              "attributes": "{fastmath = #arith.fastmath<none>}"
+            },
+            {
+              "name": "arith.addf",
+              "attributes": "{fastmath = #arith.fastmath<none>}"
+            }
+          ]
+        },
+        {
+          "name": "linalg.generic",
+          "attributes": "{indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> (d1)>, affine_map<(d0, d1) -> (d0, d1)>], iterator_types = [#linalg.iterator_type<parallel>, #linalg.iterator_type<parallel>], operandSegmentSizes = array<i32: 2, 1>}",
+          "operands": [
+            17,
+            4,
+            15
+          ],
+          "operand_types": [
+            "tensor<2x3xbf16>",
+            "tensor<3xbf16>",
+            "tensor<2x3xbf16>"
+          ],
+          "results": [
+            {
+              "id": 18,
+              "type": "tensor<2x3xbf16>"
+            }
+          ],
+          "region_operations": [
+            {
+              "name": "arith.addf",
+              "attributes": "{fastmath = #arith.fastmath<none>}"
+            }
+          ]
+        }
+      ],
+      "returns": [
+        18
+      ]
+    }
+  ]
+}

@@ -10,7 +10,7 @@ from test_vector import (DRAM_IN, LOAD_ROWS, epilogue, prologue, tile_data, valu
 
 def run(pk, **kw):
     plat = build_atalla_platform(program(*pk, HALT), tile_data(DRAM_IN, LOAD_ROWS, values),
-                                 **kw)
+                                 perf=True, history=True, **kw)
     plat.run_until_done(limit=200_000)
     return plat
 

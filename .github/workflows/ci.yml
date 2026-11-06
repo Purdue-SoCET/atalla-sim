@@ -1,0 +1,77 @@
+# atalla-sim CI: the test suite and the cycle baseline on every push and pull
+# request, and the gallery of activity traces published to GitHub Pages from
+# master.
+#
+# Needs no private submodule: the reference kernels are frozen program images
+# in tests/equivalence/programs, and the tests that need the functional sim or
+# the C compiler skip without them. To run those too, uncomment the
+# "submodules" steps and add a secret SUBMODULE_SSH_KEY holding a private key
+# with read access to Purdue-SoCET/atalla-functional-sim and
+# Purdue-SoCET/aihw-ppci-compiler (a deploy key on each repository; the
+# ssh-agent step takes several keys, one per line).
+#
+# Publishing the gallery needs Settings > Pages > Source: GitHub Actions. The
+# site is public if the repository is.
+
+name: ci
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # submodules:
+      # - uses: webfactory/ssh-agent@v0.9.0
+      #   with:
+      #     ssh-private-key: ${{ secrets.SUBMODULE_SSH_KEY }}
+      # - run: git submodule update --init third_party/atalla-functional-sim third_party/aihw-ppci-compiler
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install -e '.[test,plots]'
+      - run: make native
+      - run: atalla-sim doctor
+      - run: pytest -q
+      # The cycle table goes in the job summary. The step fails when a count
+      # moved without tests/perf_baseline.json being updated in the same
+      # commit (atalla-sim bench --update).
+      - run: atalla-sim bench --markdown bench.md
+        if: always()
+      - run: cat bench.md >> "$GITHUB_STEP_SUMMARY"
+        if: always() && hashFiles('bench.md') != ''
+
+  gallery:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: true
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v5
+      # submodules: (as in the test job; adds the example MLP workload)
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install -e .
+      - run: make native
+      - run: atalla-sim gallery site
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4

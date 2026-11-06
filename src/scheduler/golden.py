@@ -77,14 +77,19 @@ def lanes_reduce(values, mask: int, op: str, lanes: int = LANES):
 
 
 def run_golden_state(instr, data=None, workdir=None, packet_length: int = 4,
-                     reductions: str = "functional", init_sregs=None):
+                     reductions: str = "functional", init_sregs=None, trace=None):
     """Run a program image on the functional sim; return its state at halt
     as plain values: {"sregs": {r: int}, "mregs": {r: int},
     "vregs": {r: [float]}, "mem": {addr: int}}.
 
     reductions="lanes" swaps the functional sim's rsum/rmin/rmax for
     lanes_reduce, the lane model's order. Only rsum can differ: a sum's value
-    depends on its order, a minimum's does not."""
+    depends on its order, a minimum's does not.
+
+    `trace`, a list, gets every register write in program order, as
+    (kind "x" | "v" | "m", register, value as stored, pc of the packet), for
+    atalla/lockstep.py. The functional sim itself is unchanged: its
+    instruction fetch and register files' write() are wrapped here."""
     if not HAVE_GOLDEN:
         raise RuntimeError("functional sim unavailable (%s)" % load_error)
     import tempfile
@@ -101,6 +106,8 @@ def run_golden_state(instr, data=None, workdir=None, packet_length: int = 4,
     sregs, mregs, vregs = ScalarRegisterFile(), mask_register_file(), VectorRegisterFile()
     for r, v in (init_sregs or {}).items():
         sregs.write(int(r), int(v))
+    if trace is not None:
+        _trace_writes(mem, sregs, mregs, vregs, trace)
     tmp = tempfile.TemporaryDirectory() if workdir is None else None
     out = Path(workdir if workdir is not None else tmp.name)
     names = ["mem", "sregs", "vregs", "mregs", "scpad0", "scpad1", "perf"]
@@ -127,6 +134,27 @@ def run_golden_state(instr, data=None, workdir=None, packet_length: int = 4,
             "mregs": {r: int(v) for r, v in mregs.regs.items()},
             "vregs": {r: [float(x) for x in vregs.read(r)] for r in range(vregs.num_regs)},
             "mem": dict(mem.data_mem)}
+
+
+def _trace_writes(mem, sregs, mregs, vregs, trace) -> None:
+    pc = [0]
+    read_instr = mem.read_instr
+
+    def fetch(addr, _read=read_instr):
+        pc[0] = int(addr)
+        return _read(addr)
+    mem.read_instr = fetch
+    for kind, rf in (("x", sregs), ("m", mregs), ("v", vregs)):
+        def write(reg, data, _rf=rf, _kind=kind, _write=rf.write):
+            _write(reg, data)
+            if _kind == "x" and reg == 0 and _rf.zero_reg_hardwired:
+                return
+            if _kind == "v" and reg == 0:
+                return
+            value = _rf.read(reg)
+            value = [float(x) for x in value] if _kind == "v" else int(value) & 0xFFFFFFFF
+            trace.append((_kind, int(reg), value, pc[0]))
+        rf.write = write
 
 
 # -- comparing a platform run with the functional sim -------------------------------------

@@ -38,6 +38,11 @@ from atalla.sysarr_tpu_system import (
     PHASE_AXI, PHASE_BACKEND, PHASE_CORE, PHASE_DRAM, PHASE_HARNESS, PHASE_SPAD, PHASE_SYSARR, PHASE_VLS,
     GSAUTPUBridge, RoundRobinBackendTicker, build_tpu_platform)
 from atalla.activity import ActivityProbe
+from atalla.check import DependencyChecker
+from atalla.profile import Profiler
+from atalla.trace import TraceWriter
+from atalla.sdma_log import SdmaLog
+from atalla.hang import CHECK_EVERY, HANG_AFTER, SimulationHang, diagnose, progress_signature
 from atalla.perf_monitor import PerfMonitor
 from base.sched import CompositeClocked
 from memory.axi import BEAT_BYTES, AXIBus, AXIParams, FixedLatencyDRAM
@@ -105,6 +110,14 @@ class AtallaPlatform:
     root: CompositeClocked
     perf: Optional[PerfMonitor] = None
     activity: Optional[ActivityProbe] = None
+    #: The dependency checker (atalla/check.py), with check=True.
+    check: Optional[DependencyChecker] = None
+    #: The per-packet profile (atalla/profile.py), with profile=True.
+    profile: Optional[Profiler] = None
+    #: The execution trace writer (atalla/trace.py), with trace=True.
+    tracer: Optional[TraceWriter] = None
+    #: The SDMA start/end log (atalla/sdma_log.py), with sdma_log=True.
+    sdma_log: Optional[SdmaLog] = None
     #: Names a pc for messages, e.g. "main_block3+20" (ElfProgram.describe).
     describe_pc: Optional[Callable[[int], str]] = None
     #: The DRAM model the masters or the AXI bus send to, when there is one.
@@ -117,15 +130,32 @@ class AtallaPlatform:
         self.root.tick(float(self.cycle))
         self.cycle += 1
 
-    def run_until_done(self, limit: int = 1_000_000) -> int:
+    def run_until_done(self, limit: int = 1_000_000, hang_after: Optional[int] = HANG_AFTER) -> int:
+        """Tick until the program halts and drains; return the cycles taken.
+
+        Raises RuntimeError after `limit` cycles, and SimulationHang (a
+        RuntimeError) as soon as nothing in the machine has moved for
+        `hang_after` cycles (None: never); both carry atalla/hang.py's report
+        of what each part is waiting on."""
         start = self.cycle
+        check_at, last_sig, last_change = start + CHECK_EVERY, None, start
         while not self.core.done:
             if self.cycle - start >= limit:
                 pc = self.core.pc
                 where = "%#x" % pc
                 if self.describe_pc is not None and self.describe_pc(pc) != where:
                     where += ", %s" % self.describe_pc(pc)
-                raise RuntimeError("no halt after %d cycles (pc %s)" % (limit, where))
+                raise RuntimeError("no halt after %d cycles (pc %s)\n%s"
+                                   % (limit, where, diagnose(self)))
+            if self.cycle >= check_at:
+                check_at += CHECK_EVERY
+                sig = progress_signature(self)
+                if sig != last_sig:
+                    last_sig, last_change = sig, self.cycle
+                elif hang_after is not None and self.cycle - last_change >= hang_after:
+                    raise SimulationHang("hung: nothing moved for %d cycles\n%s"
+                                         % (self.cycle - last_change,
+                                            diagnose(self, self.cycle - last_change)))
             self.tick()
         return self.cycle - start
 
@@ -133,8 +163,10 @@ class AtallaPlatform:
 def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]] = None, *,
                           systolic_array: str = "meissa", lane_count: int = 16,
                           dram_latency: int = 6, burst_bytes: int = DRAM_BURST_BYTES,
-                          warm_icache: bool = False, perf: bool = True,
+                          warm_icache: bool = False, perf: bool = False,
                           perf_timeline: bool = False, activity: bool = False,
+                          check: bool = False, profile: bool = False, trace: bool = False,
+                          sdma_log: bool = False,
                           init_sregs: Optional[Dict[int, int]] = None,
                           describe_pc: Optional[Callable[[int], str]] = None,
                           dram_channel: Any = None,
@@ -143,11 +175,21 @@ def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]
                           **core_kw) -> AtallaPlatform:
     """`program` and `data` as load_program_text returns them; `data` words
     go into DRAM. `systolic_array` is "meissa" (the RTL's) or "tpu"; extra
-    keywords go to SchedulerCore. `perf` attaches a PerfMonitor
+    keywords go to SchedulerCore (`history=True` keeps its per-packet
+    lists). Nothing that records is attached unless asked for, so a plain
+    run pays only for the model. `perf` attaches a PerfMonitor
     (atalla/perf_monitor.py) as platform.perf; `perf_timeline` makes it keep
-    the per-cycle timeline too. `activity` attaches an ActivityProbe
+    the per-cycle timeline too (and implies `perf`). `activity` attaches an ActivityProbe
     (atalla/activity.py) as platform.activity, which records every block's
-    state each cycle for tools/activity_view.py. `init_sregs` presets scalar
+    state each cycle for tools/activity_view.py. `check` attaches a
+    DependencyChecker (atalla/check.py) as platform.check, which reports
+    accesses nothing in the hardware orders. `profile` attaches a Profiler
+    (atalla/profile.py) as platform.profile, which charges every cycle to
+    the packet responsible (and attaches the monitor it reads). `trace`
+    attaches a TraceWriter (atalla/trace.py) as platform.tracer: issue and
+    writeback events in the format an RTL trace can be compared with.
+    `sdma_log` attaches an SdmaLog (atalla/sdma_log.py) as platform.sdma_log:
+    each SDMA's start and end, with its addresses and shape. `init_sregs` presets scalar
     registers, as a loader would (c_entry_sregs for compiled C).
     `describe_pc` names a pc in error messages (ElfProgram.describe).
     `dram_channel` (a RamulatorDRAM) times DRAM instead of `dram_latency`.
@@ -209,7 +251,7 @@ def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]
                           backends=backends, vls_bridges=parts.vls_bridges,
                           sysarr_bridge=sysarr_bridge, ports=ports, root=root,
                           describe_pc=describe_pc, dram_channel=dram_channel, axi=bus)
-    if perf or activity:
+    if perf or perf_timeline or activity or profile:
         # Last in every cycle: it observes and changes nothing.
         plat.perf = PerfMonitor(plat, timeline=perf_timeline or activity)
         root.add_child(plat.perf, phase=PHASE_HARNESS)
@@ -217,5 +259,17 @@ def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]
         # After the monitor, whose per-cycle bucket it records.
         plat.activity = ActivityProbe(plat)
         root.add_child(plat.activity, phase=PHASE_HARNESS)
+    if profile:
+        # After the monitor, whose bucket it charges to a packet.
+        plat.profile = Profiler(plat)
+        root.add_child(plat.profile, phase=PHASE_HARNESS)
+    if trace:
+        plat.tracer = TraceWriter(plat)
+        root.add_child(plat.tracer, phase=PHASE_HARNESS)
+    if sdma_log:
+        plat.sdma_log = SdmaLog(plat, describe_pc)
+    if check:
+        plat.check = DependencyChecker(plat)
+        root.add_child(plat.check, phase=PHASE_HARNESS)
     return plat
 

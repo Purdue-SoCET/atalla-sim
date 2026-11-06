@@ -125,8 +125,12 @@ class SchedulerCore(Clocked):
                  lsu_depth: int = 4,
                  ex_latency: Optional[Dict[str, int]] = None,
                  vector_core=None, backends=(), memory=None,
-                 icache_port=None, dcache_port=None):
+                 icache_port=None, dcache_port=None, history: bool = False):
         super().__init__()
+        #: Keep the per-packet history lists below (tests and traces read
+        #: them). Off by default: they grow with the run, and the counters
+        #: are all the platform's observers need.
+        self.history = bool(history)
         self._tick = -1
         self.program: Dict[int, int] = dict(program or {})
 
@@ -163,11 +167,15 @@ class SchedulerCore(Clocked):
         self.btb_hits = 0
         self.predicted_taken = 0
         self.flushes = 0
-        #: Every packet that entered the D1/D2 latch, as (cycle, pc).
-        self.issued_to_d1d2 = []
+        #: Packets that entered the D1/D2 latch, and that decode 2 issued.
+        self.d1d2_count = 0
+        self.issued_count = 0
         #: The D2/EX latch: the packet decode 2 issued last cycle, or None.
         self.d2ex = None
-        #: Every packet decode 2 issued, as (cycle, IssuedPacket).
+        #: With `history`: every packet that entered the D1/D2 latch, as
+        #: (cycle, pc), and every packet decode 2 issued, as
+        #: (cycle, IssuedPacket). Empty otherwise.
+        self.issued_to_d1d2 = []
         self.issued = []
 
         # Stage 4: execute and writeback.
@@ -193,7 +201,8 @@ class SchedulerCore(Clocked):
         #: written back its dirty lines after it.
         self.halted_at: Optional[int] = None
         self.done_at: Optional[int] = None
-        #: Every scalar write, as (cycle it reached the EX/WB latch, rd, value).
+        #: With `history`: every scalar write, as (cycle it reached the EX/WB
+        #: latch, rd, value).
         self.scalar_writes = []
 
     @property
@@ -267,8 +276,9 @@ class SchedulerCore(Clocked):
         if writes or masks:
             self.writeback_at(cycle + 1, scalar=[(w.rd, w.value) for w in writes],
                               mask=[(m.rd, m.value) for m in masks])
-            for w in writes:
-                self.scalar_writes.append((cycle + 1, w.rd, w.value))
+            if self.history:
+                for w in writes:
+                    self.scalar_writes.append((cycle + 1, w.rd, w.value))
         if vs is not None:
             self._vector_eval(cycle, granted.get("mts", False))
         self.ex_ready = {1: self.ex1.ready_in(granted.get("ex1", False)),
@@ -413,7 +423,9 @@ class SchedulerCore(Clocked):
         self._count(cycle, flush, halt, d1d2_ready, ifd1_ready, bhit)
         self.d2ex = d2.out_issued
         if self.d2ex is not None:
-            self.issued.append((cycle, self.d2ex))
+            self.issued_count += 1
+            if self.history:
+                self.issued.append((cycle, self.d2ex))
         for m in self._modules:
             m.commit()
         if self.execute:
@@ -433,7 +445,9 @@ class SchedulerCore(Clocked):
         if flush:
             self.flushes += 1
         if (d1d2_ready and self.ifd1.valid and not flush and not halt):
-            self.issued_to_d1d2.append((cycle, self.ifd1.pc))
+            self.d1d2_count += 1
+            if self.history:
+                self.issued_to_d1d2.append((cycle, self.ifd1.pc))
 
     def run(self, cycles: int, start: int = 0) -> None:
         for c in range(start, start + cycles):

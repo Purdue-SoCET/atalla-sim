@@ -16,11 +16,16 @@ program, and compare the reports.
 git clone --recurse-submodules git@github.com:Purdue-SoCET/atalla-sim.git
 cd atalla-sim
 python3 -m venv .venv && source .venv/bin/activate
-pip install numpy pytest   # and matplotlib for the plotting tools
+pip install -e '.[test]'   # numpy, pytest and the `atalla-sim` command; '.[test,plots]' adds matplotlib
 make native          # optional, needs g++: about 5x faster, identical results
 make ramulator       # optional, needs a C++20 g++ and CMake: DDR4 timing (--dram ramulator)
+atalla-sim doctor    # checks all of the above and says how to fix what's missing
 pytest               # about two minutes
 ```
+
+`atalla-sim` is the command for everything below (`atalla-sim -h` lists the
+subcommands); `atalla-sim run` is `python tools/run_kernel.py`, and the
+examples use either.
 
 Python 3.9 or newer. Two submodules live in `third_party/`:
 
@@ -41,11 +46,13 @@ skipped, not failed.
 ## 2. Run a program
 
 ```bash
-python tools/run_kernel.py relu.c --golden
+python tools/run_kernel.py relu.c --golden --report
 ```
 
 `relu.c` is one of the compiler's kernels: it zeroes the negative values of a
-4 × 32 BF16 tile. The report, annotated:
+4 × 32 BF16 tile. Without `--report` a run prints only its cycle count: the
+performance monitor that writes the report is attached only when asked for,
+so plain runs and sweeps pay nothing for it. The report, annotated:
 
 ```
 relu.c: 768 cycles
@@ -79,7 +86,12 @@ against the functional sim (lanes reduction order):
   the program kept waiting on.
 - `reference result` compares DRAM with the kernel's numpy answer.
 - `--golden` also runs the functional sim on the identical program and
-  compares every register and DRAM halfword.
+  compares every register and DRAM halfword. Before that it names the
+  *first* register write where the two part ways -- which write to which
+  register, at which cycle, made by which packet -- so a wrong result points
+  at the instruction that went wrong, not just at the final state. A
+  difference that never reaches the output still shows here (a load that
+  read a row before its DMA landed, then was overwritten).
 
 What `run_kernel.py` runs:
 
@@ -90,6 +102,7 @@ python tools/run_kernel.py prog.in                # an already assembled program
 python tools/run_kernel.py prog.elf               # a program the compiler linked
 python tools/run_kernel.py relu.c --elf           # compile and link it, then load the ELF
 python tools/run_kernel.py relu.c --save relu.in  # keep the program image that ran
+python tools/run_kernel.py relu.c --report       # where the cycles went
 python tools/run_kernel.py relu.c --perf-json relu.json --timeline   # the report as JSON
 ```
 
@@ -127,10 +140,127 @@ drawing, a timeline has a row per block and, on top, the performance
 monitor's cycle buckets; click it to jump there.
 
 `--activity gemm.json` saves the recording instead;
-`python tools/activity_view.py gemm.json` draws it later. The blocks and
-what "active" means for each are in `src/atalla/activity.py`.
+`atalla-sim view gemm.json` draws it later. The blocks and what "active"
+means for each are in `src/atalla/activity.py`.
+
+**A whole workload.** Several runs -- a model's layers, say -- join into one
+timeline, with a band marking where each starts and a table of the layers
+(cycles, share, busiest blocks; click one to zoom to it):
+
+```bash
+atalla-sim view --join mlp gemm.json add.json relu.json -o mlp.html
+atalla-sim model examples/model/mlp.plan.json --activity mlp.html   # every operation of a model
+```
+
+**Sharing.** Every page is self-contained: send the `.html`. For a team,
+host the viewer once and point it at traces:
+
+```bash
+atalla-sim view --empty -o viewer.html     # the viewer alone: open or drop a trace on it
+atalla-sim view --serve traces/            # a folder of traces on http://127.0.0.1:8000/
+```
+
+The viewer opens a trace you pick or drop on it (it is read in the browser,
+not uploaded), or the one at `viewer.html?trace=URL` when it is hosted next
+to its traces (GitHub Pages, a lab web server).
+
+### Find the packets that cost the most
+
+```bash
+python tools/run_kernel.py softmax.c --profile 8 --save-asm softmax.s
+```
+
+charges every cycle to the packet responsible -- the one issuing, the one
+decode 2 holds while it stalls, the one being fetched while the frontend
+waits -- and prints the packets that took the most, with what they waited on:
+
+```
+where the cycles went, by packet (top 8 of 105 packets; 657 cycles):
+  cycles      %   issued  pc                        packet / waits
+     133  20.2%        0  halt                      (after halt.s: draining work in flight and dcache writebacks)
+      37   5.6%        1  0xf0 (asm line 50)        scpad.ld x11, x10, x9
+                                                      stall:hazard:scalar_load 28, frontend:icache 7, frontend:refill 1
+      17   2.6%        2  0x118 (asm line 59)       addi.s x11, x0, 1
+                                                      stall:hazard:sdma 14, frontend:icache 1
+```
+
+The wait names are the monitor's cycle buckets (`--report` explains them).
+For a C program the line numbers refer to the compiler's assembly, which
+`--save-asm` keeps; the same `asm line N` appears in the hang report and the
+dependency check. `--profile-json PATH` writes every packet's row.
+
+### Follow the scratchpad DMAs
+
+```bash
+python tools/run_kernel.py add.c --sdma-log -          # or --sdma-log sdma.log
+```
+
+prints a line when each `scpad.ld` / `scpad.st` starts and one when it ends:
+
+```
+cycle   208 start #0 scpad.ld sp0 pc 0x294: dram 0x1000 -> row 0, 4x32 (256 B, dram stride 64 B), x11
+cycle   284 end   #0 scpad.ld sp0 pc 0x294: 76 cycles
+```
+
+`#n` ties an end to its start; rows x cols are BF16 elements, and `x11` is
+the `rs1` the DMA holds busy until it ends. For a C program the start line
+also names the assembly line. Off by default, at no cost.
+
+### Check a program's dependencies
+
+```bash
+python tools/run_kernel.py add.c --check          # report; --check=error also exits 1
+```
+
+reports the accesses nothing in the hardware orders, so a program gets them
+right only by timing:
+
+- a `vreg.ld` reading a pad row an in-flight `scpad.ld` is still filling: the
+  hardware makes the load wait only if it reads the register the DMA holds
+  busy (the DMA's `rs1`);
+- a `scpad.st` reading a row a `vreg.st` hasn't written yet: the vreg.st
+  reservations order only an SDMA on the same `rs1`;
+- the same rows from the other side (a `scpad.ld` over rows a `vreg.st` still
+  writes, a `vreg.st` into rows an SDMA still uses);
+- scalar loads and stores at addresses that aren't a multiple of 4 (the word
+  path aligns them down);
+- packets the hardware can't run as one packet.
+
+```
+dependency check: 1 finding at 1 pc
+  scpad.ld -> vreg.ld: a vreg.ld read a row an in-flight scpad.ld was still filling
+    0x44c, first at cycle 343: vreg.ld of pad 1 row 0 (rs1 x10) while the scpad.ld at
+    0x3ac (rs1 x11) still fills rows 0-3; the load doesn't read x11, so nothing makes it wait
+      packet: vreg.ld v1, x10, x9
+```
+
+A finding can still compute the right answer in this run (here row 0 lands
+first); it breaks when the timing changes. The checker only reads, so a
+checked run takes the same cycles. Rules and limits: `src/atalla/check.py`.
 
 ## 3. Explore a design
+
+### Machine configurations
+
+A design point is a file in `configs/`:
+
+```bash
+python tools/run_kernel.py gemm --config atalla-0x01        # the default machine
+python tools/run_kernel.py gemm --config atalla-0x01-ddr4   # with the AXI bus and Ramulator DDR4
+python tools/run_kernel.py gemm --config my-design.toml --lanes 8   # flags override the file
+```
+
+`configs/atalla-0x01.toml` lists every key with its default and what it
+means: the lanes, the array, the data cache, the load/store queue, scalar
+execute latencies, the DRAM model and its parameters, the AXI bus's sizes.
+Your own file needs only the keys it changes; an unknown key is an error, so
+a typo can't leave a parameter at its default unnoticed. `--report` prints
+the resolved machine on one line, and `--perf-json`, `--profile-json` and
+`--activity` record all of it next to the results. `atalla-sim --version`
+says which simulator, ISA and RTL produced them.
+
+When comparing with an RTL simulation or the functional simulator, read
+[known-differences.md](known-differences.md) first.
 
 ### From the command line
 
@@ -146,6 +276,22 @@ what "active" means for each are in `src/atalla/activity.py`.
 | `--burst-bytes N` | 8 | bytes per DRAM request, for every DRAM master; 8 is the RTL's 64-bit interface |
 | `--warm-icache` | off | start with the program in the instruction cache |
 | `--limit N` | 5,000,000 | stop after this many cycles |
+| `--hang-after N` | 50,000 | stop once nothing has moved for N cycles, with a report of what everything waits on (0: never) |
+
+### Your own inputs and outputs
+
+```bash
+python tools/run_kernel.py add.c --input a.npy@0x1000 --input b.npy@0x2000 \
+    --output 0x3000:4x32=c.npy --expect c_ref.npy@0x3000 --ulps 1
+```
+
+`--input FILE@ADDR[:DTYPE]` puts an array (a `.npy` file, or numbers in a
+text file) into DRAM at byte address `ADDR` before the run, after the
+program's own data; `--output ADDR:SHAPE[:DTYPE][=FILE]` reads one back,
+prints a summary and saves it; `--expect FILE@ADDR[:DTYPE]` compares DRAM
+with a reference and exits 1 when any element is more than `--ulps` BF16
+steps off. Types: `bf16` (the default), `f32`, `i32`, `u32`, `i16`, `u16`,
+`i8`, `u8`. A C program's stack is placed above every input and output.
 
 ### From Python
 
@@ -167,6 +313,7 @@ plat = build_atalla_platform(
     lane_count=8,                                    # 8 lanes of 4 elements
     dram_latency=20,
     dcache_config=DCacheConfig(size_bytes=2048, ways=2),
+    perf=True,                                       # attach the performance monitor
 )
 cycles = plat.run_until_done()
 print(cycles, c_kernels.check(path, plat))
@@ -180,10 +327,75 @@ print(plat.perf.report()["cycle_breakdown"])
 | `dcache_config` | 4 KB, 4-way, 64 B lines, 8 MSHRs | `DCacheConfig`, `src/scheduler/dcache.py` |
 | `ex_latency` | e.g. `{"div.s": 66, "mul.s": 2}` | `DEFAULT_LATENCY`, `src/scheduler/execute.py` |
 | `lsu_depth` | 4 | load/store queue entries |
-| `perf_timeline` | off | keep a per-cycle record in `plat.perf.timeline` |
+| `perf` | off | attach the performance monitor as `plat.perf` |
+| `perf_timeline` | off | keep a per-cycle record in `plat.perf.timeline` (implies `perf`) |
+| `history` | off | keep the scheduler's per-packet lists (`core.issued`, `core.issued_to_d1d2`, `core.scalar_writes`); off, only their counts |
+
+Anything that records is off unless asked for, so a plain run pays only for
+the model.
 
 Scratchpad sizes are constants in `src/atalla/sysarr_tpu_system.py`
 (`SPAD_TOTAL_BYTES`, `SPAD_NUM_PADS`, ...).
+
+### A kernel in a test
+
+`atalla.kernel.Kernel` runs one program with numpy inputs and returns numpy
+outputs, on atalla-sim and, with `golden=True`, on the functional sim from
+the same image:
+
+```python
+import numpy as np
+from atalla.kernel import Kernel
+from atalla.tensors import assert_close, bf16_round
+
+a = bf16_round(np.random.default_rng(0).normal(size=(4, 32)))
+k = Kernel(c=open("my_kernel.c").read())    # or asm=..., image="prog.in", program=(instr, data)
+k.write(0x1000, a)                          # bf16 unless dtype= says otherwise
+k.output(0x3000, (4, 32))                   # keeps the C stack clear of it
+r = k.run(golden=True, check=True)          # keywords go to build_atalla_platform
+assert_close(r.read(0x3000, (4, 32)), 2 * a, ulps=1)          # within 1 BF16 step
+assert_close(r.golden.read(0x3000, (4, 32)), 2 * a, ulps=1)
+print(r.cycles, r.plat.check.summary())
+```
+
+`atalla.tensors.compare(got, want)` gives max abs error, rel_l2, cosine and
+the worst error in BF16 steps. Cosine alone hides scale errors; the BF16-step
+bound is the one to gate on.
+
+### Sweep a parameter
+
+```bash
+atalla-sim sweep gemm --param lanes=4,8,16,32 --param dram_latency=6,50 -j 8 \
+    -o sweep.csv --plot sweep.png
+```
+
+runs one program on every combination, in parallel, and prints a row per
+point (the parameters, cycles, packets issued; `--perf` adds the monitor's
+cycle buckets). A parameter is any key of the machine configuration: a
+dotted path (`dcache.size_bytes`, `ramulator.nCL`), a key name that appears
+once (`lane_count`), or `lanes`, `array`, `dram`, `latency`. `--config`
+picks the base machine. A C program is compiled once, so every point runs
+the same image.
+
+### Cycle counts on the reference kernels
+
+```bash
+atalla-sim bench                    # every frozen kernel against tests/perf_baseline.json
+atalla-sim bench --update           # after an intended timing change: commit the new baseline with it
+atalla-sim gallery site/            # a static site: each kernel's trace in the viewer, ready to host
+```
+
+`bench` fails when any reference kernel's cycle count moves (`--tolerance`
+loosens it), so a timing change lands together with its updated baseline;
+it also reports how fast the simulator ran each kernel. `gallery` needs no
+private submodule (the kernels are frozen images in the repository), so it
+can run in CI and publish to GitHub Pages; with the functional simulator it
+adds the example MLP as a workload.
+
+The repository's CI (`.github/workflows/ci.yml`) runs the tests and `bench`
+on every push and pull request, with the cycle table in the job summary, and
+publishes the gallery to GitHub Pages from master. Without the private
+submodules the tests that need them skip; the file says how to add them.
 
 ### Larger studies
 
@@ -258,7 +470,8 @@ test, put a `.c` file in `test_validation/` whose header says
 
 | symptom | meaning |
 |---|---|
-| `no halt after N cycles` | the program never reached `halt`: an endless loop, or waiting on something that never comes. The growing stall bucket names what. |
+| `hung: nothing moved for N cycles` | nothing in the machine did any work for `--hang-after` cycles (50,000 by default): decode 2 waits on something that will never come. The report under it names the packet, what it waits on (a busy register, a busy unit, a reservation), the registers held busy and every block still holding work. A "broke the hardware's packet rules" line means the RTL would drop part of a packet, typically losing a register write. |
+| `no halt after N cycles` | the program never reached `halt` within `--limit`, but kept doing work: usually an endless loop. The same report follows. |
 | `packets the RTL would mangle` | a packet uses more of some unit than the hardware has in a cycle; the real scheduler would drop part of it. With C, a compiler bug. |
 | `reference result: FAIL` with *a known compiler bug* | the compiler team already lists this kernel as failing. |
 | tests skipped: *functional sim unavailable* | the submodule is missing: `git submodule update --init`. |

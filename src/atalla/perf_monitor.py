@@ -94,6 +94,9 @@ class PerfMonitor(Clocked):
         self._mul_ops_seen = 0
         self.timeline: List[str] = []
         self.timeline_busy: List[List[str]] = []
+        #: This cycle's bucket, for observers ticked after the monitor
+        #: (atalla/profile.py); None before the first cycle and after halt.
+        self.last_bucket: Optional[str] = None
 
     # -- one cycle --------------------------------------------------------------------
     def tick(self, time: Optional[float] = None) -> None:
@@ -102,9 +105,11 @@ class PerfMonitor(Clocked):
             return
         core = self.p.core
         if core.done_at is not None and cycle > core.done_at:
+            self.last_bucket = None
             return
         self.cycles += 1
         bucket = self._bucket(core)
+        self.last_bucket = bucket
         self.buckets[bucket] += 1
         busy = self._busy_units(core, cycle)
         self.busy.update(busy)
@@ -113,11 +118,11 @@ class PerfMonitor(Clocked):
             self.timeline_busy.append(busy)
 
     def _bucket(self, core) -> str:
-        issued = core.issued
-        if len(issued) > self._issued_seen:
-            for _, ip in issued[self._issued_seen:]:
-                self._count_packet(ip.packet)
-            self._issued_seen = len(issued)
+        # The monitor ticks every cycle, after the core, and decode 2 issues
+        # at most one packet a cycle: the one in the D2/EX latch.
+        if core.issued_count > self._issued_seen:
+            self._count_packet(core.d2ex.packet)
+            self._issued_seen = core.issued_count
             return "issue"
         d2 = core.decode2
         if d2.last_stall == "unit":
@@ -328,8 +333,12 @@ class PerfMonitor(Clocked):
                   % ("%.2f" % ai if ai is not None else "n/a")]
         return "\n".join(lines)
 
-    def to_json(self, path: str, timeline: bool = False) -> None:
+    def to_json(self, path: str, timeline: bool = False, config: Optional[dict] = None) -> None:
+        """The report as JSON; `config`, the machine configuration
+        (atalla/config.py), goes in with it."""
         out = self.report()
+        if config is not None:
+            out["config"] = config
         if timeline and self.timeline_on:
             out["timeline"] = {"bucket": self.timeline, "busy": self.timeline_busy}
         with open(path, "w") as f:

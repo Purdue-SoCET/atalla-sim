@@ -192,8 +192,8 @@ class ActivityProbe(Clocked):
         d2 = core.decode2
 
         # Fetch and decode 1.
-        moved = len(core.issued_to_d1d2) > prev["to_d1d2"]
-        prev["to_d1d2"] = len(core.issued_to_d1d2)
+        moved = core.d1d2_count > prev["to_d1d2"]
+        prev["to_d1d2"] = core.d1d2_count
         filling = core.icache.state != 0
         s["icache"] = ACTIVE if filling else IDLE
         s["pc"] = ACTIVE if moved else STALLED if filling else IDLE
@@ -205,8 +205,8 @@ class ActivityProbe(Clocked):
             s["dec1_s%d" % i] = ACTIVE if _is_instruction(word) else IDLE
 
         # Decode 2: the packet in D1/D2, issued this cycle or held.
-        issued = len(core.issued) > prev["issued"]
-        prev["issued"] = len(core.issued)
+        issued = core.issued_count > prev["issued"]
+        prev["issued"] = core.issued_count
         latch = core.d1d2
         for kind, words in (("s", latch.scalar), ("v", latch.vector), ("d", latch.sdma)):
             for i, word in enumerate(words):

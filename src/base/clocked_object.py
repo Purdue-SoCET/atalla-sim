@@ -17,6 +17,7 @@ from outside its own tick. base/sched.py states the rules in full.
 """
 
 from typing import Optional
+from base import debug
 from base.debug import dprintf
 
 Time = float
@@ -96,4 +97,5 @@ class Clocked:
         return cycle
 
     def tick(self, time: Optional[Time] = None) -> None:
-        dprintf("Clocked", f"{self.__class__.__name__} tick at {time}")
+        if debug.ON:
+            dprintf("Clocked", f"{self.__class__.__name__} tick at {time}")

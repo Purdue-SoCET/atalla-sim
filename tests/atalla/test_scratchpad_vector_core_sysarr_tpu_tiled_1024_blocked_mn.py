@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_ROOT = REPO_ROOT / "src"
@@ -1418,6 +1419,7 @@ def test_blocked_mn_medium_reuse_batch_avoids_datapath_overflow() -> None:
 
 
 def test_blocked_mn_write_logs_emits_tk_gantt_plots() -> None:
+    pytest.importorskip("matplotlib")   # the plots extra: pip install -e '.[plots]'
     matrix_size = 64
     tile_size = 32
     act = _act_matrix_u16(matrix_size)

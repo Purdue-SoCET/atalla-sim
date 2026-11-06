@@ -3,6 +3,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("matplotlib")   # the plots extra: pip install -e '.[plots]'
+
 from tools.plot_design_schedule_matrix import (
     DESIGNS, SCHEDULES, Matrix, _burst_utilisation, plot_decomposition,
     plot_dram, plot_interaction, plot_kernel_ecdf, plot_matrix_cycles,
