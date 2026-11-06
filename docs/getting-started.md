@@ -189,6 +189,23 @@ For a C program the line numbers refer to the compiler's assembly, which
 `--save-asm` keeps; the same `asm line N` appears in the hang report and the
 dependency check. `--profile-json PATH` writes every packet's row.
 
+### Follow the scratchpad DMAs
+
+```bash
+python tools/run_kernel.py add.c --sdma-log -          # or --sdma-log sdma.log
+```
+
+prints a line when each `scpad.ld` / `scpad.st` starts and one when it ends:
+
+```
+cycle   208 start #0 scpad.ld sp0 pc 0x294: dram 0x1000 -> row 0, 4x32 (256 B, dram stride 64 B), x11
+cycle   284 end   #0 scpad.ld sp0 pc 0x294: 76 cycles
+```
+
+`#n` ties an end to its start; rows x cols are BF16 elements, and `x11` is
+the `rs1` the DMA holds busy until it ends. For a C program the start line
+also names the assembly line. Off by default, at no cost.
+
 ### Check a program's dependencies
 
 ```bash

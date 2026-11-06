@@ -293,6 +293,9 @@ def main(argv=None) -> None:
     ap.add_argument("--save-asm", metavar="PATH",
                     help="for a .c program: keep the compiler's assembly (the profile and "
                          "other reports refer to its line numbers)")
+    ap.add_argument("--sdma-log", metavar="PATH",
+                    help="log each SDMA's start and end (cycle, pc, addresses, shape, "
+                         "duration; src/atalla/sdma_log.py) to PATH, or - for the terminal")
     ap.add_argument("--trace", metavar="PATH",
                     help="write the execution trace (packets issued, register writes; "
                          "src/atalla/trace.py) for atalla-sim compare-rtl")
@@ -346,6 +349,7 @@ def main(argv=None) -> None:
                                  check=bool(args.check),
                                  profile=bool(args.profile or args.profile_json),
                                  trace=bool(args.trace),
+                                 sdma_log=bool(args.sdma_log),
                                  perf_timeline=args.timeline, init_sregs=init_sregs,
                                  describe_pc=describe_pc, strict=False)
     writes = lockstep.attach(plat) if args.golden else None
@@ -403,6 +407,12 @@ def main(argv=None) -> None:
         compare(plat, instr, data, red, init_sregs, writes)
     if args.check:
         print(plat.check.summary())
+    if args.sdma_log == "-":
+        print("SDMAs (%d):" % len(plat.sdma_log.records))
+        sys.stdout.write(plat.sdma_log.text())
+    elif args.sdma_log:
+        plat.sdma_log.write(args.sdma_log)
+        print("SDMA log written to %s (%d SDMAs)" % (args.sdma_log, len(plat.sdma_log.records)))
     if args.trace:
         plat.tracer.write(args.trace)
         print("trace written to %s" % args.trace)
