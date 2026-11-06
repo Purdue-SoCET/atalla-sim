@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "atalla-sim"
-version = "0.2.0"
+version = "1.2.0"
 description = "Cycle-accurate simulator for the Atalla accelerator"
 requires-python = ">=3.9"
 dependencies = ["numpy", "tomli>=1.1; python_version < '3.11'"]
