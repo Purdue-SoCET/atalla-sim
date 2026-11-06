@@ -14,7 +14,7 @@ import torch
 from torch import nn
 
 ROOT = Path(__file__).resolve().parents[1]
-SIM = Path(os.environ.get('ATALLA_SIM_ROOT', ROOT / 'atalla-sim'))
+SIM = Path(os.environ.get('ATALLA_SIM_ROOT', ROOT.parent))
 sys.path[:0] = [str(ROOT), str(SIM / 'src')]
 import build_model
 from validation_metrics import compare_cosine_max_mean

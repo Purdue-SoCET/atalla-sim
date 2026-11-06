@@ -11,7 +11,8 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parent
-COMPILER = ROOT / "aihw-ppci-compiler"
+# Inside atalla-sim: its compiler submodule, not a copy of our own.
+COMPILER = ROOT.parent / "third_party" / "aihw-ppci-compiler"
 sys.path.insert(0, str(ROOT / "atalla-graph"))
 sys.path.insert(0, str(COMPILER))
 

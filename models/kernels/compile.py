@@ -10,7 +10,7 @@ import argparse
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'aihw-ppci-compiler'))
+sys.path.insert(0, str(ROOT.parent / 'third_party' / 'aihw-ppci-compiler'))
 from ppci import api
 from ppci.arch.atalla.registers import get_register
 from ppci.irutils import verify_module

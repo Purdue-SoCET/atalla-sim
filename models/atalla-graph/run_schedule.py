@@ -59,7 +59,7 @@ def run_schedule(graph_module: GraphModule, example_input: torch.Tensor, out_dir
     output_path = out_dir / "graph_schedule.c"
     output_path.write_text(code)
     repo_root = Path(__file__).resolve().parents[1]
-    compiler_root = repo_root / "aihw-ppci-compiler"
+    compiler_root = repo_root.parent / "third_party" / "aihw-ppci-compiler"
     kernel_root = repo_root / "kernels"
     manifest = build_kernel_manifest(allocated, kernel_root, compiler_root)
     manifest_path = out_dir / "kernel_manifest.json"

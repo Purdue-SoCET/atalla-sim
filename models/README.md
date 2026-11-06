@@ -1,4 +1,4 @@
-# atalla-model-runner
+# models: a PyTorch model as one Atalla ELF
 
 Trace a BF16 PyTorch model, schedule padded 32x32 tiles, and compile its graph
 into one Atalla ELF. Shared callable kernels live in `kernels/`; the runner
@@ -6,17 +6,19 @@ emits one graph schedule and embeds all initialized tensor data in the ELF.
 
 ## Build
 
+From the atalla-sim repository root:
+
 ```bash
-git submodule update --init aihw-ppci-compiler atalla-sim
-python -m pip install torch numpy
-python build_model.py --model basic --out-dir out/basic
-python build_model.py --model alexnet_small --scale 0.01 --out-dir out/graph
+git submodule update --init third_party/aihw-ppci-compiler
+pip install torch
+atalla-sim models build basic                  # writes models/out/basic/
+atalla-sim models build alexnet_small          # --scale 0.01 by default
 ```
 
-The compiler submodule is needed to build; the simulator submodule is needed
-to execute and verify. Their nested submodules are optional for this workflow; initialize those separately for their own validation
-tools. The simulator's native extension is optional and can be built with
-`make -C atalla-sim native` for faster execution.
+or, from this folder, `python build_model.py --model basic --out-dir out/basic`.
+This folder uses the repository's compiler submodule
+(`third_party/aihw-ppci-compiler`) and the simulator around it; `make native`
+at the repository root makes the simulation faster.
 
 The output directory contains `output.elf`, `dram.bin`, `graph_schedule.c`,
 `kernel_manifest.json`, `tensor_manifest.json`, a linker layout, objects, and
@@ -38,11 +40,11 @@ active. The compiler submodule has no source modifications.
 
 ## Execute and check numerical results
 
-The pinned `atalla-sim` submodule runs the linked ELF:
+atalla-sim runs the linked ELF:
 
 ```bash
-python verify_model.py --model basic --out-dir out/basic
-python verify_model.py --model alexnet_small --out-dir out/graph
+atalla-sim models verify basic
+atalla-sim models verify alexnet_small --limit 20000000
 ```
 
 The verifier builds and loads the actual ELF, runs with strict simulator
@@ -51,12 +53,13 @@ with the same BF16 PyTorch graph. `numerical_report.json` records per-node
 cosine similarity, maximum and mean absolute error, tolerances, cycle count,
 and the ELF SHA256. The full spatial model takes longer; progress is printed
 every 100,000 cycles. Set
-`--sim-root`, `--seed`, `--scale`, or `--limit` as needed.
+`--seed`, `--scale`, or `--limit` as needed (`verify_model.py` also takes
+`--sim-root`, another atalla-sim checkout).
 
 To run a built ELF directly:
 
 ```bash
-python atalla-sim/tools/run_kernel.py out/graph/output.elf
+atalla-sim run models/out/basic/output.elf --profile 10 --sdma-log -
 ```
 
 Focused library tests compile small graphs, check cosine similarity (> 0.99
@@ -76,6 +79,16 @@ tolerances (atol 0.01, rtol 0.03); its largest intermediate absolute error was
 about 21 minutes. See the generated numerical report for a particular build. Average
 pooling, layer normalization, GELU, and attention are not implemented; the
 capability manifest rejects unsupported operators and weight layouts.
+
+## Reference programs for atalla-sim
+
+`python freeze.py basic` stores a built ELF as a program image in
+`tests/equivalence/programs/model_basic.c.in.gz`, with every checked result's
+PyTorch value in `tests/models/model_basic.expected.json`. atalla-sim's tests
+then run and check the model without torch or the compiler, and `atalla-sim
+bench` and the gallery include it. The compiler doesn't emit the same code on
+every run (cycle counts vary by about 1.5% between builds), so refreeze, and
+`atalla-sim bench --update`, only on purpose.
 
 ## Kernel contributors
 

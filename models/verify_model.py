@@ -32,6 +32,35 @@ def read_tensor(platform, info):
     return out.reshape(logical)
 
 
+def expected_results(model_name, out_dir, seed=42, scale=.01):
+    """(node, operation, tensor info, BF16 PyTorch value) for every scheduled
+    result the verifier checks, in schedule order."""
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    model,x=build_model.load_model(model_name,scale)
+    graph=build_model.build_graph(model,x)
+    from scripts.generate_schedule import _detect_scaled_args
+    folded=_detect_scaled_args(graph)
+    expected={}
+    class Capture(torch.fx.Interpreter):
+        def run_node(self,node):
+            value=super().run_node(node)
+            if isinstance(value,torch.Tensor):expected[node.name]=value.detach().float().numpy()
+            return value
+    with torch.no_grad():Capture(graph).run(x.bfloat16())
+    tensors=json.loads((out_dir/'tensor_manifest.json').read_text())
+    manifest=json.loads((out_dir/'kernel_manifest.json').read_text())
+    nodes={n.name:n for n in graph.graph.nodes}
+    out=[]
+    for binding in manifest['bindings']:
+        name=binding['node']
+        if nodes[name] in folded:continue
+        info=tensors[name]
+        if info['storage_layout']!=0:continue
+        out.append((name,binding['operation'],info,expected[name]))
+    return out
+
+
 def verify(model_name, out_dir, sim_root, seed=42, scale=.01, limit=10_000_000, atol=.01, rtol=.03):
     elf=build_model.build(model_name,out_dir,seed,scale)
     sys.path.insert(0,str(sim_root/'src'))
@@ -50,30 +79,11 @@ def verify(model_name, out_dir, sim_root, seed=42, scale=.01, limit=10_000_000, 
     status=platform.core.decode2.srf.storage.values[10]
     if status:
         raise RuntimeError(f'Graph returned nonzero status 0x{status:X}')
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    model,x=build_model.load_model(model_name,scale)
-    graph=build_model.build_graph(model,x)
-    from scripts.generate_schedule import _detect_scaled_args
-    folded=_detect_scaled_args(graph)
-    expected={}
-    class Capture(torch.fx.Interpreter):
-        def run_node(self,node):
-            value=super().run_node(node)
-            if isinstance(value,torch.Tensor):expected[node.name]=value.detach().float().numpy()
-            return value
-    with torch.no_grad():Capture(graph).run(x.bfloat16())
-    tensors=json.loads((out_dir/'tensor_manifest.json').read_text())
     manifest=json.loads((out_dir/'kernel_manifest.json').read_text())
-    nodes={n.name:n for n in graph.graph.nodes}
     results=[]
-    for binding in manifest['bindings']:
-        name=binding['node']
-        if nodes[name] in folded:continue
-        info=tensors[name]
-        if info['storage_layout']!=0:continue
+    for name,operation,info,reference in expected_results(model_name,out_dir,seed,scale):
+        binding=dict(node=name,operation=operation)
         actual=read_tensor(platform,info)
-        reference=expected[name]
         cosine, max_error, mean_error = compare_cosine_max_mean(actual, reference)
         passed=bool(np.allclose(actual,reference,atol=atol,rtol=rtol,equal_nan=True))
         results.append(dict(node=name,operation=binding['operation'],passed=passed,
@@ -93,7 +103,7 @@ if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--model',choices=('basic','alexnet_small'),default='basic')
     parser.add_argument('--out-dir',type=Path,default=Path('out/graph'))
-    parser.add_argument('--sim-root',type=Path,default=Path(__file__).resolve().parent/'atalla-sim')
+    parser.add_argument('--sim-root',type=Path,default=Path(__file__).resolve().parents[1])   # the atalla-sim this lives in
     parser.add_argument('--seed',type=int,default=42)
     parser.add_argument('--scale',type=float,default=.01)
     parser.add_argument('--limit',type=int,default=10_000_000)
