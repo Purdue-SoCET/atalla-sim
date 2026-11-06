@@ -1,0 +1,74 @@
+{
+  "schema_version": 2,
+  "tile_layout": "canonical padded 32x32 BF16 tiles, or descriptor-tagged prepacked constant GEMM streams",
+  "operations": {
+    "add": {
+      "implemented": true,
+      "source": "src/elementwise.c",
+      "abi_symbol": "add_kernel",
+      "supports": "equal-shaped tensors, or same-shaped lhs/output plus a rank-1 trailing-dimension rhs broadcast"
+    },
+    "mul": {
+      "implemented": true,
+      "source": "src/elementwise.c",
+      "abi_symbol": "mul_kernel",
+      "supports": "equal-shaped tensors with identical tile grids"
+    },
+    "mul_scalar": {
+      "implemented": true,
+      "source": "src/elementwise.c",
+      "abi_symbol": "mul_scalar_kernel",
+      "supports": "same input/output shape and tile grid"
+    },
+    "relu": {
+      "implemented": true,
+      "source": "src/elementwise.c",
+      "abi_symbol": "relu_kernel",
+      "supports": "same input/output shape and tile grid"
+    },
+    "matmul": {
+      "implemented": true,
+      "source": "src/matmul.c",
+      "abi_symbol": "matmul_kernel",
+      "reference": "aihw-ppci-compiler/test_validation_kernels/gemm_tiled_pipelined.c",
+      "supports": "rank-2 BF16 input and output, constant RHS packed in storage_layout 1"
+    },
+    "conv2d": {
+      "implemented": true,
+      "source": "src/spatial.c",
+      "abi_symbol": "conv_kernel",
+      "reference": "aihw-ppci-compiler/test_validation_kernels/conv_pipelined.c",
+      "supports": "rank-4 NCHW input/output, constant grouped weights packed in storage_layout 2; grouped bias requires channels per group divisible by 32",
+      "dependencies": [
+        "src/spatial_tiles.c"
+      ]
+    },
+    "max_pool2d": {
+      "implemented": true,
+      "source": "src/spatial.c",
+      "abi_symbol": "maxpool_kernel",
+      "reference": "aihw-ppci-compiler/test_validation_kernels/maxpool_2x2.c",
+      "supports": "rank-4 NCHW BF16 max pooling, unit dilation, no ceil mode",
+      "dependencies": [
+        "src/spatial_tiles.c"
+      ]
+    },
+    "avg_pool2d": {
+      "implemented": false,
+      "source": null,
+      "abi_symbol": "avgpool_kernel",
+      "reference": null,
+      "supports": null
+    },
+    "flatten": {
+      "implemented": true,
+      "source": "src/spatial.c",
+      "abi_symbol": "flatten_kernel",
+      "supports": "rank-4 NCHW to rank-2 flatten from dimension 1",
+      "dependencies": [
+        "src/spatial_tiles.c"
+      ]
+    }
+  },
+  "compiler_reference_revision": "351b5fabf76fa3352ebc2e9571e9793d53c7cbe6"
+}
