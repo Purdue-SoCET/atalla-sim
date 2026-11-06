@@ -7,7 +7,7 @@ GEMM and tensor workloads can be measured (cycles, FLOP rate, bandwidth, queue
 depths) before there is silicon to measure.
 
     Project      https://github.com/Purdue-SoCET/atalla/
-    This repo    https://github.com/Purdue-SoCET/Atalla-Sim/
+    This repo    https://github.itap.purdue.edu/SoCETOrganization/atalla-sim/
     Contact      socet@purdue.edu
 
 
@@ -77,7 +77,7 @@ REPOSITORY LAYOUT
 GETTING STARTED
 ---------------
 
-    git clone --recurse-submodules git@github.com:Purdue-SoCET/atalla-sim.git
+    git clone --recurse-submodules org-726@github.itap.purdue.edu:SoCETOrganization/atalla-sim.git
     cd atalla-sim && python3 -m venv .venv && . .venv/bin/activate   # Python >= 3.9
     pip install -e '.[test]'       # numpy, pytest, and the `atalla-sim` command
     make native        # optional but recommended; see below

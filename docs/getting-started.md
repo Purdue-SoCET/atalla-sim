@@ -13,7 +13,7 @@ program, and compare the reports.
 ## 1. Install
 
 ```bash
-git clone --recurse-submodules git@github.com:Purdue-SoCET/atalla-sim.git
+git clone --recurse-submodules org-726@github.itap.purdue.edu:SoCETOrganization/atalla-sim.git
 cd atalla-sim
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e '.[test]'   # numpy, pytest and the `atalla-sim` command; '.[test,plots]' adds matplotlib
