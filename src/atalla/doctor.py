@@ -9,6 +9,7 @@ Exit status 1 when something required is missing.
 import argparse
 import importlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -104,14 +105,20 @@ def check_compiler() -> Check:
     if not (compiler / "ppci").is_dir():
         return Check("ppci", MISSING, "the compiler isn't checked out",
                      "git submodule update --init third_party/aihw-ppci-compiler")
-    p = subprocess.run([sys.executable, "-c", "import ppci; print(ppci.__version__)"],
+    # The atalla_cc front end, not just the package: it pulls in the code
+    # generator and its dependencies (pydot, ...), which `import ppci` doesn't.
+    p = subprocess.run([sys.executable, "-c",
+                        "import ppci; v = ppci.__version__; import ppci.cli.atalla_cc; print(v)"],
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True,
                        env=dict(os.environ, PYTHONPATH=str(compiler)))
     if p.returncode:
         last = (p.stderr.strip().splitlines() or ["?"])[-1]
-        return Check("ppci", MISSING, "the compiler doesn't import: %s" % last,
-                     "pip install -r %s/requirements.txt (if any), then rerun" % _rel(compiler))
-    return Check("ppci", OK, "the C compiler imports (%s)" % p.stdout.strip())
+        missing = re.search(r"No module named '([^'.]+)", last)
+        fix = ("pip install %s" % missing.group(1) if missing else
+               "pip install -r %s/requirements.txt (if any), then rerun" % _rel(compiler))
+        return Check("ppci", MISSING, "the compiler doesn't import: %s" % last, fix)
+    # (importing atalla_cc prints a line of its own; the version is last)
+    return Check("ppci", OK, "the C compiler imports (%s)" % (p.stdout.strip().splitlines() or ["?"])[-1])
 
 
 def check_golden() -> Check:
