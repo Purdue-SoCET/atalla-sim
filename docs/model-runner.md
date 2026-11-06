@@ -26,6 +26,10 @@ output vs the reference output: worst 1.0 BF16 steps, max abs 0.000488, rel_l2 0
 
 ## Status: a stub ahead of atalla-graph
 
+For a whole PyTorch model compiled into one ELF today, see
+[model-elf.md](model-elf.md) (`atalla-sim models`).
+
+
 The plan is what atalla-graph writes with `--plan-json` (schema
 `atalla-graph-plan-v1`): the function's inputs, then every operation in
 order, with operand and result ids, types, attributes, and the names of the

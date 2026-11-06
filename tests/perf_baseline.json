@@ -33,6 +33,9 @@
   "maxpool.c": {
    "cycles": 820
   },
+  "model_basic.c": {
+   "cycles": 40622
+  },
   "relu": {
    "cycles": 2038
   },
