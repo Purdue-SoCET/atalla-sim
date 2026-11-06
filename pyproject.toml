@@ -16,6 +16,8 @@ atalla-sim = "atalla.cli:main"
 [project.optional-dependencies]
 test = ["pytest>=7"]
 plots = ["matplotlib"]
+# models/ (atalla-sim models): PyTorch, plus pydot for the C compiler.
+models = ["torch", "pydot"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

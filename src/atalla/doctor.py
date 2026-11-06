@@ -172,9 +172,11 @@ def run_checks() -> List[Check]:
     if ag is not None:
         checks.append(ag)
     checks += [check_module("pytest", "for the test suite", "pip install pytest"),
-               check_module("matplotlib", "for the plotting tools", "pip install matplotlib")]
+               check_module("matplotlib", "for the plotting tools", "pip install matplotlib"),
+               check_module("torch", "for atalla-sim models (PyTorch models as ELFs)",
+                            "pip install torch")]
     for c in checks:
-        if c.name in ("pytest", "matplotlib") and c.status == MISSING:
+        if c.name in ("pytest", "matplotlib", "torch") and c.status == MISSING:
             c.status = WARN
     return checks
 

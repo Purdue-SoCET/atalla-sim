@@ -8,6 +8,7 @@
     atalla-sim new-component NAME     a new clocked component and its test, from the template
     atalla-sim compare-rtl A.trace B.trace   where an RTL trace and atalla-sim's part ways
     atalla-sim model PLAN.json        run a model's operation plan op by op (a stub ahead of atalla-graph)
+    atalla-sim models verify basic    build a PyTorch model into one ELF and check it against PyTorch
     atalla-sim doctor                 check the installation: what works, what's missing, how to fix it
     atalla-sim --version              the version, ISA fingerprint, RTL followed, submodule commits
 
@@ -158,6 +159,41 @@ def _model(argv):
         print("report written to %s" % args.report_json)
 
 
+def _models(argv):
+    """Build or verify a PyTorch model as one linked ELF (models/, which needs
+    torch). Runs models/build_model.py or verify_model.py with this Python."""
+    import argparse
+    import subprocess
+    root = _repo_root()
+    ap = argparse.ArgumentParser(
+        prog="atalla-sim models",
+        description="Trace a PyTorch model, schedule it onto the graph kernels in "
+                    "models/kernels, compile and link it into one ELF with its DRAM image "
+                    "(build), and run that ELF on atalla-sim checking every result against "
+                    "PyTorch (verify). Needs torch. docs/model-elf.md has the details.")
+    ap.add_argument("action", choices=("build", "verify"))
+    ap.add_argument("model", choices=("basic", "alexnet_small"))
+    ap.add_argument("--out-dir", metavar="DIR",
+                    help="where the ELF, DRAM image and manifests go (default models/out/MODEL)")
+    ap.add_argument("--seed", type=int)
+    ap.add_argument("--scale", type=float, help="the model's width scale (default 0.01)")
+    ap.add_argument("--limit", type=int, help="verify: cycles before giving up (default 10M)")
+    ap.add_argument("--atol", type=float, help="verify: absolute tolerance (default 0.01)")
+    ap.add_argument("--rtol", type=float, help="verify: relative tolerance (default 0.03)")
+    args = ap.parse_args(argv)
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        sys.exit("atalla-sim models needs PyTorch: pip install torch")
+    script = root / "models" / ("%s_model.py" % args.action)
+    cmd = [sys.executable, str(script), "--model", args.model,
+           "--out-dir", args.out_dir or str(root / "models" / "out" / args.model)]
+    for opt in ("seed", "scale") + (("limit", "atol", "rtol") if args.action == "verify" else ()):
+        if getattr(args, opt) is not None:
+            cmd += ["--" + opt, str(getattr(args, opt))]
+    return subprocess.call(cmd, cwd=str(root / "models"))
+
+
 def _version(argv):
     from atalla import version
     print(version.text())
@@ -179,6 +215,7 @@ COMMANDS = {
     "new-component": (_new_component, "write a new clocked component and its test from the template"),
     "compare-rtl": (_compare_rtl, "compare two execution traces (RTL vs atalla-sim run --trace)"),
     "model": (_model, "run a model's operation plan (atalla-graph --plan-json) op by op"),
+    "models": (_models, "build a PyTorch model into one ELF, or run it and check it against PyTorch"),
     "doctor": (_doctor, "check the installation and say how to fix what's missing"),
     "version": (_version, "the version, ISA fingerprint, RTL followed and submodule commits"),
 }
