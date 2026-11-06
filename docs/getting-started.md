@@ -397,6 +397,15 @@ on every push and pull request, with the cycle table in the job summary, and
 publishes the gallery to GitHub Pages from master. Without the private
 submodules the tests that need them skip; the file says how to add them.
 
+### A whole PyTorch model
+
+```bash
+pip install -e '.[models]'
+atalla-sim models verify basic       # trace, compile and link into one ELF, run, check vs PyTorch
+```
+
+[model-elf.md](model-elf.md) covers the models, the flow and its limits.
+
 ### Larger studies
 
 The harness-driven platform runs GEMMs too big to write as a program, and
