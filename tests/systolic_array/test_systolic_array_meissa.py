@@ -7,7 +7,7 @@ and the array retires one vector per cycle once full.
 import numpy as np
 import pytest
 
-from base.dtype import cast_vector, normalize_dtype
+from base.dtype import bf16_round, cast_vector, normalize_dtype
 from systolic_array.systolic_array_meissa import (
     SystolicArrayMEISSA, is_power_of_four, tree_levels)
 
@@ -343,3 +343,79 @@ def test_the_metrics_buffer_matches_the_kernel():
     if not _native.HAVE_NATIVE:
         pytest.skip("native kernel not built")
     assert _native.lib.atalla_meissa_metric_count() == _native.MM_COUNT
+
+
+# --- INT8 ----------------------------------------------------------------
+
+def test_int8_products_and_sums_are_exact_int32():
+    """INT8 has no reducer: the column sum leaves as an exact integer."""
+    n = 32
+    rng = np.random.default_rng(1)
+    w = rng.integers(-128, 128, size=(n, n))
+    a = rng.integers(-128, 128, size=(2 * n, n))
+
+    sa = SystolicArrayMEISSA(size=n, dtype="int8")
+    assert not sa.use_native, "INT8 runs the Python path"
+    sa.load_weights(w.tolist())
+    out, _ = _drive(sa, a.tolist())
+
+    assert np.array_equal(np.array(out, dtype=np.int64), a @ w)
+    assert all(isinstance(v, int) for v in out[0])
+    assert sa.overflow_count == 0
+
+
+def test_int8_extremes_fit_the_tree():
+    """-128 * -128 summed over 32 rows is 2^19, the largest an INT8 column can
+    reach -- past FP16 and int8, inside the 21-bit tree output."""
+    n = 32
+    sa = SystolicArrayMEISSA(size=n, dtype="int8")
+    sa.load_weights([[-128] * n for _ in range(n)])
+    out, _ = _drive(sa, [[-128] * n, [127] * n])
+
+    assert out[0] == [1 << 19] * n
+    assert out[1] == [-127 * 128 * n] * n
+    assert sa.overflow_count == 0
+
+
+@pytest.mark.parametrize("bad", [1.5, 128, -129])
+def test_int8_rejects_values_that_are_not_int8(bad):
+    """Quantizing is the caller's job; the array must not silently fix it."""
+    n = 4
+    sa = SystolicArrayMEISSA(size=n, dtype="int8")
+    with pytest.raises(ValueError):
+        sa.enqueue([bad, 0, 0, 0])
+    with pytest.raises(ValueError):
+        sa.load_weights([[bad] * n for _ in range(n)])
+
+
+@pytest.mark.parametrize("fmt", ["bf16", "fp16"])
+def test_int8_converted_output_rounds_the_exact_sum_once(fmt):
+    """int_output: the exact int sum goes through int -> FP32 (exact) and the
+    existing reducer, so the result is the true sum rounded once to 16 bits."""
+    n = 32
+    rng = np.random.default_rng(2)
+    w = rng.integers(-128, 128, size=(n, n))
+    a = rng.integers(-128, 128, size=(2 * n, n))
+    offset = -4 if fmt == "fp16" else 0
+
+    sa = SystolicArrayMEISSA(size=n, dtype="int8", int_output=fmt,
+                             int_exp_offset=offset)
+    sa.load_weights(w.tolist())
+    out, _ = _drive(sa, a.tolist())
+
+    exact = np.ldexp((a @ w).astype(np.float64), offset).astype(np.float32)
+    want = (bf16_round(exact) if fmt == "bf16"
+            else exact.astype(np.float16).astype(np.float32))
+    assert np.array_equal(np.array(out, dtype=np.float32), want)
+    assert np.isfinite(np.array(out)).all()
+
+
+def test_int8_conversion_is_one_more_pipeline_stage():
+    plain = SystolicArrayMEISSA(size=32, dtype="int8")
+    conv = SystolicArrayMEISSA(size=32, dtype="int8", int_output="bf16")
+    assert conv.pipeline_depth == plain.pipeline_depth + 1
+
+
+def test_int8_output_conversion_needs_int8():
+    with pytest.raises(ValueError):
+        SystolicArrayMEISSA(size=32, dtype="fp16", int_output="bf16")

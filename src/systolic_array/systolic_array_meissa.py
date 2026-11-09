@@ -29,6 +29,24 @@ Once the pipeline is full the array retires one output vector per cycle.
 Precision follows the RTL's BF16 configuration: inputs are BF16, products and
 every adder-tree sum are FP32, and a reducer converts to BF16 after the tree.
 
+INT8 follows the multi-format datapath (mult_datatypes.sv, adder_tree_node.sv):
+inputs are integers in [-128, 127], products and every tree sum are exact
+integers (the level-l adders are 17 + l bits wide). What leaves the tree is
+chosen by `int_output`:
+
+    None     no reducer: the column sum leaves the array as a full int32,
+             which needs 32-bit output lanes
+    "bf16"   an int -> FP32 converter (exact: the sum is at most 21 bits)
+    "fp16"   feeds the existing BF16 or FP16 reducer, so the lanes stay 16
+             bits. The converter is one more pipeline stage
+             (`convert_latency`). `int_exp_offset` adds k to the exponent
+             on the way through, i.e. scales by 2**k for free -- FP16
+             needs it, since a 32-term INT8 sum reaches 2**19 and FP16
+             tops out at 65504.
+
+Quantizing to INT8 and scaling back are the caller's job. INT8 always runs the
+Python path; the native kernel only knows the floating-point formats.
+
 The adder tree has two shapes, chosen by `use_mixed_adder`:
 
     pure 2-input    log2(N) levels
@@ -96,6 +114,9 @@ class SystolicArrayMEISSA(Clocked):
         add4_latency: int = 3,
         use_mixed_adder: bool = False,
         output_depth: Optional[int] = None,
+        int_output: Optional[str] = None,
+        int_exp_offset: int = 0,
+        convert_latency: int = 1,
         collect_stats: bool = False,
         use_native: bool = True,
     ):
@@ -108,6 +129,18 @@ class SystolicArrayMEISSA(Clocked):
         self.add4_latency = max(1, int(add4_latency))
         self.use_mixed_adder = bool(use_mixed_adder)
         self.dtype = normalize_dtype(dtype, default=None)
+        #: INT8 holds exact integers everywhere; the float formats hold FP32.
+        self._is_int = self.dtype == DType.INT8
+        vt = np.int64 if self._is_int else np.float32
+        #: INT8 only: None keeps the int32 sum, else the reducer's format.
+        self.int_output = normalize_dtype(int_output, default=None)
+        if self.int_output is not None and (
+                not self._is_int or self.int_output == DType.INT8):
+            raise ValueError("int_output is BF16 or FP16, and only for INT8")
+        self.int_exp_offset = int(int_exp_offset)
+        self._int_converts = self.int_output is not None
+        #: What the output buffer holds: 16-bit floats once INT8 is converted.
+        bank_vt = np.float32 if self._int_converts else vt
 
         self.levels = tree_levels(self.size, self.use_mixed_adder)
         #: Cycles from a product being formed to its column's sum leaving the
@@ -116,6 +149,7 @@ class SystolicArrayMEISSA(Clocked):
             self.mul_latency
             + self.levels["add4"] * self.add4_latency
             + self.levels["add2"] * self.add2_latency
+            + (max(1, int(convert_latency)) if self._int_converts else 0)
         )
         #: output_buffer.sv sizes the banks to cover the whole pipeline.
         self.output_depth = int(output_depth or (self.size + self.pipeline_depth))
@@ -123,8 +157,8 @@ class SystolicArrayMEISSA(Clocked):
         # --- multiplier grid ------------------------------------------------
         # act[i][j] / wgt[i][j]: row i, column j. Activations shift one column
         # per cycle; weights shift only while weight_en is held.
-        self._act = np.zeros((self.size, self.size), dtype=np.float32)
-        self._wgt = np.zeros((self.size, self.size), dtype=np.float32)
+        self._act = np.zeros((self.size, self.size), dtype=vt)
+        self._wgt = np.zeros((self.size, self.size), dtype=vt)
         #: Which injected vector occupies each column; -1 marks a bubble.
         self._col_seq = np.full(self.size, -1, dtype=np.int64)
 
@@ -133,7 +167,7 @@ class SystolicArrayMEISSA(Clocked):
         # of whole rows rather than N per-column lists: row r of _tree_vals is
         # the sums that entered the trees r cycles ago, -1 in _tree_seq marking
         # a column that was carrying a bubble.
-        self._tree_vals = np.zeros((self.pipeline_depth, self.size), dtype=np.float32)
+        self._tree_vals = np.zeros((self.pipeline_depth, self.size), dtype=vt)
         self._tree_seq = np.full((self.pipeline_depth, self.size), -1, dtype=np.int64)
         self._tree_head = 0
 
@@ -141,7 +175,7 @@ class SystolicArrayMEISSA(Clocked):
         # One bank per column, each a ring of (seq, value). A result vector is
         # complete when every bank holds it, which is what de-skews the
         # columns. Rings rather than lists so the kernel can share the storage.
-        self._bank_vals = np.zeros((self.size, self.output_depth), dtype=np.float32)
+        self._bank_vals = np.zeros((self.size, self.output_depth), dtype=bank_vt)
         self._bank_seq = np.full((self.size, self.output_depth), -1, dtype=np.int64)
         self._bank_head = np.zeros(self.size, dtype=np.int32)
         self._bank_count = np.zeros(self.size, dtype=np.int32)
@@ -192,7 +226,8 @@ class SystolicArrayMEISSA(Clocked):
 
         self._half = numpy_dtype(self.dtype) if self.dtype is not None else None
         self._state = None
-        self.use_native = bool(use_native) and _native.HAVE_NATIVE
+        self.use_native = (bool(use_native) and _native.HAVE_NATIVE
+                           and not self._is_int)
         if self.use_native:
             self._state = self._build_native_state()
         # Per-cycle scratch for the batched kernel entry point, grown on demand.
@@ -272,6 +307,14 @@ class SystolicArrayMEISSA(Clocked):
     # -- ingress -----------------------------------------------------------
     def _cast(self, values: Sequence[float], dtype: Optional[object]) -> List[float]:
         dt = normalize_dtype(dtype, default=self.dtype)
+        if self._is_int:
+            # The array takes INT8 as given; quantizing is the caller's job.
+            # cast_vector would truncate toward zero, hiding a quantizer bug.
+            vals = np.asarray(values, dtype=np.float64)
+            if ((vals != np.round(vals)).any() or (vals < -128).any()
+                    or (vals > 127).any()):
+                raise ValueError("INT8 inputs must be integers in [-128, 127]")
+            return [int(v) for v in vals]
         vals = [float(v) for v in values]
         return cast_vector(vals, dt) if dt is not None else vals
 
@@ -335,7 +378,7 @@ class SystolicArrayMEISSA(Clocked):
         if len(weights) != self.size or any(len(r) != self.size for r in weights):
             raise ValueError("weights must be size x size")
         for i, row in enumerate(weights):
-            self._wgt[i, :] = np.asarray(self._cast(row, None), dtype=np.float32)
+            self._wgt[i, :] = np.asarray(self._cast(row, None), dtype=self._wgt.dtype)
 
     # -- the adder tree ----------------------------------------------------
     @staticmethod
@@ -360,7 +403,18 @@ class SystolicArrayMEISSA(Clocked):
         a 4-input adder rounds ONCE, where three cascaded 2-input adders round
         three times. The 4-input sum is therefore accumulated in double and
         rounded a single time on the way out.
+
+        INT8 sums are exact, so pairing and order cannot change them; only the
+        width matters. The last level is 16 + log2(N) bits, and a sum that does
+        not fit is counted as an overflow (it cannot happen for INT8 inputs).
         """
+        if self._is_int:
+            sums = np.asarray(products, dtype=np.int64).sum(axis=0)
+            limit = 1 << (15 + max(1, (self.size - 1).bit_length()))
+            self.overflow_count += int(np.count_nonzero((sums < -limit) | (sums >= limit)))
+            self.metrics["add_ops"] += (self.size - 1) * self.size
+            return sums
+
         level = np.asarray(products, dtype=np.float32)
 
         for _ in range(self.levels["add4"]):
@@ -389,6 +443,17 @@ class SystolicArrayMEISSA(Clocked):
         itself; astype rounds to nearest-even identically, which the
         equivalence test pins.
         """
+        if self._is_int:
+            if not self._int_converts:
+                return values       # no reducer: the int32 sum goes out as is
+            # int -> FP32 is exact (|sum| < 2**21 < 2**24), and so is the
+            # exponent offset; the only rounding is the reducer's.
+            wide = np.ldexp(np.asarray(values, dtype=np.float64),
+                            self.int_exp_offset).astype(np.float32)
+            if self.int_output == DType.BF16:
+                return bf16_round(wide)
+            with np.errstate(over="ignore", invalid="ignore"):
+                return wide.astype(np.float16).astype(np.float32)
         if self._half is None:
             return np.asarray(values, dtype=np.float32)
         if self.dtype == DType.BF16:
@@ -503,7 +568,7 @@ class SystolicArrayMEISSA(Clocked):
             self._pending_wgt = None
             return
         self._wgt[:, 1:] = self._wgt[:, :-1]
-        self._wgt[:, 0] = np.asarray(self._pending_wgt, dtype=np.float32)
+        self._wgt[:, 0] = np.asarray(self._pending_wgt, dtype=self._wgt.dtype)
         self._pending_wgt = None
 
     def _shift_activations(self) -> None:
@@ -512,7 +577,7 @@ class SystolicArrayMEISSA(Clocked):
         self._act[:, 1:] = self._act[:, :-1]
         self._col_seq[1:] = self._col_seq[:-1]
         if self._pending_act is not None:
-            self._act[:, 0] = np.asarray(self._pending_act, dtype=np.float32)
+            self._act[:, 0] = np.asarray(self._pending_act, dtype=self._act.dtype)
             self._col_seq[0] = self._next_seq
             self._next_seq += 1
             self.credits = max(0, self.credits - 1)
@@ -625,9 +690,11 @@ class SystolicArrayMEISSA(Clocked):
 
     def algo_bytes(self) -> int:
         eb = self._elem_bytes()
-        return eb * self.size * (self.algo_counts["act_rows"]
-                                 + self.algo_counts["wgt_cols"]
-                                 + self.algo_counts["out_rows"])
+        # INT8 results leave as int32, or as 16-bit floats once converted.
+        out_eb = (2 if self._int_converts else 4) if self._is_int else eb
+        return self.size * (eb * (self.algo_counts["act_rows"]
+                                  + self.algo_counts["wgt_cols"])
+                            + out_eb * self.algo_counts["out_rows"])
 
     def algo_arithmetic_intensity(self) -> float:
         b = self.algo_bytes()
