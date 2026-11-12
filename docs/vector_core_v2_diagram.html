@@ -1,0 +1,529 @@
+<!doctype html>
+<html lang="en">
+<!-- M x N vector core diagram, drawn from src/vector_core/v2 as of branch atalla_sim_mxn.
+     Open this file in a browser. See docs/vector_core_v2_worklog.md for the build log. -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>body { margin: 0; }</style>
+<title>Atalla M×N Vector Core</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo+Narrow:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: one reading column; the block diagram is the page, set wide in its own scroller,
+   with supporting sections (timing, code map, open items) below it. */
+:root {
+  --bg: #F2F4F3;
+  --fg: #18211E;
+  --muted: #5B6863;
+  --panel: #FFFFFF;
+  --band: #E6EBE9;
+  --line: #B7C2BD;
+  --accent: #1D6A86;
+  --accent-tint: #DBEAF0;
+  --display: "Archivo Narrow", "Arial Narrow", "Helvetica Neue", sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0F1513; --fg: #E1E7E4; --muted: #93A09A; --panel: #172019; --band: #1B2421;
+    --line: #3A4742; --accent: #63B6D4; --accent-tint: #15303A; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0F1513; --fg: #E1E7E4; --muted: #93A09A; --panel: #172019; --band: #1B2421;
+  --line: #3A4742; --accent: #63B6D4; --accent-tint: #15303A; color-scheme: dark;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--body);
+  font-size: 15px;
+  line-height: 1.55;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 40px 64px;
+}
+.wrap { max-width: 1180px; margin: 0 auto; display: grid; gap: 40px; }
+
+header { display: grid; gap: 10px; }
+.eyebrow {
+  font-family: var(--mono); font-size: 12px; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--muted);
+}
+h1 {
+  font-family: var(--display); font-weight: 700; font-size: clamp(34px, 5vw, 52px);
+  line-height: 1.02; margin: 0; letter-spacing: -.01em; text-wrap: balance;
+}
+h2 {
+  font-family: var(--display); font-weight: 600; font-size: 26px; line-height: 1.1;
+  margin: 0; text-wrap: balance;
+}
+p { margin: 0; max-width: 68ch; }
+.lede { font-size: 17px; color: var(--fg); }
+code, .mono { font-family: var(--mono); font-size: .9em; }
+
+.legend {
+  display: flex; flex-wrap: wrap; gap: 10px 24px; font-size: 13px; color: var(--muted);
+  align-items: center;
+}
+.legend span { display: inline-flex; gap: 8px; align-items: center; }
+.sw { width: 22px; height: 14px; border-radius: 3px; border: 1.3px solid var(--line); background: var(--panel); flex: none; }
+.sw.new { background: var(--accent-tint); border-color: var(--accent); }
+.sw.band { background: var(--band); }
+.sw.dash { border: none; background: none; height: 0; border-top: 1.6px dashed var(--fg); width: 26px; }
+
+figure { margin: 0; display: grid; gap: 12px; }
+.scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); padding-block: 18px; }
+.scroll svg { display: block; width: 100%; height: auto; }
+.scroll .arch { min-width: 1080px; }
+.scroll .timing { min-width: 760px; }
+figcaption { font-size: 14px; color: var(--muted); max-width: 90ch; }
+
+/* SVG styling: page tokens, so both themes work */
+svg { color: var(--fg); }
+svg text { font-family: var(--mono); font-size: 11px; fill: currentColor; }
+svg .t-name { font-family: var(--body); font-weight: 600; font-size: 13px; }
+svg .t-sub { font-size: 10.5px; fill: var(--muted); }
+svg .t-small { font-size: 10px; fill: var(--muted); }
+svg .t-eyebrow { font-size: 10px; letter-spacing: .08em; fill: var(--muted); }
+svg .t-head { font-family: var(--body); font-weight: 600; font-size: 12px; }
+svg .t-ann { font-size: 10.5px; fill: var(--muted); }
+svg .box { fill: var(--panel); stroke: var(--line); stroke-width: 1.2; }
+svg .new { fill: var(--accent-tint); stroke: var(--accent); stroke-width: 1.3; }
+svg .band { fill: var(--band); stroke: var(--line); stroke-width: 1; }
+svg .group { fill: none; stroke: var(--accent); stroke-width: 1; stroke-dasharray: 2 3; }
+svg .wire { stroke: currentColor; stroke-width: 1.25; fill: none; }
+svg .thin { stroke: var(--accent); stroke-width: .8; fill: none; opacity: .55; }
+svg .dash { stroke-dasharray: 5 4; }
+svg .dot, svg .mk { fill: currentColor; }
+svg .grid { stroke: var(--line); stroke-width: 1; }
+svg .bar { fill: var(--accent-tint); stroke: var(--accent); stroke-width: 1.2; }
+svg .bar-strong { fill: var(--accent); stroke: var(--accent); }
+svg .on-strong { fill: var(--bg); font-weight: 600; }
+
+.dchips { display: flex; flex-wrap: wrap; gap: 8px; }
+.dchips span {
+  font-family: var(--mono); font-size: 13px; padding: 4px 10px; border-radius: 4px;
+  border: 1px solid var(--line); background: var(--panel); font-variant-numeric: tabular-nums;
+}
+.dchips b { font-weight: 600; color: var(--accent); }
+
+.two { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 40px; align-items: start; }
+@media (max-width: 860px) { .two { grid-template-columns: minmax(0, 1fr); } }
+section { display: grid; gap: 14px; min-width: 0; }
+.tbl { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { text-align: left; padding: 8px 10px 8px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-family: var(--mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
+td code { white-space: nowrap; }
+ul.open { margin: 0; padding-left: 18px; display: grid; gap: 8px; font-size: 14px; max-width: 64ch; }
+ul.open li::marker { color: var(--accent); }
+footer { font-size: 13px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 16px; }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">atalla-sim · branch atalla_sim_mxn · first version, single mode</div>
+    <h1>M×N Vector Core</h1>
+    <p class="lede">The vector core as the simulator now models it, drawn from the code in <code>src/vector_core/v2</code> rather than from the plan. Decode 2 still issues packets. Each packet becomes one round for the four slots, and everything below the round queue is the new core. Run it with <code>--vector-arch fu_groups</code>.</p>
+  </header>
+
+  <figure>
+    <div class="legend" aria-label="Legend">
+      <span><i class="sw new"></i>New in the M×N model</span>
+      <span><i class="sw"></i>v1 unit, reused unchanged</span>
+      <span><i class="sw band"></i>Scheduler, switched to v2 mode</span>
+      <span><i class="sw dash"></i>Compat read outside the slot's pair (+1 cycle)</span>
+    </div>
+    <div class="scroll">
+      <svg class="arch" viewBox="0 0 1270 870" role="img" aria-label="Block diagram of the M×N vector core as modeled in atalla-sim. Decode 2 issues packets; the packet adapter turns each into one round for slots V1 to V4. Each slot reads its own pair of the eight register banks, or another pair at plus one cycle in compat mode, and reads masks through two shared mask ports. Its crossbar sends operands through one-per-cycle destination arbiters to move-to-scalar, the ALU and its reduction tree, MUL, EXP, SQRT, RECIP, the transpose unit, four VLSUs or the GSAU. Results go through the writeback arbiter, up to four per cycle, into eight per-bank FIFOs and back to the banks; compare results go to decode 2's mask file and move-to-scalar results to scalar writeback.">
+        <defs>
+          <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path class="mk" d="M0,0 L10,5 L0,10 z"/>
+          </marker>
+        </defs>
+
+        <!-- Scheduler band -->
+        <rect class="band" x="60" y="16" width="980" height="96" rx="6"/>
+        <text class="t-eyebrow" x="72" y="32">SCHEDULER · DECODE 2 IN V2 MODE</text>
+        <rect class="box" x="76" y="40" width="120" height="56" rx="4"/>
+        <text class="t-name" x="136" y="63" text-anchor="middle">Scalar WB</text>
+        <text class="t-sub" x="136" y="81" text-anchor="middle">x registers</text>
+        <rect class="box" x="212" y="40" width="140" height="56" rx="4"/>
+        <text class="t-name" x="282" y="63" text-anchor="middle">Mask file</text>
+        <text class="t-sub" x="282" y="81" text-anchor="middle">m0–m15 · 2 banks</text>
+        <rect class="box" x="372" y="40" width="236" height="56" rx="4"/>
+        <text class="t-name" x="490" y="63" text-anchor="middle">Decode 2</text>
+        <text class="t-sub" x="490" y="81" text-anchor="middle">scalar + mask busy bits only</text>
+        <rect class="new" x="660" y="40" width="364" height="56" rx="4"/>
+        <text class="t-name" x="842" y="63" text-anchor="middle">Packet adapter</text>
+        <text class="t-sub" x="842" y="81" text-anchor="middle">packet word k → slot Vk · scalars read at issue</text>
+        <line class="wire" x1="608" y1="68" x2="656" y2="68" marker-end="url(#ah)"/>
+        <text class="t-small" x="632" y="61" text-anchor="middle">issue</text>
+
+        <!-- Round queue -->
+        <line class="wire" x1="842" y1="96" x2="842" y2="131" marker-end="url(#ah)"/>
+        <text class="t-small" x="848" y="119">round</text>
+        <rect class="new" x="260" y="134" width="764" height="30" rx="4"/>
+        <text x="642" y="153" text-anchor="middle">Round queue · one round per packet · 2 deep incl. the D2/EX latch</text>
+
+        <!-- Slots -->
+        <line class="wire" x1="330" y1="164" x2="330" y2="185" marker-end="url(#ah)"/>
+        <line class="wire" x1="520" y1="164" x2="520" y2="185" marker-end="url(#ah)"/>
+        <line class="wire" x1="710" y1="164" x2="710" y2="185" marker-end="url(#ah)"/>
+        <line class="wire" x1="900" y1="164" x2="900" y2="185" marker-end="url(#ah)"/>
+        <rect class="new" x="270" y="188" width="120" height="44" rx="4"/>
+        <text class="t-name" x="330" y="206" text-anchor="middle">V1</text>
+        <text class="t-sub" x="330" y="223" text-anchor="middle">owns B0 · B1</text>
+        <rect class="new" x="460" y="188" width="120" height="44" rx="4"/>
+        <text class="t-name" x="520" y="206" text-anchor="middle">V2</text>
+        <text class="t-sub" x="520" y="223" text-anchor="middle">owns B2 · B3</text>
+        <rect class="new" x="650" y="188" width="120" height="44" rx="4"/>
+        <text class="t-name" x="710" y="206" text-anchor="middle">V3</text>
+        <text class="t-sub" x="710" y="223" text-anchor="middle">owns B4 · B5</text>
+        <rect class="new" x="840" y="188" width="120" height="44" rx="4"/>
+        <text class="t-name" x="900" y="206" text-anchor="middle">V4</text>
+        <text class="t-sub" x="900" y="223" text-anchor="middle">owns B6 · B7</text>
+
+        <!-- Scoreboard -->
+        <rect class="new" x="1092" y="186" width="160" height="50" rx="4"/>
+        <text class="t-name" x="1172" y="204" text-anchor="middle">Scoreboard</text>
+        <text class="t-sub" x="1172" y="219" text-anchor="middle">busy + readable_at</text>
+        <text class="t-sub" x="1172" y="231" text-anchor="middle">RAW · WAW · WAR</text>
+        <line class="wire" x1="1092" y1="210" x2="963" y2="210" marker-end="url(#ah)"/>
+        <text class="t-small" x="1030" y="203" text-anchor="middle">may fire</text>
+
+        <!-- Mask reads -->
+        <line class="wire" x1="236" y1="96" x2="236" y2="253" marker-end="url(#ah)"/>
+        <rect class="new" x="124" y="256" width="124" height="60" rx="4"/>
+        <text class="t-name" x="186" y="276" text-anchor="middle">Mask read</text>
+        <text class="t-sub" x="186" y="292" text-anchor="middle">1 port per bank</text>
+        <text class="t-sub" x="186" y="307" text-anchor="middle">m0 uses bank 0</text>
+        <polyline class="wire" points="248,276 258,276 258,212 266,212" marker-end="url(#ah)"/>
+
+        <!-- Banks (VEGGIE v2) -->
+        <rect class="group" x="268" y="246" width="704" height="80" rx="6"/>
+        <line class="wire" x1="304" y1="232" x2="304" y2="253" marker-end="url(#ah)"/>
+        <line class="wire" x1="356" y1="232" x2="356" y2="253" marker-end="url(#ah)"/>
+        <line class="wire" x1="494" y1="232" x2="494" y2="253" marker-end="url(#ah)"/>
+        <line class="wire" x1="546" y1="232" x2="546" y2="253" marker-end="url(#ah)"/>
+        <line class="wire" x1="684" y1="232" x2="684" y2="253" marker-end="url(#ah)"/>
+        <line class="wire" x1="736" y1="232" x2="736" y2="253" marker-end="url(#ah)"/>
+        <line class="wire" x1="874" y1="232" x2="874" y2="253" marker-end="url(#ah)"/>
+        <line class="wire" x1="926" y1="232" x2="926" y2="253" marker-end="url(#ah)"/>
+        <rect class="new" x="282" y="256" width="44" height="60" rx="3"/>
+        <text x="304" y="281" text-anchor="middle" font-weight="600">B0</text>
+        <text class="t-small" x="304" y="300" text-anchor="middle">src0</text>
+        <rect class="new" x="334" y="256" width="44" height="60" rx="3"/>
+        <text x="356" y="281" text-anchor="middle" font-weight="600">B1</text>
+        <text class="t-small" x="356" y="300" text-anchor="middle">src1</text>
+        <rect class="new" x="472" y="256" width="44" height="60" rx="3"/>
+        <text x="494" y="281" text-anchor="middle" font-weight="600">B2</text>
+        <text class="t-small" x="494" y="300" text-anchor="middle">src0</text>
+        <rect class="new" x="524" y="256" width="44" height="60" rx="3"/>
+        <text x="546" y="281" text-anchor="middle" font-weight="600">B3</text>
+        <text class="t-small" x="546" y="300" text-anchor="middle">src1</text>
+        <rect class="new" x="662" y="256" width="44" height="60" rx="3"/>
+        <text x="684" y="281" text-anchor="middle" font-weight="600">B4</text>
+        <text class="t-small" x="684" y="300" text-anchor="middle">src0</text>
+        <rect class="new" x="714" y="256" width="44" height="60" rx="3"/>
+        <text x="736" y="281" text-anchor="middle" font-weight="600">B5</text>
+        <text class="t-small" x="736" y="300" text-anchor="middle">src1</text>
+        <rect class="new" x="852" y="256" width="44" height="60" rx="3"/>
+        <text x="874" y="281" text-anchor="middle" font-weight="600">B6</text>
+        <text class="t-small" x="874" y="300" text-anchor="middle">src0</text>
+        <rect class="new" x="904" y="256" width="44" height="60" rx="3"/>
+        <text x="926" y="281" text-anchor="middle" font-weight="600">B7</text>
+        <text class="t-small" x="926" y="300" text-anchor="middle">src1</text>
+        <!-- compat read, outside the pair -->
+        <line class="wire dash" x1="390" y1="222" x2="468" y2="270" marker-end="url(#ah)"/>
+        <text class="t-small" x="425" y="292" text-anchor="middle">compat</text>
+        <text class="t-small" x="425" y="306" text-anchor="middle">+1 cycle</text>
+
+        <!-- Banks to crossbars -->
+        <line class="wire" x1="304" y1="316" x2="304" y2="369" marker-end="url(#ah)"/>
+        <line class="wire" x1="356" y1="316" x2="356" y2="369" marker-end="url(#ah)"/>
+        <line class="wire" x1="494" y1="316" x2="494" y2="369" marker-end="url(#ah)"/>
+        <line class="wire" x1="546" y1="316" x2="546" y2="369" marker-end="url(#ah)"/>
+        <line class="wire" x1="684" y1="316" x2="684" y2="369" marker-end="url(#ah)"/>
+        <line class="wire" x1="736" y1="316" x2="736" y2="369" marker-end="url(#ah)"/>
+        <line class="wire" x1="874" y1="316" x2="874" y2="369" marker-end="url(#ah)"/>
+        <line class="wire" x1="926" y1="316" x2="926" y2="369" marker-end="url(#ah)"/>
+
+        <!-- Crossbars, one per slot -->
+        <rect class="new" x="278" y="372" width="104" height="24" rx="3"/>
+        <line class="thin" x1="278" y1="372" x2="382" y2="396"/><line class="thin" x1="278" y1="396" x2="382" y2="372"/>
+        <rect class="new" x="468" y="372" width="104" height="24" rx="3"/>
+        <line class="thin" x1="468" y1="372" x2="572" y2="396"/><line class="thin" x1="468" y1="396" x2="572" y2="372"/>
+        <rect class="new" x="658" y="372" width="104" height="24" rx="3"/>
+        <line class="thin" x1="658" y1="372" x2="762" y2="396"/><line class="thin" x1="658" y1="396" x2="762" y2="372"/>
+        <rect class="new" x="848" y="372" width="104" height="24" rx="3"/>
+        <line class="thin" x1="848" y1="372" x2="952" y2="396"/><line class="thin" x1="848" y1="396" x2="952" y2="372"/>
+
+        <!-- Crossbar outputs onto the fabric -->
+        <line class="wire" x1="330" y1="396" x2="330" y2="440"/>
+        <line class="wire" x1="520" y1="396" x2="520" y2="440"/>
+        <line class="wire" x1="710" y1="396" x2="710" y2="440"/>
+        <line class="wire" x1="900" y1="396" x2="900" y2="440"/>
+        <line class="wire" x1="124" y1="440" x2="1004" y2="440"/>
+        <circle class="dot" cx="330" cy="440" r="2.8"/><circle class="dot" cx="520" cy="440" r="2.8"/>
+        <circle class="dot" cx="710" cy="440" r="2.8"/><circle class="dot" cx="900" cy="440" r="2.8"/>
+
+        <!-- Destination arbiters (one slot per destination per cycle) -->
+        <g>
+          <line class="wire" x1="124" y1="440" x2="124" y2="452"/><rect class="new" x="104" y="452" width="40" height="18" rx="9"/><text class="t-small" x="124" y="465" text-anchor="middle">4→1</text><line class="wire" x1="124" y1="470" x2="124" y2="489" marker-end="url(#ah)"/>
+          <line class="wire" x1="234" y1="440" x2="234" y2="452"/><rect class="new" x="214" y="452" width="40" height="18" rx="9"/><text class="t-small" x="234" y="465" text-anchor="middle">4→1</text><line class="wire" x1="234" y1="470" x2="234" y2="489" marker-end="url(#ah)"/>
+          <line class="wire" x1="344" y1="440" x2="344" y2="452"/><rect class="new" x="324" y="452" width="40" height="18" rx="9"/><text class="t-small" x="344" y="465" text-anchor="middle">4→1</text><line class="wire" x1="344" y1="470" x2="344" y2="489" marker-end="url(#ah)"/>
+          <line class="wire" x1="454" y1="440" x2="454" y2="452"/><rect class="new" x="434" y="452" width="40" height="18" rx="9"/><text class="t-small" x="454" y="465" text-anchor="middle">4→1</text><line class="wire" x1="454" y1="470" x2="454" y2="489" marker-end="url(#ah)"/>
+          <line class="wire" x1="564" y1="440" x2="564" y2="452"/><rect class="new" x="544" y="452" width="40" height="18" rx="9"/><text class="t-small" x="564" y="465" text-anchor="middle">4→1</text><line class="wire" x1="564" y1="470" x2="564" y2="489" marker-end="url(#ah)"/>
+          <line class="wire" x1="674" y1="440" x2="674" y2="452"/><rect class="new" x="654" y="452" width="40" height="18" rx="9"/><text class="t-small" x="674" y="465" text-anchor="middle">4→1</text><line class="wire" x1="674" y1="470" x2="674" y2="489" marker-end="url(#ah)"/>
+          <line class="wire" x1="784" y1="440" x2="784" y2="452"/><rect class="new" x="764" y="452" width="40" height="18" rx="9"/><text class="t-small" x="784" y="465" text-anchor="middle">4→1</text><line class="wire" x1="784" y1="470" x2="784" y2="489" marker-end="url(#ah)"/>
+          <line class="wire" x1="894" y1="440" x2="894" y2="452"/><rect class="new" x="874" y="452" width="40" height="18" rx="9"/><text class="t-small" x="894" y="465" text-anchor="middle">4→1</text><line class="wire" x1="894" y1="470" x2="894" y2="489" marker-end="url(#ah)"/>
+          <line class="wire" x1="1004" y1="440" x2="1004" y2="452"/><rect class="new" x="984" y="452" width="40" height="18" rx="9"/><text class="t-small" x="1004" y="465" text-anchor="middle">4→1</text><line class="wire" x1="1004" y1="470" x2="1004" y2="489" marker-end="url(#ah)"/>
+        </g>
+        <circle class="dot" cx="234" cy="440" r="2.8"/><circle class="dot" cx="344" cy="440" r="2.8"/>
+        <circle class="dot" cx="454" cy="440" r="2.8"/><circle class="dot" cx="564" cy="440" r="2.8"/>
+        <circle class="dot" cx="674" cy="440" r="2.8"/><circle class="dot" cx="784" cy="440" r="2.8"/>
+        <circle class="dot" cx="894" cy="440" r="2.8"/>
+
+        <!-- Destinations -->
+        <rect class="new" x="76" y="492" width="96" height="56" rx="4"/>
+        <text class="t-name" x="124" y="515" text-anchor="middle">MTS</text>
+        <text class="t-sub" x="124" y="533" text-anchor="middle">1-entry hold</text>
+        <rect class="new" x="186" y="492" width="96" height="56" rx="4"/>
+        <text class="t-name" x="234" y="515" text-anchor="middle">ALU</text>
+        <text class="t-sub" x="234" y="533" text-anchor="middle">L = 1</text>
+        <rect class="new" x="296" y="492" width="96" height="56" rx="4"/>
+        <text class="t-name" x="344" y="515" text-anchor="middle">MUL</text>
+        <text class="t-sub" x="344" y="533" text-anchor="middle">L = 1</text>
+        <rect class="new" x="406" y="492" width="96" height="56" rx="4"/>
+        <text class="t-name" x="454" y="515" text-anchor="middle">EXP</text>
+        <text class="t-sub" x="454" y="533" text-anchor="middle">L = 14</text>
+        <rect class="new" x="516" y="492" width="96" height="56" rx="4"/>
+        <text class="t-name" x="564" y="515" text-anchor="middle">SQRT</text>
+        <text class="t-sub" x="564" y="533" text-anchor="middle">L = 8</text>
+        <rect class="new" x="626" y="492" width="96" height="56" rx="4"/>
+        <text class="t-name" x="674" y="515" text-anchor="middle">RECIP</text>
+        <text class="t-sub" x="674" y="533" text-anchor="middle">L = 11</text>
+        <rect class="box" x="736" y="492" width="96" height="56" rx="4"/>
+        <text class="t-name" x="784" y="515" text-anchor="middle">Transpose</text>
+        <text class="t-sub" x="784" y="533" text-anchor="middle">tpus · tpop</text>
+        <rect class="box" x="846" y="492" width="96" height="56" rx="4"/>
+        <text class="t-name" x="894" y="515" text-anchor="middle">VLSU ×4</text>
+        <text class="t-sub" x="894" y="533" text-anchor="middle">1 per pad</text>
+        <rect class="box" x="956" y="492" width="96" height="56" rx="4"/>
+        <text class="t-name" x="1004" y="515" text-anchor="middle">GSAU</text>
+        <text class="t-sub" x="1004" y="533" text-anchor="middle">to the array</text>
+
+        <!-- ALU's reduction tree -->
+        <line class="wire" x1="246" y1="548" x2="246" y2="571" marker-end="url(#ah)"/>
+        <text class="t-small" x="252" y="565">reduce</text>
+        <rect class="new" x="214" y="574" width="68" height="36" rx="4"/>
+        <text class="t-name" x="248" y="590" text-anchor="middle" font-size="12">RTree</text>
+        <text class="t-small" x="248" y="603" text-anchor="middle">5 levels</text>
+
+        <!-- Memory and array behind VLSU and GSAU -->
+        <line class="wire" x1="896" y1="548" x2="896" y2="571" marker-end="url(#ah)"/>
+        <line class="wire" x1="920" y1="574" x2="920" y2="551" marker-end="url(#ah)"/>
+        <rect class="box" x="872" y="574" width="70" height="38" rx="4"/>
+        <text class="t-small" x="907" y="590" text-anchor="middle" style="fill: currentColor">Scratchpad</text>
+        <text class="t-small" x="907" y="604" text-anchor="middle">pads ×4</text>
+        <line class="wire" x1="1006" y1="548" x2="1006" y2="571" marker-end="url(#ah)"/>
+        <line class="wire" x1="1030" y1="574" x2="1030" y2="551" marker-end="url(#ah)"/>
+        <rect class="box" x="982" y="574" width="70" height="38" rx="4"/>
+        <text class="t-small" x="1017" y="590" text-anchor="middle" style="fill: currentColor">Systolic</text>
+        <text class="t-small" x="1017" y="604" text-anchor="middle">array</text>
+
+        <!-- Results to the writeback arbiter -->
+        <line class="wire" x1="198" y1="548" x2="198" y2="653" marker-end="url(#ah)"/>
+        <line class="wire" x1="246" y1="610" x2="246" y2="653" marker-end="url(#ah)"/>
+        <line class="wire" x1="344" y1="548" x2="344" y2="653" marker-end="url(#ah)"/>
+        <line class="wire" x1="454" y1="548" x2="454" y2="653" marker-end="url(#ah)"/>
+        <line class="wire" x1="564" y1="548" x2="564" y2="653" marker-end="url(#ah)"/>
+        <line class="wire" x1="674" y1="548" x2="674" y2="653" marker-end="url(#ah)"/>
+        <line class="wire" x1="784" y1="548" x2="784" y2="653" marker-end="url(#ah)"/>
+        <line class="wire" x1="858" y1="548" x2="858" y2="653" marker-end="url(#ah)"/>
+        <line class="wire" x1="968" y1="548" x2="968" y2="653" marker-end="url(#ah)"/>
+        <text class="t-small" x="203" y="646">fu:alu</text>
+        <text class="t-small" x="251" y="646">fu:rtree</text>
+        <text class="t-small" x="349" y="646">fu:mul</text>
+        <text class="t-small" x="459" y="646">fu:exp</text>
+        <text class="t-small" x="569" y="646">fu:sqrt</text>
+        <text class="t-small" x="679" y="646">fu:recip</text>
+        <text class="t-small" x="789" y="646">transpose</text>
+        <text class="t-small" x="863" y="646">vlsu0–3</text>
+        <text class="t-small" x="973" y="646">gsau</text>
+
+        <!-- Writeback arbiter -->
+        <rect class="new" x="76" y="656" width="976" height="46" rx="4"/>
+        <text class="t-name" x="564" y="675" text-anchor="middle">Write Back Arbiter</text>
+        <text class="t-sub" x="564" y="692" text-anchor="middle">≤ 4 vector grants per cycle · fixed priority · compare results: 1 write per mask bank</text>
+
+        <!-- To the per-bank FIFOs -->
+        <line class="wire" x1="614" y1="702" x2="614" y2="722"/>
+        <text class="t-small" x="620" y="716">routed by reg % 8</text>
+        <line class="wire" x1="304" y1="722" x2="926" y2="722"/>
+        <circle class="dot" cx="614" cy="722" r="2.8"/>
+        <line class="wire" x1="304" y1="722" x2="304" y2="739" marker-end="url(#ah)"/>
+        <line class="wire" x1="356" y1="722" x2="356" y2="739" marker-end="url(#ah)"/>
+        <line class="wire" x1="494" y1="722" x2="494" y2="739" marker-end="url(#ah)"/>
+        <line class="wire" x1="546" y1="722" x2="546" y2="739" marker-end="url(#ah)"/>
+        <line class="wire" x1="684" y1="722" x2="684" y2="739" marker-end="url(#ah)"/>
+        <line class="wire" x1="736" y1="722" x2="736" y2="739" marker-end="url(#ah)"/>
+        <line class="wire" x1="874" y1="722" x2="874" y2="739" marker-end="url(#ah)"/>
+        <line class="wire" x1="926" y1="722" x2="926" y2="739" marker-end="url(#ah)"/>
+
+        <!-- WB buffer: one FIFO per bank, depth 4 -->
+        <g>
+          <rect class="new" x="282" y="742" width="44" height="56" rx="3"/><line class="thin" x1="282" y1="756" x2="326" y2="756"/><line class="thin" x1="282" y1="770" x2="326" y2="770"/><line class="thin" x1="282" y1="784" x2="326" y2="784"/>
+          <rect class="new" x="334" y="742" width="44" height="56" rx="3"/><line class="thin" x1="334" y1="756" x2="378" y2="756"/><line class="thin" x1="334" y1="770" x2="378" y2="770"/><line class="thin" x1="334" y1="784" x2="378" y2="784"/>
+          <rect class="new" x="472" y="742" width="44" height="56" rx="3"/><line class="thin" x1="472" y1="756" x2="516" y2="756"/><line class="thin" x1="472" y1="770" x2="516" y2="770"/><line class="thin" x1="472" y1="784" x2="516" y2="784"/>
+          <rect class="new" x="524" y="742" width="44" height="56" rx="3"/><line class="thin" x1="524" y1="756" x2="568" y2="756"/><line class="thin" x1="524" y1="770" x2="568" y2="770"/><line class="thin" x1="524" y1="784" x2="568" y2="784"/>
+          <rect class="new" x="662" y="742" width="44" height="56" rx="3"/><line class="thin" x1="662" y1="756" x2="706" y2="756"/><line class="thin" x1="662" y1="770" x2="706" y2="770"/><line class="thin" x1="662" y1="784" x2="706" y2="784"/>
+          <rect class="new" x="714" y="742" width="44" height="56" rx="3"/><line class="thin" x1="714" y1="756" x2="758" y2="756"/><line class="thin" x1="714" y1="770" x2="758" y2="770"/><line class="thin" x1="714" y1="784" x2="758" y2="784"/>
+          <rect class="new" x="852" y="742" width="44" height="56" rx="3"/><line class="thin" x1="852" y1="756" x2="896" y2="756"/><line class="thin" x1="852" y1="770" x2="896" y2="770"/><line class="thin" x1="852" y1="784" x2="896" y2="784"/>
+          <rect class="new" x="904" y="742" width="44" height="56" rx="3"/><line class="thin" x1="904" y1="756" x2="948" y2="756"/><line class="thin" x1="904" y1="770" x2="948" y2="770"/><line class="thin" x1="904" y1="784" x2="948" y2="784"/>
+        </g>
+        <text class="t-small" x="425" y="774" text-anchor="middle">FIFO under</text>
+        <text class="t-small" x="425" y="788" text-anchor="middle">each bank</text>
+
+        <!-- Bank writes, back up to the banks -->
+        <line class="wire" x1="304" y1="798" x2="304" y2="836"/>
+        <line class="wire" x1="356" y1="798" x2="356" y2="836"/>
+        <line class="wire" x1="494" y1="798" x2="494" y2="836"/>
+        <line class="wire" x1="546" y1="798" x2="546" y2="836"/>
+        <line class="wire" x1="684" y1="798" x2="684" y2="836"/>
+        <line class="wire" x1="736" y1="798" x2="736" y2="836"/>
+        <line class="wire" x1="874" y1="798" x2="874" y2="836"/>
+        <line class="wire" x1="926" y1="798" x2="926" y2="836"/>
+        <polyline class="wire" points="304,836 1070,836 1070,286 976,286" marker-end="url(#ah)"/>
+        <circle class="dot" cx="356" cy="836" r="2.8"/><circle class="dot" cx="494" cy="836" r="2.8"/>
+        <circle class="dot" cx="546" cy="836" r="2.8"/><circle class="dot" cx="684" cy="836" r="2.8"/>
+        <circle class="dot" cx="736" cy="836" r="2.8"/><circle class="dot" cx="874" cy="836" r="2.8"/>
+        <circle class="dot" cx="926" cy="836" r="2.8"/>
+        <text class="t-small" x="1060" y="300" text-anchor="end">8 bank writes</text>
+
+        <!-- Side lanes: compare results to the mask file, move-to-scalar to scalar WB -->
+        <polyline class="wire" points="76,679 40,679 40,122 224,122 224,100" marker-end="url(#ah)"/>
+        <text class="t-small" transform="translate(35,420) rotate(-90)" text-anchor="middle">compare results → mask file</text>
+        <polyline class="wire" points="76,520 22,520 22,68 72,68" marker-end="url(#ah)"/>
+        <text class="t-small" transform="translate(17,300) rotate(-90)" text-anchor="middle">move-to-scalar → scalar WB</text>
+
+        <!-- Right-hand annotations, one per layer -->
+        <text class="t-ann" x="1092" y="146">Next round starts the cycle</text>
+        <text class="t-ann" x="1092" y="160">after its last op fires</text>
+        <text class="t-head" x="1092" y="266">VEGGIE v2</text>
+        <text class="t-ann" x="1092" y="282">8 banks × 32 registers</text>
+        <text class="t-ann" x="1092" y="296">1R1W · bank = reg % 8</text>
+        <text class="t-ann" x="1092" y="310">slot k owns banks 2k, 2k+1</text>
+        <text class="t-head" x="1092" y="382">Crossbar per slot</text>
+        <text class="t-ann" x="1092" y="396">2 inputs × 12 outputs</text>
+        <text class="t-head" x="1092" y="448">Destination arbiters</text>
+        <text class="t-ann" x="1092" y="462">one slot per destination</text>
+        <text class="t-ann" x="1092" y="476">per cycle</text>
+        <text class="t-head" x="1092" y="512">FU groups</text>
+        <text class="t-ann" x="1092" y="526">32 wide, II = 1:</text>
+        <text class="t-ann" x="1092" y="540">one vector per cycle</text>
+        <text class="t-head" x="1092" y="670">Writeback</text>
+        <text class="t-ann" x="1092" y="684">vectors to the banks,</text>
+        <text class="t-ann" x="1092" y="698">masks to decode 2</text>
+        <text class="t-head" x="1092" y="752">WB buffer</text>
+        <text class="t-ann" x="1092" y="766">per-bank FIFO, depth 4</text>
+        <text class="t-ann" x="1092" y="780">1 write per bank per cycle</text>
+        <text class="t-ann" x="1092" y="794">drains after 1 cycle</text>
+        <text class="t-ann" x="1092" y="832">per-element write enable,</text>
+        <text class="t-ann" x="1092" y="846">readable the next cycle</text>
+      </svg>
+    </div>
+    <figcaption>One cycle, top to bottom. A slot fires once its sources are ready and readable, its bank and mask ports are granted, and its destination's arbiter picks it. Results come back through one arbiter and eight per-bank FIFOs. Compare results go to decode 2's mask file and move-to-scalar results to scalar writeback, around the outside.</figcaption>
+  </figure>
+
+  <figure>
+    <h2>Dependent-op timing</h2>
+    <p>A slot that reads a result fires L + 3 cycles after the slot that produced it. There is no forwarding, a result waits one cycle in the WB buffer, and a write is readable the cycle after it lands. The unit tests check these numbers exactly.</p>
+    <div class="scroll">
+      <svg class="timing" viewBox="0 0 960 214" role="img" aria-label="Timing of a dependent pair: the producer slot reads and fires in cycle c, the FU group takes cycles c+1 to c+L, the writeback arbiter grants the result in c+L+1, the bank FIFO writes it at the end of c+L+2, and the consumer slot reads it in c+L+3, so D equals L plus 3.">
+        <text class="t-small" x="226" y="22" text-anchor="middle">c</text>
+        <text class="t-small" x="338" y="22" text-anchor="middle">c+1</text>
+        <text class="t-small" x="450" y="22" text-anchor="middle">…</text>
+        <text class="t-small" x="562" y="22" text-anchor="middle">c+L</text>
+        <text class="t-small" x="674" y="22" text-anchor="middle">c+L+1</text>
+        <text class="t-small" x="786" y="22" text-anchor="middle">c+L+2</text>
+        <text class="t-small" x="898" y="22" text-anchor="middle">c+L+3</text>
+        <line class="grid" x1="170" y1="30" x2="170" y2="174"/><line class="grid" x1="282" y1="30" x2="282" y2="174"/>
+        <line class="grid" x1="394" y1="30" x2="394" y2="174"/><line class="grid" x1="506" y1="30" x2="506" y2="174"/>
+        <line class="grid" x1="618" y1="30" x2="618" y2="174"/><line class="grid" x1="730" y1="30" x2="730" y2="174"/>
+        <line class="grid" x1="842" y1="30" x2="842" y2="174"/><line class="grid" x1="954" y1="30" x2="954" y2="174"/>
+
+        <text x="158" y="51" text-anchor="end">producer slot</text>
+        <text x="158" y="79" text-anchor="end">FU group</text>
+        <text x="158" y="107" text-anchor="end">WB arbiter</text>
+        <text x="158" y="135" text-anchor="end">bank FIFO</text>
+        <text x="158" y="163" text-anchor="end">consumer slot</text>
+
+        <rect class="bar" x="174" y="36" width="104" height="22" rx="3"/>
+        <text x="226" y="51" text-anchor="middle">read + fire</text>
+        <rect class="bar" x="286" y="64" width="328" height="22" rx="3"/>
+        <text x="450" y="79" text-anchor="middle">L stages</text>
+        <rect class="bar" x="622" y="92" width="104" height="22" rx="3"/>
+        <text x="674" y="107" text-anchor="middle">granted</text>
+        <rect class="bar" x="734" y="120" width="104" height="22" rx="3"/>
+        <text x="786" y="135" text-anchor="middle">write, end</text>
+        <rect class="bar-strong" x="846" y="148" width="104" height="22" rx="3"/>
+        <text class="on-strong" x="898" y="163" text-anchor="middle">read</text>
+
+        <path class="wire" d="M226,180 v8 H898 v-8"/>
+        <text class="t-head" x="562" y="206" text-anchor="middle">D = L + 3</text>
+      </svg>
+    </div>
+    <div class="dchips" aria-label="Dependent delay per producer">
+      <span>ALU <b>4</b></span>
+      <span>MUL <b>4</b></span>
+      <span>SQRT <b>11</b></span>
+      <span>RECIP <b>14</b></span>
+      <span>EXP <b>17</b></span>
+      <span>reduction <b>9</b> (ALU 1 + tree 5 + 3)</span>
+    </div>
+  </figure>
+
+  <div class="two">
+    <section>
+      <h2>Where each block lives</h2>
+      <div class="tbl">
+        <table>
+          <thead><tr><th>Block</th><th>File</th></tr></thead>
+          <tbody>
+            <tr><td>Round queue, slots, bank and mask ports, arbiters, scoreboard</td><td><code>src/vector_core/v2/core.py</code></td></tr>
+            <tr><td>What a slot fires (<code>SlotOp</code>)</td><td><code>src/vector_core/v2/slots.py</code></td></tr>
+            <tr><td>FU groups and the RTree</td><td><code>src/vector_core/v2/fu_group.py</code></td></tr>
+            <tr><td>Banks B0–B7</td><td><code>src/vector_core/v2/vrf_banks.py</code></td></tr>
+            <tr><td>Writeback arbiter and per-bank FIFOs</td><td><code>src/vector_core/v2/writeback.py</code></td></tr>
+            <tr><td>Defaults (latencies, ports, depths)</td><td><code>src/vector_core/v2/config.py</code></td></tr>
+            <tr><td>Packet adapter, move-to-scalar link</td><td><code>src/scheduler/vector_v2.py</code></td></tr>
+            <tr><td>Decode 2 in v2 mode</td><td><code>src/scheduler/decode2.py</code></td></tr>
+            <tr><td>VLSU, GSAU, transpose (reused)</td><td><code>src/vector_core/</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+    <section>
+      <h2>Not yet as planned</h2>
+      <ul class="open">
+        <li>Single mode only: one round per packet. Loop mode (resident slots repeating with a trip count) is the next milestone.</li>
+        <li>Mask registers are still tracked by decode 2's busy bits, not by the vector core's scoreboard.</li>
+        <li>When <code>mv.stm</code> and a compare write the same mask bank in one cycle, <code>mv.stm</code> goes first. The plan has the compare first.</li>
+        <li>Move-to-scalar reaches scalar writeback one cycle after its slot fires, not the same cycle.</li>
+        <li>Writeback priority is a fixed order; oldest-first is not built.</li>
+        <li>The activity view and the harness platform still use the v1 core.</li>
+      </ul>
+    </section>
+  </div>
+
+  <footer>Design: <code>docs/vector_core_v2_change_plan.md</code> · Build log and kernel results: <code>docs/vector_core_v2_worklog.md</code></footer>
+</div>
+
+</html>

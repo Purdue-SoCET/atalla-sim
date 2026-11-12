@@ -45,6 +45,7 @@ from memory.backend import Backend
 from memory.bus import BusMaster
 from memory.dram import DRAM, DRAM_BURST_BYTES
 from scheduler.core import SchedulerCore
+from vector_core.v2.config import VectorCoreConfig, make_vector_core
 
 MASK32 = 0xFFFFFFFF
 
@@ -140,6 +141,8 @@ def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]
                           dram_channel: Any = None,
                           axi: Optional[bool] = None,
                           axi_params: Optional[AXIParams] = None,
+                          vector_arch: str = "lanes",
+                          vector_cfg: Optional[VectorCoreConfig] = None,
                           **core_kw) -> AtallaPlatform:
     """`program` and `data` as load_program_text returns them; `data` words
     go into DRAM. `systolic_array` is "meissa" (the RTL's) or "tpu"; extra
@@ -154,13 +157,29 @@ def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]
     `axi` puts the AXI bus between the masters and DRAM (`axi_params` sizes
     it); by default there is one exactly when `dram_channel` is given. With
     no `dram_channel`, the bus's DRAM answers in `dram_latency` cycles, and
-    `burst_bytes` gives way to 8-byte beats."""
+    `burst_bytes` gives way to 8-byte beats. `vector_arch` "fu_groups" (or a
+    `vector_cfg` with that arch) builds the M x N vector core
+    (vector_core/v2, docs/vector_core_v2_change_plan.md) instead of today's
+    lanes; `lane_count` then doesn't apply."""
     use_axi = (dram_channel is not None) if axi is None else bool(axi)
+    if vector_cfg is None:
+        # Today's programs aren't register-allocated for bank pairs, so the
+        # first version reads in compat mode (plan Q33, Q34).
+        vector_cfg = VectorCoreConfig(arch=vector_arch, read_mode="compat")
+    elif vector_arch not in ("lanes", vector_cfg.arch):
+        raise ValueError("vector_arch %r disagrees with vector_cfg.arch %r"
+                         % (vector_arch, vector_cfg.arch))
+    factory = None
+    if vector_cfg.arch == "fu_groups":
+        if activity:
+            raise ValueError("the activity view does not draw the M x N vector core yet")
+        factory = lambda vls_count, _cfg=vector_cfg: make_vector_core(_cfg, vls_count=vls_count)
     parts = build_tpu_platform(dtype="bf16", lane_count=lane_count,
                                systolic_array=systolic_array,
                                backend_dram_latency=dram_latency,
                                backend_dram_burst_bytes=BEAT_BYTES if use_axi else burst_bytes,
-                               dram_channel=None if use_axi else dram_channel)
+                               dram_channel=None if use_axi else dram_channel,
+                               vector_core_factory=factory)
     vc, dram, backends = parts.vc, parts.dram, parts.backends
     for addr, word in (data or {}).items():
         dram.write(int(addr), (int(word) & MASK32).to_bytes(4, "little"))

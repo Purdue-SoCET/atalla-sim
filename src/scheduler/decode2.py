@@ -186,14 +186,18 @@ class Scoreboard(RTLModule):
     """A busy bit per scalar, vector and mask register."""
 
     REGS = dict(scalar=frozenset(), vector=frozenset(), mask=frozenset())
+    #: False with the M x N vector core (vector_core/v2), whose slots track
+    #: vector registers themselves; mask registers stay tracked here.
+    track_vector = True
 
     def hazard(self, pkt: DecodedPacket) -> bool:
         """RAW on any source, WAW on any destination. An SDMA's rs1 is both,
         so its read covers it, as the RTL's comment says."""
         return (any(r in self.scalar for r in pkt.scalar_reads())
                 or any(w in self.scalar for w in pkt.scalar_writes())
-                or any(r in self.vector for r in pkt.vector_reads())
-                or any(w in self.vector for w in pkt.vector_writes())
+                or (self.track_vector
+                    and (any(r in self.vector for r in pkt.vector_reads())
+                         or any(w in self.vector for w in pkt.vector_writes())))
                 or any(r in self.mask for r in pkt.mask_reads())
                 or any(w in self.mask for w in pkt.mask_writes()))
 
@@ -205,15 +209,17 @@ class Scoreboard(RTLModule):
         m = set(self.mask) - set(wb_mask)
         if issued is not None:
             s |= set(issued.scalar_writes())
-            v |= set(issued.vector_writes())
+            if self.track_vector:
+                v |= set(issued.vector_writes())
             m |= set(issued.mask_writes())
         self.scalar_n, self.vector_n, self.mask_n = frozenset(s), frozenset(v), frozenset(m)
 
     def first_hazard(self, pkt: DecodedPacket) -> Optional[Tuple[str, int]]:
         """The first busy register the packet reads or writes, as ("s" | "v" |
         "m", register), or None."""
+        vregs = pkt.vector_reads() + pkt.vector_writes() if self.track_vector else []
         for kind, regs, busy in (("s", pkt.scalar_reads() + pkt.scalar_writes(), self.scalar),
-                                 ("v", pkt.vector_reads() + pkt.vector_writes(), self.vector),
+                                 ("v", vregs, self.vector),
                                  ("m", pkt.mask_reads() + pkt.mask_writes(), self.mask)):
             for r in regs:
                 if r in busy:
@@ -434,10 +440,17 @@ class Decode2(RTLModule):
                        "in_wb_vst")
 
     def __init__(self, name: str = "decode2", *, strict: bool = True,
-                 vector_storage=None, vector_len: int = 32):
+                 vector_storage=None, vector_len: int = 32,
+                 vector_operands_at_issue: bool = True):
         super().__init__(name)
         self.strict = bool(strict)
+        #: False with the M x N vector core: its slots read vector registers
+        #: and masks after issue, through their own ports, and track vector
+        #: hazards; decode 2 then reads neither, times neither file's bank
+        #: conflicts, and keeps busy bits for scalar and mask registers only.
+        self.vector_operands_at_issue = bool(vector_operands_at_issue)
         self.scoreboard = Scoreboard("scoreboard")
+        self.scoreboard.track_vector = self.vector_operands_at_issue
         self.vst = VstReservations("vst")
         self.srf = ScalarRegFile("srf")
         zero_vec = [0.0] * int(vector_len)
@@ -494,10 +507,13 @@ class Decode2(RTLModule):
         fus = self._fu_ready(pkt, sids)
         self._wb_v_regs, self._wb_v = _with_data(self.in_wb_vector)
         self._wb_m_regs, self._wb_m = _with_data(self.in_wb_mask)
+        at_issue = self.vector_operands_at_issue
         rf = [self.srf.eval_ready_for(pkt.scalar_reads(),
                                       [r for r, _ in self.in_wb_scalar], deps),
-              self.vrf.eval_ready_for(pkt.vector_reads(), [r for r, _ in self._wb_v], deps),
-              self.mrf.eval_ready_for(pkt.mask_reads(), [r for r, _ in self._wb_m], deps)]
+              self.vrf.eval_ready_for(pkt.vector_reads() if at_issue else [],
+                                      [r for r, _ in self._wb_v], deps),
+              self.mrf.eval_ready_for(pkt.mask_reads() if at_issue else [],
+                                      [r for r, _ in self._wb_m], deps)]
         rf = all(rf)
         self.out_ready = deps and fus and rf
         #: This cycle's stall, for the performance monitor: None, "hazard",
@@ -542,14 +558,15 @@ class Decode2(RTLModule):
             if o.valid:
                 out.operands[("scalar", o.slot)] = {"rs1": read(o.rs1) if o.use_rs1 else 0,
                                                      "rs2": read(o.rs2) if o.use_rs2 else 0}
+        at_issue = self.vector_operands_at_issue
         for o in pkt.vector:
             if o.valid:
                 out.operands[("vector", o.slot)] = {
                     "rs1": read(o.rs1) if o.use_rs1 else 0,
                     "rs2": read(o.rs2) if o.use_rs2 else 0,
-                    "vs1": self.vrf.read(o.vs1) if o.use_vs1 else None,
-                    "vs2": self.vrf.read(o.vs2) if o.use_vs2 else None,
-                    "vms": self.mrf.read(o.vms) if o.use_vms else MASK32}
+                    "vs1": self.vrf.read(o.vs1) if o.use_vs1 and at_issue else None,
+                    "vs2": self.vrf.read(o.vs2) if o.use_vs2 and at_issue else None,
+                    "vms": self.mrf.read(o.vms) if o.use_vms and at_issue else MASK32}
         for o in pkt.sdma:
             if o.valid:
                 out.operands[("sdma", o.slot)] = {"rs1": read(o.rs1_rd), "rs2": read(o.rs2),

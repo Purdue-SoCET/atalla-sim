@@ -602,6 +602,7 @@ def build_tpu_platform(
     vls_bridge_cls: Callable[..., Any] = VLSFrontendBridge,
     vls_bridge_kwargs: Optional[Dict[str, Any]] = None,
     systolic_array: str = "tpu",
+    vector_core_factory: Optional[Callable[..., Any]] = None,
 ) -> TPUPlatform:
     """Build the TPU platform.
 
@@ -611,15 +612,20 @@ def build_tpu_platform(
     spad_frontend_queue_size sets that queue depth. `dram_channel` replaces
     the backends' fixed-latency SharedDRAMBurstChannel, e.g. with a
     RamulatorDRAM (memory/ramulator.py), which then ticks after them.
+    `vector_core_factory(vls_count=...)`, if given, builds the vector core
+    instead of today's lane VectorCore (the M x N core, vector_core/v2).
     """
     eq, clk, sim = build_sim()
-    vc = VectorCore(
-        veggie_size=int(size) * 16,
-        lane_count=int(lane_count),
-        vls_count=int(vls_count),
-        fu_latencies={"alu": 1},
-        dtype=str(dtype),
-    )
+    if vector_core_factory is not None:
+        vc = vector_core_factory(vls_count=int(vls_count))
+    else:
+        vc = VectorCore(
+            veggie_size=int(size) * 16,
+            lane_count=int(lane_count),
+            vls_count=int(vls_count),
+            fu_latencies={"alu": 1},
+            dtype=str(dtype),
+        )
     spad = Scratchpad(
         num_banks=int(spad_num_banks),
         bank_size=int(spad_bank_size),

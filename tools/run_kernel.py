@@ -56,6 +56,7 @@ from atalla.atalla_platform import build_atalla_platform, c_entry_sregs  # noqa:
 from scheduler.assembler import to_in_text                        # noqa: E402
 from memory.dram import DRAM_BURST_BYTES                          # noqa: E402
 from memory.ramulator import DRAM_CONFIGS, RamulatorDRAM                 # noqa: E402
+from vector_core.v2.config import VectorCoreConfig                # noqa: E402
 import c_kernels                                                  # noqa: E402
 
 SIM = golden.SUBMODULE_PATH
@@ -140,6 +141,17 @@ def main() -> None:
                          "Ramulator's DDR4 model, e.g. read_buffer=64, preset=DDR4_2400R, "
                          "nCL=12; repeatable")
     ap.add_argument("--lanes", type=int, default=16, help="vector lanes (must divide 32)")
+    ap.add_argument("--vector-arch", choices=["lanes", "fu_groups"], default="lanes",
+                    help="the vector core: today's lanes, or the M x N core with FU groups, "
+                         "slots and banked registers (docs/vector_core_v2_change_plan.md)")
+    ap.add_argument("--read-mode", choices=["compat", "strict"], default="compat",
+                    help="with --vector-arch fu_groups: compat lets a slot read any bank "
+                         "(+1 cycle outside its pair); strict rejects such reads")
+    ap.add_argument("--wb-grants", type=int, default=4,
+                    help="with --vector-arch fu_groups: vector writebacks per cycle")
+    ap.add_argument("--m0-port", action=argparse.BooleanOptionalAction, default=True,
+                    help="with --vector-arch fu_groups: an unmasked op (m0) uses mask bank 0's "
+                         "read port, as today")
     ap.add_argument("--array", choices=["meissa", "tpu"], default="meissa",
                     help="the systolic array: MEISSA (the RTL's) or the TPU-style array")
     ap.add_argument("--burst-bytes", type=int, default=DRAM_BURST_BYTES,
@@ -211,13 +223,18 @@ def main() -> None:
             sys.exit(str(exc))
     elif args.dram_param or args.dram_config != "rtl":
         sys.exit("--dram-config and --dram-param need --dram ramulator")
+    vector_cfg = None
+    if args.vector_arch == "fu_groups":
+        vector_cfg = VectorCoreConfig(arch="fu_groups", read_mode=args.read_mode,
+                                      wb_grants_per_cycle=args.wb_grants,
+                                      m0_uses_port=args.m0_port)
     plat = build_atalla_platform(instr, data, dram_latency=args.dram_latency,
                                  lane_count=args.lanes, systolic_array=args.array,
                                  burst_bytes=args.burst_bytes,
                                  activity=bool(args.activity), warm_icache=args.warm_icache,
                                  perf_timeline=args.timeline, init_sregs=init_sregs,
                                  describe_pc=describe_pc, dram_channel=dram_channel,
-                                 axi=args.axi, strict=False)
+                                 axi=args.axi, strict=False, vector_cfg=vector_cfg)
     t = time.time()
     cycles = plat.run_until_done(limit=args.limit)
     c = plat.core

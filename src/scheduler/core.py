@@ -137,10 +137,18 @@ class SchedulerCore(Clocked):
         self.ifd1 = IFD1Latch("ifd1")
         self.d1d2 = D1D2Latch()
         self.vector_core = vector_core
+        #: The M x N vector core (vector_core/v2) reads its own operands.
+        self.v2 = getattr(vector_core, "arch", "lanes") == "fu_groups"
+        if vector_core is None:
+            storage = None
+        elif self.v2:
+            storage = vector_core.vrf_storage()
+        else:
+            storage = VeggieStorage(vector_core)
         self.decode2 = Decode2(
-            strict=strict,
-            vector_storage=VeggieStorage(vector_core) if vector_core is not None else None,
-            vector_len=vector_core.vector_len if vector_core is not None else 32)
+            strict=strict, vector_storage=storage,
+            vector_len=vector_core.vector_len if vector_core is not None else 32,
+            vector_operands_at_issue=not self.v2)
         self._modules = (self.icache, self.btb, self.fetch, self.ifd1, self.d1d2,
                          self.decode2)
 
@@ -186,8 +194,13 @@ class SchedulerCore(Clocked):
         self.vector: Optional[VectorSide] = None
         if vector_core is not None:
             d2 = self.decode2
-            self.vector = VectorSide(vector_core, backends,
-                                     read_vreg=d2.vrf.read, read_mask=d2.mrf.read)
+            if self.v2:
+                from scheduler.vector_v2 import VectorSideV2
+                self.vector = VectorSideV2(vector_core, backends, read_mask=d2.mrf.read,
+                                           writeback_at=self.writeback_at)
+            else:
+                self.vector = VectorSide(vector_core, backends,
+                                         read_vreg=d2.vrf.read, read_mask=d2.mrf.read)
         self.halt_latch = False
         #: The cycle execute raised halt_out, and the cycle the dcache had
         #: written back its dirty lines after it.
@@ -264,6 +277,9 @@ class SchedulerCore(Clocked):
             offers["mts"] = vs.mts.offer(mts_op, mts_ops)
         granted, writes, masks = arbitrate(offers)
         self._granted, self._redirect = granted, redirect
+        if vs is not None and self.v2:
+            # mv.stm writes take their mask bank this cycle (vector_v2.py)
+            vs.blocked_mask_banks = {int(m.rd) % 2 for m in masks}
         if writes or masks:
             self.writeback_at(cycle + 1, scalar=[(w.rd, w.value) for w in writes],
                               mask=[(m.rd, m.value) for m in masks])
