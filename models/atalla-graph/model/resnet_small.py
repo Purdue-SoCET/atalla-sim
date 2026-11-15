@@ -113,8 +113,11 @@ class _BottleneckRef(nn.Module):
 class ResNetSmallRef(nn.Module):
     def __init__(self, scale: float = 0.01, num_classes: int = 10):
         super().__init__()
-        stem = _sc(64, scale)
-        mids = [_sc(64, scale), _sc(128, scale)]
+        # ResNet-50 doubles the width at every stage (mid 64, 128, 256, 512).
+        # Scale the base width, then double it, so rounding up to 32 cannot
+        # flatten the stages into one width.
+        stem = base = _sc(64, scale)
+        mids = [base, 2 * base]
         self.stem = _ConvBN(3, stem, 3)
         self.pool = nn.MaxPool2d(2, 2)
         self.stage1 = _BottleneckRef(stem, mids[0], 1)
