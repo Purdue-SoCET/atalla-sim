@@ -107,7 +107,7 @@ def build(model_name: str, output_dir: Path, seed: int, scale: float) -> Path:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", choices=("basic", "alexnet_small"), default="basic")
+    parser.add_argument("--model", choices=("basic", "alexnet_small", "resnet_small", "resnet_small_2to4"), default="basic")
     parser.add_argument("--out-dir", type=Path, default=Path("out/graph"))
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--scale", type=float, default=0.01)

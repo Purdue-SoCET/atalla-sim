@@ -101,7 +101,7 @@ def verify(model_name, out_dir, sim_root, seed=42, scale=.01, limit=10_000_000, 
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--model',choices=('basic','alexnet_small'),default='basic')
+    parser.add_argument('--model',choices=('basic','alexnet_small','resnet_small','resnet_small_2to4'),default='basic')
     parser.add_argument('--out-dir',type=Path,default=Path('out/graph'))
     parser.add_argument('--sim-root',type=Path,default=Path(__file__).resolve().parents[1])   # the atalla-sim this lives in
     parser.add_argument('--seed',type=int,default=42)

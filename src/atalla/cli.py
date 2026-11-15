@@ -172,7 +172,7 @@ def _models(argv):
                     "(build), and run that ELF on atalla-sim checking every result against "
                     "PyTorch (verify). Needs torch. docs/model-elf.md has the details.")
     ap.add_argument("action", choices=("build", "verify"))
-    ap.add_argument("model", choices=("basic", "alexnet_small"))
+    ap.add_argument("model", choices=("basic", "alexnet_small", "resnet_small", "resnet_small_2to4"))
     ap.add_argument("--out-dir", metavar="DIR",
                     help="where the ELF, DRAM image and manifests go (default models/out/MODEL)")
     ap.add_argument("--seed", type=int)
