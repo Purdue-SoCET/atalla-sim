@@ -35,7 +35,13 @@ def compile_c(source: Path, output: Path, opt_level: int = 2) -> None:
         raise RuntimeError(f"Compiler failed for {source}; see {output.with_suffix('.log')}")
 
 
-def build(model_name: str, output_dir: Path, seed: int, scale: float) -> Path:
+def build(model_name: str, output_dir: Path, seed: int, scale: float,
+          reuse_objs: Path | None = None) -> Path:
+    """reuse_objs: take every compiled object (kernels, schedule, entry) from an
+    earlier build's output directory instead of recompiling. The compiler's
+    output varies from run to run, so two models compared cycle-for-cycle --
+    a dense model and its pruned twin -- must share objects. Only valid when
+    both have the same schedule, which is checked."""
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(seed)
@@ -61,14 +67,23 @@ def build(model_name: str, output_dir: Path, seed: int, scale: float) -> Path:
     entry.write_text("int run_graph(void);\nint main(void) { int status = run_graph(); atalla_halt(); return status; }\n")
     schedule_obj = output_dir / "graph_schedule.o"
     entry_obj = output_dir / "graph_entry.o"
-    compile_c(schedule, schedule_obj)
-    compile_c(entry, entry_obj)
+    reuse = Path(reuse_objs) if reuse_objs is not None else None
+    if reuse is not None and (reuse / schedule.name).read_text() != schedule.read_text():
+        raise RuntimeError(f"{reuse} was built from a different schedule; its objects can't be reused")
+    for src, obj in ((schedule, schedule_obj), (entry, entry_obj)):
+        if reuse is not None:
+            obj.write_bytes((reuse / obj.name).read_bytes())
+        else:
+            compile_c(src, obj)
 
     kernel_objs = []
     for source in manifest["library_sources"]:
         src = ROOT / "kernels" / source
         obj = output_dir / (src.stem + ".o")
-        compile_c(src, obj)
+        if reuse is not None:
+            obj.write_bytes((reuse / obj.name).read_bytes())
+        else:
+            compile_c(src, obj)
         kernel_objs.append(obj)
     layout = output_dir / "graph_layout.mmap"
     data_capacity = (len(payload) + 0x40000 + 0xFFF) & ~0xFFF
@@ -111,8 +126,9 @@ def main() -> None:
     parser.add_argument("--out-dir", type=Path, default=Path("out/graph"))
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--scale", type=float, default=0.01)
+    parser.add_argument("--kernel-objs", type=Path, help="reuse kernel .o files from this earlier build directory")
     args = parser.parse_args()
-    build(args.model, args.out_dir, args.seed, args.scale)
+    build(args.model, args.out_dir, args.seed, args.scale, args.kernel_objs)
 
 
 if __name__ == "__main__":

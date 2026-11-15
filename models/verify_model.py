@@ -61,8 +61,8 @@ def expected_results(model_name, out_dir, seed=42, scale=.01):
     return out
 
 
-def verify(model_name, out_dir, sim_root, seed=42, scale=.01, limit=10_000_000, atol=.01, rtol=.03):
-    elf=build_model.build(model_name,out_dir,seed,scale)
+def verify(model_name, out_dir, sim_root, seed=42, scale=.01, limit=10_000_000, atol=.01, rtol=.03, kernel_objs=None):
+    elf=build_model.build(model_name,out_dir,seed,scale,kernel_objs)
     sys.path.insert(0,str(sim_root/'src'))
     from scheduler.elf import load_elf
     from atalla.atalla_platform import build_atalla_platform,c_entry_sregs
@@ -109,6 +109,7 @@ if __name__=='__main__':
     parser.add_argument('--limit',type=int,default=10_000_000)
     parser.add_argument('--atol',type=float,default=.01)
     parser.add_argument('--rtol',type=float,default=.03)
+    parser.add_argument('--kernel-objs',type=Path,help='reuse kernel .o files from this earlier build directory')
     args=parser.parse_args()
-    report=verify(args.model,args.out_dir,args.sim_root,args.seed,args.scale,args.limit,args.atol,args.rtol)
+    report=verify(args.model,args.out_dir,args.sim_root,args.seed,args.scale,args.limit,args.atol,args.rtol,args.kernel_objs)
     sys.exit(0 if report['passed'] else 1)
