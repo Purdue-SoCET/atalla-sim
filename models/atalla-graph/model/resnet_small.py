@@ -198,3 +198,26 @@ class ResNetSmall(nn.Module):
 
 def example_input() -> torch.Tensor:
     return torch.randn(1, 3, INPUT_HW, INPUT_HW)
+
+
+# -- trained on MNIST (train_resnet_small.py) ----------------------------------
+
+_WEIGHTS = __import__("pathlib").Path(__file__).resolve().parent / "weights"
+
+
+def trained(sparse: bool = False) -> ResNetSmall:
+    """resnet_small with the MNIST-trained weights: dense, or the 2:4 twin
+    pruned and fine-tuned with its mask held (98.95% vs 98.98% test)."""
+    model = ResNetSmall()
+    name = "resnet_small_mnist_2to4.pt" if sparse else "resnet_small_mnist.pt"
+    model.load_state_dict(torch.load(_WEIGHTS / name, weights_only=True))
+    if sparse:
+        model.sparsity = "2:4"
+        assert all(is_2to4(c.weight) for c in model.pruned_convs())
+    return model.eval()
+
+
+def mnist_sample(digit: int = 7) -> torch.Tensor:
+    """The first MNIST test image of `digit`, preprocessed: (1, 3, 16, 16)."""
+    samples = torch.load(_WEIGHTS / "mnist_samples.pt", weights_only=True)
+    return samples["x"][digit:digit + 1].clone()

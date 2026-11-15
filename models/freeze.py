@@ -35,7 +35,7 @@ def bf16_bits(a):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("model", choices=("basic", "alexnet_small", "resnet_small", "resnet_small_2to4"))
+    ap.add_argument("model", choices=("basic", "alexnet_small", "resnet_small", "resnet_small_2to4", "resnet_small_mnist", "resnet_small_mnist_2to4"))
     ap.add_argument("--out-dir", type=Path, help="the build (default models/out/MODEL)")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--scale", type=float, default=.01)

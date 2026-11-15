@@ -27,6 +27,11 @@ def load_model(name: str, scale: float = 0.01):
     if name == "alexnet_small":
         from model.alexnet_small import AlexNetSmall
         return AlexNetSmall(scale=scale, num_classes=10), torch.randn(1, 3, 32, 32)
+    if name in ("resnet_small_mnist", "resnet_small_mnist_2to4"):
+        import os
+        from model.resnet_small import mnist_sample, trained
+        digit = int(os.environ.get("MNIST_DIGIT", "7"))
+        return trained(sparse=name.endswith("_2to4")), mnist_sample(digit)
     if name in ("resnet_small", "resnet_small_2to4"):
         from model.resnet_small import ResNetSmall, example_input
         sparsity = "2:4" if name.endswith("_2to4") else None

@@ -1,0 +1,23 @@
+{
+  "seed": 0,
+  "epochs": 3,
+  "finetune": 2,
+  "results": {
+    "reference (BN, avgpool)": {
+      "fp32": 0.9898,
+      "bf16": 0.9897
+    },
+    "dense, folded": {
+      "fp32": 0.9898,
+      "bf16": 0.9896
+    },
+    "2:4 one-shot": {
+      "fp32": 0.7243,
+      "bf16": 0.721
+    },
+    "2:4 fine-tuned": {
+      "fp32": 0.9895,
+      "bf16": 0.9895
+    }
+  }
+}
