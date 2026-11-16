@@ -30,8 +30,10 @@ def load_model(name: str, scale: float = 0.01):
     if name in ("resnet_small_mnist", "resnet_small_mnist_2to4"):
         import os
         from model.resnet_small import mnist_sample, trained
-        digit = int(os.environ.get("MNIST_DIGIT", "7"))
-        return trained(sparse=name.endswith("_2to4")), mnist_sample(digit)
+        model = trained(sparse=name.endswith("_2to4"))
+        if os.environ.get("MNIST_IMAGE"):        # tools/classify_digit.py --sim
+            return model, torch.load(os.environ["MNIST_IMAGE"], weights_only=True)
+        return model, mnist_sample(int(os.environ.get("MNIST_DIGIT", "7")))
     if name in ("resnet_small", "resnet_small_2to4"):
         from model.resnet_small import ResNetSmall, example_input
         sparsity = "2:4" if name.endswith("_2to4") else None
