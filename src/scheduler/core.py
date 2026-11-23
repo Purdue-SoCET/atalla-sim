@@ -19,7 +19,7 @@ core and the scratchpad backends (stage 5, scheduler/vector.py), it also
 dispatches the vector and SDMA slots and owns vector writeback; without
 them those signals stay attributes, set by whoever drives the core:
 
-    vector_ready, vlsu_ready, scpad_busy, and writeback_at() for vector,
+    vector_ready, vlsu_ready, scpad_busy, vloop_pads, and writeback_at() for vector,
     mask and SDMA writebacks
 
 With `execute=False` (the stage 2 and 3 tests) every execute-side signal is
@@ -30,9 +30,13 @@ an attribute too:
     redirect_pc        the branch's own PC, which is what the BTB is written at
     internal_halt      execute's internal_halt
     ex_ready           {1..5: bool}, each scalar execute unit's ready
-    vector_ready       {"alu", "mul", "reduction", "gsau", "movement": bool}
+    vector_ready       {"alu", "mul", "reduction", "gsau", "movement", "vloop": bool};
+                       "alu:vloop" / "mul:vloop" True when that unit is held
+                       only because the vloop sequencer fires into it;
+                       "rounds" (M x N core) room in its round queue
     vlsu_ready         [bool] * 4, one VLSU per scratchpad
     scpad_busy         [bool] * 4
+    vloop_pads         [bool] * 4, scratchpads a running vloop holds
     writeback_at()     queue a writeback (scalar value, vector/mask register,
                        or an SDMA's completion) for a given cycle's EX/WB latch
     decode2_override   None, or force decode 2's ready -- for front-end tests
@@ -159,6 +163,9 @@ class SchedulerCore(Clocked):
         self.vector_ready = {}
         self.vlsu_ready = [True] * 4
         self.scpad_busy = [False] * 4
+        #: Scratchpads the vloop sequencer holds (set from it each cycle when
+        #: there is a vector core; an input otherwise).
+        self.vloop_pads = [False] * 4
         self._wb_due: Dict[int, Dict[str, list]] = {}
         self.redirect_valid = False
         self.redirect_target = 0
@@ -318,6 +325,21 @@ class SchedulerCore(Clocked):
         vs.retire(granted)
         self._mts_granted = mts_granted
         vs.dispatch(self.d2ex)
+        # The vloop sequencer, after dispatch: a vloop entering EX this cycle
+        # already holds its pads and the sequencer against the packet behind it.
+        seq = vs.vloop
+        self.vector_ready["vloop"] = seq.ready
+        if not self.v2:
+            # The lane side shares its units by holding lane ops out of a
+            # cycle the sequencer fires; the M x N core arbitrates inside.
+            # "<unit>:vloop" marks a unit held only for the loop, so decode 2
+            # (and the perf monitor) can name that stall apart from a busy unit.
+            for unit in ("alu", "mul"):
+                if seq.fires_next(unit):
+                    if self.vector_ready.get(unit, True):
+                        self.vector_ready[unit + ":vloop"] = True
+                    self.vector_ready[unit] = False
+        self.vloop_pads = seq.held_pads()
 
     def _execute_commit(self, cycle: int) -> None:
         g, r = self._granted, self._routed
@@ -375,6 +397,7 @@ class SchedulerCore(Clocked):
         d2.in_flush, d2.in_halt = flush, halt
         d2.in_ex_ready, d2.in_vector_ready = self.ex_ready, self.vector_ready
         d2.in_vlsu_ready, d2.in_scpad_busy = self.vlsu_ready, self.scpad_busy
+        d2.in_vloop_pads = self.vloop_pads
         d2.in_wb_scalar = wb.get("scalar", [])
         d2.in_wb_vector = wb.get("vector", [])
         d2.in_wb_mask = wb.get("mask", [])

@@ -140,3 +140,15 @@ def test_encoding_matches_the_functional_sims_assembler(name):
             d = fs.asm_to_instr_dict(ins.mnemonic, [fs.normalize_operand(o) for o in ins.ops],
                                      labels=addr, pc=pc)
             assert A.encode(ins, pc, addr) == int(fs.base.encode_instruction(d), 16), ins
+
+
+def test_relu_vl_assembles_to_vloop_with_its_funct():
+    """relu.vl in_row_reg, out_row_reg, rows_reg, sid_in, sid_out: the
+    mnemonic sets the funct; bare vloop is not an instruction."""
+    d = decode_instruction(A.encode(A.Instr("relu.vl", ["x5", "x6", "x7", "1", "2"], 1)))
+    assert (d["mnemonic"], d["funct"], d["rs1"], d["rs2"], d["rs3"], d["sid_in"],
+            d["sid_out"]) == ("relu.vl", 0, 5, 6, 7, 1, 2)
+    with pytest.raises(A.AssemblyError):
+        A.encode(A.Instr("vloop", ["x5", "x6", "x7", "1", "2"], 1))
+    with pytest.raises(A.AssemblyError):
+        A.encode(A.Instr("relu.vl", ["x5", "x6", "x7", "4", "0"], 1))   # sid is 2 bits

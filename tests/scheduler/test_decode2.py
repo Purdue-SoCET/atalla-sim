@@ -44,6 +44,12 @@ def sdma(m, rs1=0, rs2=0, rs3=0):
     return OP[m] | rs1 << 7 | rs2 << 15 | rs3 << 23
 
 
+def vloop(rs1=0, rs2=0, rs3=0, sid_in=0, sid_out=0, funct=0):
+    """relu.vl is funct 0: in_row reg, out_row reg, row-count reg, two sids."""
+    return (OP["vloop"] | rs1 << 7 | rs2 << 15 | rs3 << 23 | sid_in << 31 | sid_out << 33
+            | funct << 35)
+
+
 def packet(*slots):
     slots = list(slots) + [0] * (4 - len(slots))
     return sum(w << (INST_W * (3 - k)) for k, w in enumerate(slots))
@@ -104,6 +110,14 @@ def test_the_rtl_bit_slices_agree_with_the_isa_layout():
                             got = getattr(d, k)
                             want = f[k] & 0x1FFFFFF if m == "lui.s" and k == "imm" else f[k]
                             assert got == want, (m, k)
+            elif cls == VECTOR and m == "vloop":
+                d = decode_vector(w)
+                if f["mnemonic"] == "unknown":      # an unassigned funct
+                    assert not d.valid, m
+                    continue
+                assert d.valid and d.mnemonic == f["mnemonic"], m
+                assert (d.funct, d.rs1, d.rs2, d.rs3, d.sid, d.sid_out) == (
+                    f["funct"], f["rs1"], f["rs2"], f["rs3"], f["sid_in"], f["sid_out"]), m
             elif cls == VECTOR:
                 d = decode_vector(w)
                 names = {"mask": "vms", "imm8": "imm"}
@@ -138,6 +152,7 @@ def test_the_rtl_bit_slices_agree_with_the_isa_layout():
     (v3("vmov.vts", 7, 3, 4), ([], [3], []), ([7], [], [])),
     (v3("add.vs", 9, 3, 6, 1), ([6], [3], [1]), ([], [9], [])),
     (v3("mgt.mvv", 5, 3, 4, 1), ([], [3, 4], [1]), ([], [], [5])),
+    (vloop(5, 6, 7, sid_in=1, sid_out=2), ([5, 6, 7], [], []), ([], [], [])),
 ])
 def test_vector_read_and_write_sets(word, reads, writes):
     """From vector_control_unit.sv, with lw.vi corrected: a weight load
@@ -189,6 +204,10 @@ def test_each_scalar_op_has_one_execute_unit():
      "lane"),
     ([], [v3("gemm.vv", 1, 2), v3("gemm.vv", 3, 4)], [], "GSAU"),
     ([], [vm("vreg.ld", 1, 2, 3, sid=1), vm("vreg.ld", 4, 5, 6, sid=1)], [], "VLSU"),
+    ([], [vloop(1, 2, 3), vloop(4, 5, 6)], [], "vloop"),
+    ([r("add.s", 1, 2, 3)], [vloop(4, 5, 6)], [], "5 scalar register reads"),
+    ([], [vloop(1, 2, 3, sid_in=0, sid_out=1), vm("vreg.ld", 4, 5, 6, sid=1)], [],
+     "VLSU op on a vloop's scratchpad"),
 ])
 def test_packets_the_rtl_would_mangle_are_contract_violations(scalar, vector, sdma_ops, why):
     pkt = DecodedPacket.from_words((scalar + [0] * 4)[:4], (vector + [0] * 4)[:4],
@@ -420,6 +439,20 @@ def test_conflicts_are_only_served_once_the_operands_are_free():
     assert issued == {0: 2, 20: 9}
 
 
+def test_a_vloop_waits_for_its_registers_and_reads_all_three():
+    """relu.vl reads in_row, out_row and the row count at issue, so it waits
+    on the busy row count (r7) like any reader, and writes no register."""
+    prog = {0: packet(i("addi.s", 7, 0, 9)), 20: slot0(vloop(5, 6, 7, sid_in=1, sid_out=2))}
+    core, issued = run(prog, 12, setup=lambda c: c.writeback_at(6, scalar=[(7, 9)]))
+    assert issued == {0: 2, 20: 7}
+    ip = next(ip for _, ip in core.issued if ip.pc == 20)
+    o = ip.packet.vector[0]
+    assert (o.mnemonic, o.sid, o.sid_out) == ("relu.vl", 1, 2)
+    ops = ip.operands[("vector", 0)]
+    assert (ops["rs1"], ops["rs2"], ops["rs3"]) == (0, 0, 9)
+    assert ip.packet.scalar_writes() == [] and ip.packet.vector_writes() == []
+
+
 # -- structural hazards -----------------------------------------------------------------
 def test_a_busy_execute_unit_holds_the_packet():
     def setup(core):
@@ -457,6 +490,69 @@ def test_an_sdma_waits_for_the_scratchpad_its_rs3_names():
     _, issued = run(prog, 8, setup=busy(1))
     assert issued == {0: 2, 20: 3}
     _, issued = run(prog, 8, setup=busy(2))
+    assert issued == {0: 2}
+
+
+# -- vloop: the sequencer and the scratchpads it holds -------------------------------
+def test_an_sdma_in_a_vloops_packet_on_its_pad_is_a_contract_violation():
+    pkt = DecodedPacket.from_words([0] * 4, [vloop(1, 2, 3, sid_in=0, sid_out=3), 0, 0, 0],
+                                   [sdma("scpad.st", 4, 5, 6), 0, 0, 0])
+    assert "an SDMA on a vloop's scratchpad" in contract_violations(pkt, [3])
+    assert not any("vloop" in b for b in contract_violations(pkt, [2]))
+
+
+def test_a_vloop_waits_for_the_sequencer():
+    prog = {0: slot0(vloop(1, 2, 3))}
+    _, issued = run(prog, 6, setup=lambda c: c.vector_ready.update(vloop=False))
+    assert issued == {}
+    _, issued = run(prog, 6)
+    assert issued == {0: 2}
+
+
+def test_a_vloop_waits_for_an_sdma_on_its_input_or_output_pad():
+    """The rows a scpad.ld is bringing in must land before the loop reads
+    them; likewise for its output pad."""
+    prog = {0: slot0(vloop(1, 2, 3, sid_in=1, sid_out=2))}
+    for pad, waits in ((0, False), (1, True), (2, True), (3, False)):
+        core, issued = run(prog, 6, setup=lambda c, p=pad: setattr(
+            c, "scpad_busy", [q == p for q in range(4)]))
+        assert issued == ({} if waits else {0: 2}), pad
+        if waits:
+            assert core.decode2.blocked_by == "sdma%d" % pad
+
+
+def test_a_held_pad_blocks_vlsu_ops_on_it_and_no_other():
+    """Whole-pad blocking: while a vloop holds pad 1, a vreg.ld on pad 1
+    waits and one on pad 0 goes."""
+    held = lambda c: setattr(c, "vloop_pads", [False, True, False, False])
+    core, issued = run({0: slot0(vm("vreg.ld", 1, 2, 3, sid=1))}, 6, setup=held)
+    assert issued == {} and core.decode2.blocked_by == "vloop_pad1"
+    _, issued = run({0: slot0(vm("vreg.st", 1, 2, 3, sid=0))}, 6, setup=held)
+    assert issued == {0: 2}
+
+
+def test_a_held_pad_blocks_an_sdma_on_it():
+    """The SDMA's pad is rs3[31:30]: r13 = 2 << 30."""
+    prog = {0: packet(i("addi.s", 30, 0, 0)), 20: slot0(sdma("scpad.st", 11, 12, 13))}
+
+    def setup(pad):
+        def f(core):
+            core.writeback_at(1, scalar=[(13, 2 << 30)])
+            core.vloop_pads = [p == pad for p in range(4)]
+        return f
+    _, issued = run(prog, 8, setup=setup(1))
+    assert issued == {0: 2, 20: 3}
+    core, issued = run(prog, 8, setup=setup(2))
+    assert issued == {0: 2} and core.decode2.blocked_by == "vloop_pad2"
+
+
+def test_lane_ops_share_fu_rows_through_vector_ready():
+    """The sequencer marks an FU row it uses this cycle not ready; a lane op
+    on that row waits and one on another row goes. No vloop-specific check."""
+    busy_alu = lambda c: c.vector_ready.update(alu=False)
+    _, issued = run({0: slot0(v3("add.vv", 1, 2, 3))}, 6, setup=busy_alu)
+    assert issued == {}
+    _, issued = run({0: slot0(v3("mul.vv", 1, 2, 3))}, 6, setup=busy_alu)
     assert issued == {0: 2}
 
 

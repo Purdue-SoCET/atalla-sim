@@ -29,7 +29,8 @@ does not reproduce the bug:
 from dataclasses import dataclass
 from typing import List, Optional
 
-from scheduler.isa import OP_W, OPCODES, get_bits, sign_extend
+from scheduler.isa import (OP_W, OPCODES, VLOOP_FUNCT_BITS, VLOOP_FUNCTS, VLOOP_OPCODE,
+                           get_bits, sign_extend)
 
 _BY_NAME = {m: op for op, (m, _) in OPCODES.items()}
 
@@ -58,6 +59,8 @@ EX_OF_SCALAR_FU = {
  V_MVMT) = range(16)
 #: The transpose unit, which the RTL's enum doesn't have yet.
 V_TRANS = 16
+#: The CISC vector-loop sequencer (vloop), likewise not in the RTL.
+V_CISC = 17
 VECTOR_ALU_FUS = frozenset(range(V_ALU_ADD, V_ALU_MNEQ + 1))
 
 
@@ -124,26 +127,35 @@ class VectorOp:
     vd: int = 0
     rs1: int = 0
     rs2: int = 0
+    rs3: int = 0
     rd: int = 0
     imm: int = 0
     sid: int = 0
     num_cols: int = 0
+    #: vloop only: which loop (isa.VLOOP_FUNCTS), and the output scratchpad
+    #: (sid holds the input's).
+    funct: int = 0
+    sid_out: int = 0
     rm: bool = False
     use_vms: bool = False
     use_vs1: bool = False
     use_vs2: bool = False
     use_rs1: bool = False
     use_rs2: bool = False
+    use_rs3: bool = False
     scalar_reg_write: bool = False
     vector_reg_write: bool = False
     mask_reg_write: bool = False
 
     @property
     def mnemonic(self) -> str:
+        if self.op == VLOOP_OPCODE:
+            return VLOOP_FUNCTS.get(self.funct, "unknown")
         return OPCODES.get(self.op, ("unknown", ""))[0]
 
     def scalar_reads(self) -> List[int]:
-        return ([self.rs1] if self.use_rs1 else []) + ([self.rs2] if self.use_rs2 else [])
+        return ([self.rs1] if self.use_rs1 else []) + ([self.rs2] if self.use_rs2 else []) \
+            + ([self.rs3] if self.use_rs3 else [])
 
     def vector_reads(self) -> List[int]:
         return ([self.vs1] if self.use_vs1 else []) + ([self.vs2] if self.use_vs2 else [])
@@ -163,8 +175,8 @@ class VectorOp:
     @property
     def is_lane_op(self) -> bool:
         """What scheduler_core routes to the lanes: everything but GSAU,
-        VLSU and MVMT."""
-        return self.valid and self.fu not in (V_GSAU, V_VLSU, V_MVMT, V_TRANS)
+        VLSU, MVMT, the transpose unit and the vloop sequencer."""
+        return self.valid and self.fu not in (V_GSAU, V_VLSU, V_MVMT, V_TRANS, V_CISC)
 
 
 @dataclass
@@ -266,7 +278,6 @@ def decode_scalar(word: int, slot: int = 0) -> ScalarOp:
     # nop.s and anything else: not valid, does nothing
     return d
 
-
 # -- vector_control_unit -----------------------------------------------------------
 _VV = {"add.vv": V_ALU_ADD, "sub.vv": V_ALU_SUB, "mul.vv": V_MUL}
 _MVV = {"mgt.mvv": V_ALU_MGT, "mlt.mvv": V_ALU_MLT, "meq.mvv": V_ALU_MEQ,
@@ -290,6 +301,16 @@ def decode_vector(word: int, slot: int = 0) -> VectorOp:
     if m in _VV:
         d.valid, d.fu, d.vms, d.vs1, d.vs2, d.vd = True, _VV[m], vms, vs1, vs2, vd
         d.use_vms, d.use_vs1, d.use_vs2, d.vector_reg_write = True, True, True, True
+    elif m == "vloop":
+        # The CISC vector loop: three scalar registers (input row, output
+        # row, row count) and two scratchpads; it writes no register. An
+        # unassigned funct is not an instruction.
+        funct = get_bits(word, *VLOOP_FUNCT_BITS)
+        if funct in VLOOP_FUNCTS:
+            d.valid, d.fu, d.funct = True, V_CISC, funct
+            d.rs1, d.rs2, d.rs3 = vd, vs1, vs2         # [14:7], [22:15], [30:23]
+            d.use_rs1, d.use_rs2, d.use_rs3 = True, True, True
+            d.sid, d.sid_out = get_bits(word, 32, 31), get_bits(word, 34, 33)
     elif m == "gemm.vv":
         d.valid, d.fu, d.vms, d.vs1, d.vd = True, V_GSAU, vms, vs1, vd
         d.use_vs1, d.vector_reg_write = True, True

@@ -65,17 +65,19 @@ class ElfLayoutWarning(UserWarning):
     """A kernel's inputs land on its own code or data (fine here, not on the RTL)."""
 
 
-def compile_c(c_path: Path) -> str:
-    """atalla_cc -p -S: the packetized assembly, as text."""
-    if not (COMPILER / "ppci").is_dir():
-        raise CompileError("the compiler submodule isn't checked out: %s" % COMPILER)
+def compile_c(c_path: Path, compiler: Optional[Path] = None) -> str:
+    """atalla_cc -p -S: the packetized assembly, as text. `compiler` is a
+    compiler checkout to use instead of the submodule (a newer one, say)."""
+    compiler = Path(compiler) if compiler is not None else COMPILER
+    if not (compiler / "ppci").is_dir():
+        raise CompileError("no compiler checked out at %s" % compiler)
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / (c_path.stem + ".s")
         # The compiler imports its packetizer and latency table from its root.
-        env = dict(os.environ, PYTHONPATH=str(COMPILER))
+        env = dict(os.environ, PYTHONPATH=str(compiler))
         p = subprocess.run([sys.executable, "-m", "ppci.cli.atalla_cc", "--machine", "atalla",
-                            "-O", "2", "-p", "-S", str(c_path), "-o", str(out)],
-                           cwd=str(COMPILER), env=env, capture_output=True, text=True)
+                            "-O", "2", "-p", "-S", str(Path(c_path).resolve()), "-o", str(out)],
+                           cwd=str(compiler), env=env, capture_output=True, text=True)
         if p.returncode != 0:
             raise CompileError("atalla_cc failed on %s:\n%s"
                                % (c_path.name, (p.stderr or p.stdout)[-3000:]))

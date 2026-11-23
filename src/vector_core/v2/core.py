@@ -22,6 +22,13 @@ rounds that fire in order (WAR across rounds); inside a round an op may not
 fire a write to a register another op of the round has yet to read. Mask
 registers are written through `on_mask_write` (the scheduler's mask file and
 busy bits, see scheduler/vector_v2.py) and read through `read_mask`.
+
+A kernel sequencer (the vloop sequencer, vector_core/vloop.py) can also fire
+straight into the FU groups through kernel_port.FUGroupPort: its token is put
+in `kernel_tokens` before step(), wins the group's input that cycle (a slot op
+aimed at the group stalls, reason "kernel"), and is taken back from the
+group's output register by the port, never reaching writeback. Its VLSU loads
+are tagged (meta "vloop") and likewise skip writeback.
 """
 
 import struct
@@ -41,7 +48,8 @@ from vector_core.v2.vrf_banks import BankedVRF, BankedVRFStorage, SlotContractEr
 from vector_core.v2.writeback import WBArbiter, WBBufferV2, WBEntry
 
 MASK32 = 0xFFFFFFFF
-STALL_REASONS = ("raw", "waw", "war", "bank", "mask", "compat", "fu_busy", "xbar", "round")
+STALL_REASONS = ("raw", "waw", "war", "bank", "mask", "compat", "fu_busy", "xbar", "round",
+                 "kernel")
 
 
 def bits_bf16(b: int) -> float:
@@ -114,6 +122,9 @@ class VectorCoreV2(Clocked):
         self.on_mask_write: Callable[[int, int, int], None] = self._write_local_mask
         self.blocked_mask_banks = frozenset()
         self._pending_local_masks: List[Tuple[int, int, int]] = []
+        #: Tokens a kernel sequencer fires into FU groups this cycle, by group
+        #: name (kernel_port.FUGroupPort.fire); consumed by step().
+        self.kernel_tokens: Dict[str, Token] = {}
 
         self.cycle = -1
         self._last_progress = 0
@@ -310,7 +321,10 @@ class VectorCoreV2(Clocked):
                     self.stats["compat_cross_pair_reads"][st.op.slot] += 1
                     self.stats["compat_cross_pair_cycles"][st.op.slot] += penalty
 
-        tokens: Dict[str, Token] = {}
+        tokens: Dict[str, Token] = dict(self.kernel_tokens)
+        if self.kernel_tokens:
+            progress = True
+            self.kernel_tokens = {}
         for st in sends:
             progress = True
             self._fire(st, c, tokens)
@@ -338,14 +352,14 @@ class VectorCoreV2(Clocked):
     def _wb_offers(self) -> List[WBEntry]:
         out = []
         for name, g in self.groups.items():
-            if g.out is not None:
+            if g.out is not None and g.out.kind != "kernel":
                 out.append(self._token_entry("fu:" + name, g.out))
         if self.alu is not None and self.alu.rtree.out is not None:
             out.append(self._token_entry("fu:rtree", self.alu.rtree.out))
         n = self.vector_len
         for s, vls in enumerate(self.vls_units):
             wb = vls.wb_q.peek()
-            if wb is not None:
+            if wb is not None and not (wb.get("meta") or {}).get("vloop"):
                 data = [bits_bf16(b) for b in wb["data"]][:n]
                 data += [0.0] * (n - len(data))
                 out.append(WBEntry("vlsu%d" % s, int(wb["vd"]), data))
@@ -448,7 +462,8 @@ class VectorCoreV2(Clocked):
             if st.mask_left and id(st) not in mask_grant:
                 unread.setdefault(("m", int(st.op.mask_reg)), set()).add(id(st))
 
-        sends, dest_taken = [], {}
+        # A kernel token fired into a group this cycle takes its input.
+        sends, dest_taken = [], {"fu:" + g: "kernel" for g in self.kernel_tokens}
         for st in states:
             if st.sent or st.reason:
                 if not st.sent and st.reason:
@@ -466,6 +481,8 @@ class VectorCoreV2(Clocked):
             elif (st.op.kind == "compare"
                   and unread.get(("m", int(st.op.vmd)), set()) - {id(st)}):
                 st.reason = "war"
+            elif dest_taken.get(st.op.dest) == "kernel":
+                st.reason = "kernel"
             elif st.op.dest in dest_taken:
                 st.reason = "xbar"
                 self.stats["xbar_conflicts"][st.op.dest] = \
@@ -605,7 +622,7 @@ class VectorCoreV2(Clocked):
                         for v in self.vls_units)
                 and not self.tp_reqs and not self.tp_vds
                 and not (self.transpose.busy and self.tp_cols_left == 0)
-                and not self._pending_local_masks)
+                and not self._pending_local_masks and not self.kernel_tokens)
 
     def describe(self) -> str:
         lines = ["cycle %d, rounds queued %d, busy %s" % (self.cycle, len(self.rounds),

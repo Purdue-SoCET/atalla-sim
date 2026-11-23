@@ -14,12 +14,21 @@ Decode 2 has already read every operand -- vector registers, masks, scalars
     vreg.ld, vreg.st                          the VLSU of scratchpad `sid`
     vmov.vts, mv.mts                          move-to-scalar: combinational,
                                               written through scalar writeback
+    relu.vl (vloop)                           the vloop sequencer
+                                              (vector_core/vloop.py)
     scpad.ld, scpad.st                        the backend of scratchpad
                                               rs3[31:30]
 
 Readiness back to decode 2 is per unit: the lanes' ALU, MUL and EXP, the
 reduction, the GSAU, move-to-scalar, each VLSU, and each scratchpad's busy
 flag (an SDMA in flight).
+
+The vloop sequencer runs a whole loop over scratchpad rows by itself: its
+loads and stores go through the VLSUs of the pads it holds, its load data
+comes back to it rather than to writeback (the VLSU tags it), and it writes
+no register. Decode 2 learns from it whether it is free, which pads it
+holds and which FU rows it fires next cycle; core.py reads those after
+dispatch, so a vloop entering EX already blocks the packet behind it.
 
 Writeback (v_wb_arbiter): one vector register write per bank (vd[1:0]) per
 cycle, by fixed priority VLSU 0-3, GSAU, reduction, lanes; a loser holds its
@@ -59,9 +68,10 @@ from typing import Any, Callable, Deque, Dict, List, Optional, Sequence, Tuple
 
 from scheduler.control import (
     V_ALU_ADD, V_ALU_MEQ, V_ALU_MGT, V_ALU_MLT, V_ALU_MNEQ, V_ALU_SUB, V_EXP, V_GSAU,
-    V_MUL, V_MVMT, V_REDU, V_TRANS, V_VLSU, VectorOp, SdmaOp)
+    V_CISC, V_MUL, V_MVMT, V_REDU, V_TRANS, V_VLSU, VectorOp, SdmaOp)
 from scheduler.execute import Result
 from scheduler.semantics import bits_fp32, fp32_bits
+from vector_core.vloop import VLoopSequencer
 
 MASK32 = 0xFFFFFFFF
 
@@ -210,6 +220,8 @@ class VectorSide:
         self._tp_reqs: Deque[Tuple[str, Any]] = deque()
         self._tp_vds: Deque[int] = deque()
         self._tp_cols_left = 0
+        self.vloop = VLoopSequencer(vc.vls_units, lambda pad: self.sdma_busy[pad],
+                                    vector_len=self.n)
         self.stats = dict(lane_ops=0, gsau_ops=0, vlsu_loads=0, vlsu_stores=0,
                           transpose_pushes=0, transpose_pops=0,
                           sdma_loads=0, sdma_stores=0, vector_writes=0, mask_writes=0,
@@ -235,7 +247,7 @@ class VectorSide:
         out = []
         for s, vls in enumerate(self.vc.vls_units):
             wb = vls.wb_q.peek()
-            if wb is not None:
+            if wb is not None and not (wb.get("meta") or {}).get("vloop"):
                 data = [bits_bf16(b) for b in wb["data"]][: self.n]
                 data += [0.0] * (self.n - len(data))
                 out.append(VectorWrite("vlsu%d" % s, int(wb["vd"]), data))
@@ -299,6 +311,10 @@ class VectorSide:
             ops = issued.operands.get(("vector", o.slot), {})
             if o.fu == V_MVMT:
                 continue                         # handled by offer_mts()
+            if o.fu == V_CISC:
+                self.vloop.start(o.funct, in_row=ops["rs1"], out_row=ops["rs2"],
+                                 n=ops["rs3"], sid_in=o.sid, sid_out=o.sid_out)
+                continue
             if o.fu == V_VLSU:
                 self._dispatch_vlsu(o, ops)
             elif o.fu == V_TRANS:
@@ -451,6 +467,7 @@ class VectorSide:
     def tick(self, cycle: int) -> None:
         self._feed_transpose()
         self.vc.tick_units(float(cycle))
+        self.vloop.tick(cycle)
         self._collect_lanes()
 
     def take_sdma_done(self) -> List[int]:
@@ -480,6 +497,7 @@ class VectorSide:
                         and v.wb_q.is_empty() and v.outstanding_loads() == 0
                         for v in vc.vls_units)
                 and not any(self.sdma_busy) and self.mts.held is None
+                and self.vloop.idle
                 # every transpose request done; a push still writing its row
                 # counts, a drain left waiting for tpop.vi doesn't
                 and not self._tp_reqs and not self._tp_vds

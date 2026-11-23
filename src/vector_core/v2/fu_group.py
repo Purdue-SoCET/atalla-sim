@@ -67,6 +67,13 @@ def elementwise(op: str, src0: Sequence[float], src1: Sequence[float],
             for a, b, m in zip(src0, src1, mask)]
 
 
+def zeroed(values: Sequence[Optional[float]]) -> List[float]:
+    """elementwise()'s result with masked-off elements as +0.0: zeroing, as
+    the vloop sequencer's masked ops use (kernel_port). Normal slot ops merge
+    instead -- their masked-off elements aren't written."""
+    return [0.0 if v is None else v for v in values]
+
+
 def compare_mask(op: str, src0: Sequence[float], src1: Sequence[float], mask: int,
                  old: int) -> int:
     """A compare's 32-bit mask: the result bits where `mask` is set, the

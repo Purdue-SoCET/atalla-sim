@@ -6,11 +6,16 @@ r % 8. So slot 1 reads v2/v10/... as src0 and v3/v11/... as src1.
 """
 import pytest
 
-from vector_core.v2.config import VectorCoreConfig
+from vector_core.v2.config import DEFAULT_V2_GROUPS, VectorCoreConfig
 from vector_core.v2.core import VectorCoreV2
 from vector_core.v2.fu_group import elementwise
 from vector_core.v2.slots import SlotOp
 from vector_core.v2.vrf_banks import SlotContractError
+
+
+#: The default groups' latencies; the delays below follow them.
+L_OF = {g.name: g.latency for g in DEFAULT_V2_GROUPS}
+RTREE_LEVELS = VectorCoreConfig.rtree_levels
 
 
 def make(**kw):
@@ -38,8 +43,9 @@ def elem(slot, op, src0, src1, vd, name, dest=None, mask=0):
                   kind="elem", op=op, src0=src0, src1=src1, vd=vd, mask_reg=mask, name=name)
 
 
-@pytest.mark.parametrize("op,group,L", [("add", "fu:alu", 1), ("mul", "fu:mul", 1),
-                                        ("exp", "fu:exp", 14)])
+@pytest.mark.parametrize("op,group,L", [("add", "fu:alu", L_OF["alu"]),
+                                        ("mul", "fu:mul", L_OF["mul"]),
+                                        ("exp", "fu:exp", L_OF["exp"])])
 def test_dependent_delay_is_L_plus_3(op, group, L):
     vc = make()
     vc.write_vreg(2, [0.5] * 32)
@@ -51,14 +57,15 @@ def test_dependent_delay_is_L_plus_3(op, group, L):
     assert fires(vc, "c")[0] - fires(vc, "p")[0] == L + 3
 
 
-def test_reduction_dependent_delay_is_9():
+def test_reduction_dependent_delay_is_L_plus_tree_plus_3():
     vc = make()
     vc.write_vreg(2, [1.0] * 32)
     vc.issue_round([SlotOp(slot=1, dest="fu:alu", kind="reduce", op="sum", src0=2, vd=4,
                            mask_reg=0, imm=0x40, name="p")])
     vc.issue_round([elem(2, "add", 4, 5, 12, "c")])
     run(vc)
-    assert fires(vc, "c")[0] - fires(vc, "p")[0] == 9
+    # 9 with the original ALU latency of 1
+    assert fires(vc, "c")[0] - fires(vc, "p")[0] == L_OF["alu"] + RTREE_LEVELS + 3
     assert vc.read_vreg(4) == [32.0] * 32
 
 
@@ -162,7 +169,7 @@ def test_two_results_to_two_banks_write_in_the_same_cycle():
     run(vc, 20)
     assert fires(vc, "a") == fires(vc, "b") == [0]
     assert vc.stats["wb_writes"] == 2
-    assert vc.readable_at[16] == vc.readable_at[17] == 0 + 1 + 3
+    assert vc.readable_at[16] == vc.readable_at[17] == 0 + L_OF["alu"] + 3
     assert vc.idle
 
 

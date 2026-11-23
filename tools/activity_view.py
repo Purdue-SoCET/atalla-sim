@@ -212,14 +212,23 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
     box("lsu", 652, 230, 100, 48, "SCLR LD/ST\n(EX5)");
     box("mts", 760, 230, 100, 48, "Move to\nscalar");
     // Vector core.
-    var lanes = count("lane"), vls = count("vlsu");
-    panel("Vector core: " + lanes + " lanes x " + (32 / Math.max(1, lanes)) + " elements", 10, 306, 860, 116, "#dbe5ec", "#a9bccb");
-    var lw = Math.min(30, (520 - 20) / Math.max(1, lanes) - 3);
-    for (i = 0; i < lanes; i++) {
-      var per = 32 / lanes;
-      box("lane" + i, 20 + i * (lw + 3), 336, lw, 74, "L" + i, "unit",
-          {sub: lanes <= 16 ? (per > 1 ? (i * per) + "-" + (i * per + per - 1) : "" + i) : ""});
+    var lanes = count("lane"), groups = count("fu"), vls = count("vlsu");
+    if (groups) {
+      // The M x N core: one box per full-width FU group (and the RTree).
+      panel("Vector core: M x N, " + groups + " FU groups", 10, 306, 860, 116, "#dbe5ec", "#a9bccb");
+      var gw = (440 - 20) / groups - 4;
+      for (i = 0; i < groups; i++)
+        box("fu" + i, 20 + i * (gw + 4), 336, gw, 74, byId["fu" + i].label, "unit");
+    } else {
+      panel("Vector core: " + lanes + " lanes x " + (32 / Math.max(1, lanes)) + " elements", 10, 306, 860, 116, "#dbe5ec", "#a9bccb");
+      var lw = Math.min(30, (440 - 20) / Math.max(1, lanes) - 3);
+      for (i = 0; i < lanes; i++) {
+        var per = 32 / lanes;
+        box("lane" + i, 20 + i * (lw + 3), 336, lw, 74, "L" + i, "unit",
+            {sub: lanes <= 16 ? (per > 1 ? (i * per) + "-" + (i * per + per - 1) : "" + i) : ""});
+      }
     }
+    box("vloop", 452, 336, 74, 74, "vloop\nsequencer");
     box("gsau", 532, 336, 74, 74, "GSAU");
     box("transpose", 612, 336, 74, 74, "Transpose");
     var vw = (860 - 692 - 4 * (vls - 1)) / Math.max(1, vls);

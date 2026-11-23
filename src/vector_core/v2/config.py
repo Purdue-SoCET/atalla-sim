@@ -26,12 +26,13 @@ class FUGroupSpec:
     rtree: bool = False
 
 
-#: Q6: ALU 1, MUL 1, EXP 14, SQRT 8, RECIP 11, all II = 1. The ALU group runs
-#: add/sub/compares and is the reduction tree's input.
+#: ALU 4, MUL 4 (revised from Q6's 1 and 1, 2026-11-12), EXP 14, SQRT 8,
+#: RECIP 11, all II = 1. The ALU group runs add/sub/compares and is the
+#: reduction tree's input.
 DEFAULT_V2_GROUPS: Tuple[FUGroupSpec, ...] = (
     FUGroupSpec("alu", ("add", "sub", "max", "min", "and", "or", "xor",
-                        "gt", "lt", "eq", "ne"), 1, rtree=True),
-    FUGroupSpec("mul", ("mul",), 1),
+                        "gt", "lt", "eq", "ne"), 4, rtree=True),
+    FUGroupSpec("mul", ("mul",), 4),
     FUGroupSpec("exp", ("exp",), 14),
     FUGroupSpec("sqrt", ("sqrt",), 8),
     FUGroupSpec("recip", ("recip",), 11),

@@ -143,6 +143,7 @@ def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]
                           axi_params: Optional[AXIParams] = None,
                           vector_arch: str = "lanes",
                           vector_cfg: Optional[VectorCoreConfig] = None,
+                          vloop_variants: Optional[Dict[Any, str]] = None,
                           **core_kw) -> AtallaPlatform:
     """`program` and `data` as load_program_text returns them; `data` words
     go into DRAM. `systolic_array` is "meissa" (the RTL's) or "tpu"; extra
@@ -160,7 +161,9 @@ def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]
     `burst_bytes` gives way to 8-byte beats. `vector_arch` "fu_groups" (or a
     `vector_cfg` with that arch) builds the M x N vector core
     (vector_core/v2, docs/vector_core_v2_change_plan.md) instead of today's
-    lanes; `lane_count` then doesn't apply."""
+    lanes; `lane_count` then doesn't apply. `vloop_variants` picks the body
+    each vloop runs, {loop (funct or name): variant}, e.g. {"gelu.vl":
+    "reload"} (vector_core/vloop.py, variants_of)."""
     use_axi = (dram_channel is not None) if axi is None else bool(axi)
     if vector_cfg is None:
         # Today's programs aren't register-allocated for bank pairs, so the
@@ -171,8 +174,6 @@ def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]
                          % (vector_arch, vector_cfg.arch))
     factory = None
     if vector_cfg.arch == "fu_groups":
-        if activity:
-            raise ValueError("the activity view does not draw the M x N vector core yet")
         factory = lambda vls_count, _cfg=vector_cfg: make_vector_core(_cfg, vls_count=vls_count)
     parts = build_tpu_platform(dtype="bf16", lane_count=lane_count,
                                systolic_array=systolic_array,
@@ -204,6 +205,8 @@ def build_atalla_platform(program: Dict[int, int], data: Optional[Dict[int, int]
                          dcache_port=ports["dcache"], **core_kw)
     if warm_icache:
         core.warm_icache()
+    for loop, variant in (vloop_variants or {}).items():
+        core.vector.vloop.use_variant(loop, variant)
     for r, v in (init_sregs or {}).items():
         core.decode2.srf.storage.write(int(r), int(v) & MASK32)
     sysarr_bridge = ArrayValueBridge(vc, parts.sa)

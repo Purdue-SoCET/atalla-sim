@@ -19,6 +19,13 @@ changes nothing). It gathers:
   cycles each master lost waiting for it. On the AXI bus: bursts are AXI
   transactions, the read and write paths' bytes a cycle against their 8
   each, and the cycles a master waited for a full bus FIFO.
+- **The vloop sequencer** (only when a loop ran): rows, its ARM / RUN /
+  DRAIN cycles and stalls, rows per cycle against the 1/II ceiling, its
+  micro-ops, measured load latency, peak buffer depth, the tables it ran,
+  and how long ordinary vector ops were held back by it. It shows in "unit
+  busy" as `vloop` and `vloop:<FU row/group>`, in the instruction mix as
+  `vloop`, and a lane op held out of a cycle the loop takes (v1) as the
+  bucket `stall:alu:vloop` / `stall:mul:vloop`.
 - **Work and intensity:** floating-point operations done (lanes and the
   array), throughput per cycle, DRAM bandwidth used against its peak, and
   arithmetic intensity against bytes really moved over DRAM -- unlike the
@@ -42,7 +49,7 @@ from base.clocked_object import Clocked
 from scheduler.control import (
     ALU, BF_ADD, BF_DIV, BF_MULT, BF_SLT, BF_SUB, BF_TO_INT, CONTROL, HALT, INT_TO_BF, LD,
     S_DIV, S_MOD, S_MULT, SQRT, ST, V_EXP, V_GSAU, V_MUL, V_MVMT, V_REDU, V_TRANS, V_VLSU,
-    VECTOR_ALU_FUS)
+    VECTOR_ALU_FUS, V_CISC)
 from scheduler.execute import START
 from scheduler.isa import PACKET_SIZE
 
@@ -67,6 +74,8 @@ def _vector_class(o) -> str:
         return "move"
     if o.fu == V_TRANS:
         return "transpose"
+    if o.fu == V_CISC:
+        return "vloop"
     return "vector_other"
 
 
@@ -92,6 +101,7 @@ class PerfMonitor(Clocked):
         #: write it, so a hazard can be put down to the unit it waits on.
         self._producer: Dict = {}
         self._mul_ops_seen = 0
+        self._vloop_ticked = 0
         self.timeline: List[str] = []
         self.timeline_busy: List[List[str]] = []
 
@@ -179,6 +189,19 @@ class PerfMonitor(Clocked):
         vc = vs.vc
         if vs._lane_ops or vs._lane_results:
             out.append("lanes")
+        # The vloop sequencer: "vloop" from start to the last store leaving,
+        # "vloop:<kind>" while its micro-ops are in that FU row / group.
+        seq = getattr(vs, "vloop", None)
+        # Busy in every cycle it ticked in ARM / RUN / DRAIN -- including the
+        # last DRAIN cycle, after which it is already IDLE when sampled.
+        ticked = (seq.stats["arm_cycles"] + seq.stats["run_cycles"]
+                  + seq.stats["drain_cycles"]) if seq is not None else 0
+        loop_cycle, self._vloop_ticked = ticked > self._vloop_ticked, ticked
+        if loop_cycle:
+            out.append("vloop")
+            for kind, row in seq.rows.items():
+                if row.busy:
+                    out.append("vloop:" + kind)
         g = vc.gsau
         if g.has_pending() or not g.rd_queue.is_empty() or not g.writebacks.is_empty():
             out.append("gsau")
@@ -243,7 +266,7 @@ class PerfMonitor(Clocked):
         flops = lane_flops + array_flops
         ops = sum(self.mix.values())
 
-        return {
+        out = {
             "cycles": self.cycles,
             "cycle_breakdown": {k: v for k, v in self.buckets.most_common()},
             "issue": {
@@ -287,6 +310,56 @@ class PerfMonitor(Clocked):
                 "arithmetic_intensity": flops / dram_bytes if dram_bytes else None,
             },
         }
+        # Only when a loop ran, so programs without one report as before (the
+        # equivalence snapshots hold whole reports).
+        seq = getattr(vs, "vloop", None) if vs else None
+        if seq is not None and seq.stats["loops"]:
+            out["vloop"] = self._vloop_report(seq, n)
+        return out
+
+    def _vloop_report(self, seq, n: int) -> Dict:
+        """The vloop sequencer: what ran, how well the pipeline kept up, what
+        held it back. Its CMP/MUL/... element ops are counted here, apart
+        from "work"'s FLOPs (relu's MUL by 1.0 is a select, not arithmetic)."""
+        st = seq.stats
+        run, stall = st["run_cycles"], st["stall_cycles"]
+        tables = {name: {"ii": t.ii, "ii_wanted": t.ii_wanted, "stages": t.stages,
+                         "offsets": {op.name: off for op, off in zip(t.ops, t.offsets)}}
+                  for name, t in seq.tables_run.items()}
+        best = max((1.0 / t.ii for t in seq.tables_run.values()), default=None)
+        vc_stall = getattr(self.p.vc, "stats", {}).get("stall", {})
+        return {
+            "loops": st["loops"],
+            "rows": st["rows"],
+            "tables": tables,
+            "cycles": {"arm": st["arm_cycles"], "run": run, "drain": st["drain_cycles"],
+                       "total": st["arm_cycles"] + run + st["drain_cycles"]},
+            "stall_cycles": stall,
+            "stall_fraction": stall / run if run else 0.0,
+            # Rows finished per RUN cycle (prologue and epilogue included), and
+            # the steady-state ceiling 1/II it approaches as n grows.
+            "rows_per_run_cycle": st["rows"] / run if run else 0.0,
+            "rows_per_cycle_ceiling": best,
+            "loads": st["loads"],
+            "stores": st["stores"],
+            "fu_ops": st["fu_ops"],
+            "element_ops": st["fu_ops"] * n,
+            "load_latency": {"min": st["load_latency_min"], "max": st["load_latency_max"]},
+            "peak_buffer": dict(seq.peak_buffer),
+            # The buffers' size the tables need in steady state (the area
+            # side of a variant's trade; peak_buffer is what this run
+            # reached), and scratchpad reads per row (the other side).
+            "buffer_bits": dict(seq.buffer_bits()),
+            "buffer_bits_total": sum(seq.buffer_bits().values()),
+            "loads_per_row": st["loads"] / st["rows"] if st["rows"] else 0.0,
+            # Ordinary vector ops held back by the loop: v1 holds them in
+            # decode 2 ("stall:alu:vloop"); the M x N core stalls their slot.
+            "ops_stalled_by_loop": {
+                "decode2_cycles": sum(v for k, v in self.buckets.items()
+                                      if k.startswith("stall:") and k.endswith(":vloop")),
+                "slot_stall_cycles": sum(vc_stall.get("kernel", [])),
+            },
+        }
 
     def summary(self) -> str:
         """report() as a readable text table."""
@@ -326,6 +399,30 @@ class PerfMonitor(Clocked):
                      100 * w["array_mac_utilization"]),
                   "arithmetic intensity: %s FLOP/DRAM byte"
                   % ("%.2f" % ai if ai is not None else "n/a")]
+        vl = r.get("vloop")
+        if vl is not None:
+            c, lat, held = vl["cycles"], vl["load_latency"], vl["ops_stalled_by_loop"]
+            lines += ["", "vloop: %d loop(s), %d rows; %d cycles (arm %d, run %d, drain %d), "
+                      "%d stalled (%.1f%% of run)"
+                      % (vl["loops"], vl["rows"], c["total"], c["arm"], c["run"], c["drain"],
+                         vl["stall_cycles"], 100 * vl["stall_fraction"]),
+                      "  %.3f rows/run cycle (ceiling 1/II = %s), %d micro-ops "
+                      "(%d element ops), load latency %s..%s"
+                      % (vl["rows_per_run_cycle"],
+                         "%.3f" % vl["rows_per_cycle_ceiling"]
+                         if vl["rows_per_cycle_ceiling"] is not None else "n/a",
+                         vl["fu_ops"], vl["element_ops"], lat["min"], lat["max"])]
+            for name, t in vl["tables"].items():
+                lines.append("  table %s: II %d, %d stages, offsets %s"
+                             % (name, t["ii"], t["stages"],
+                                " ".join("%s@%d" % kv for kv in t["offsets"].items())))
+            lines.append("  peak buffer entries: %s; ordinary ops held back: decode 2 %d "
+                         "cycles, M x N slots %d cycles"
+                         % (", ".join("%s %d" % kv for kv in vl["peak_buffer"].items()),
+                            held["decode2_cycles"], held["slot_stall_cycles"]))
+            lines.append("  buffers %d bits (%.2f KB), %.2f loads/row"
+                         % (vl["buffer_bits_total"], vl["buffer_bits_total"] / 8192,
+                            vl["loads_per_row"]))
         return "\n".join(lines)
 
     def to_json(self, path: str, timeline: bool = False) -> None:

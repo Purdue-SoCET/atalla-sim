@@ -66,6 +66,10 @@ class ActivityProbe(Clocked):
         self.p = platform
         self._tick = -1
         self.cycles = 0
+        #: The M x N core's FU groups, in block order (fu0, fu1, ...), with the
+        #: ALU group's reduction tree after them; empty for the lane core.
+        groups = getattr(platform.vc, "groups", None) or {}
+        self._groups: List[str] = list(groups) + (["rtree"] if groups else [])
         self.blocks: List[Block] = self._blocks()
         #: block id -> [[first cycle, last cycle, state], ...], idle not stored
         self.intervals: Dict[str, List[List[int]]] = {b.id: [] for b in self.blocks}
@@ -73,7 +77,8 @@ class ActivityProbe(Clocked):
         #: The performance monitor's cycle bucket, as [[first, last, name], ...]
         self.buckets: List[list] = []
         # Counters whose change between cycles says something happened.
-        self._prev = {"issued": 0, "to_d1d2": 0, "mul_ops": 0, "act_rows": 0}
+        self._prev = {"issued": 0, "to_d1d2": 0, "mul_ops": 0, "act_rows": 0,
+                      "vloop": (0, 0, 0, 0)}
         self._prev_stalls = [0] * len(platform.backends)
         self._prev_contention = {n: 0 for n in platform.ports}
         self._prev_axi = (0, 0)
@@ -118,8 +123,17 @@ class ActivityProbe(Clocked):
             Block("lsu", "SCLR LD/ST", "Execute", "requests queued",
                   "only waiting for cache misses"),
         ]
-        b += [Block("lane%d" % i, "Lane %d" % i, "Execute", "a functional unit holds work")
-              for i in range(len(p.vc.datapath.lanes))]
+        if self._groups:                       # the M x N core: its FU groups
+            b += [Block("fu%d" % i, name.upper() if name != "rtree" else "RTree", "Execute",
+                        "a token in its pipeline or output register (a slot op's or "
+                        "the vloop's)")
+                  for i, name in enumerate(self._groups)]
+        else:
+            b += [Block("lane%d" % i, "Lane %d" % i, "Execute", "a functional unit holds work")
+                  for i in range(len(p.vc.datapath.lanes))]
+        b += [Block("vloop", "vloop sequencer", "Execute",
+                    "running a loop: firing micro-ops, or its last stores draining",
+                    "waiting for its pads (ARM), or a due micro-op couldn't fire")]
         b += [
             Block("gsau", "GSAU", "Execute", "rows to or from the array"),
             Block("transpose", "Transpose", "Execute", "a row or column in flight"),
@@ -252,8 +266,26 @@ class ActivityProbe(Clocked):
         # Vector core.
         vc = p.vc
         vs = core.vector
-        for i, lane in enumerate(vc.datapath.lanes):
-            s["lane%d" % i] = IDLE if lane.is_idle() else ACTIVE
+        if self._groups:
+            for i, name in enumerate(self._groups):
+                g = vc.alu.rtree if name == "rtree" else vc.groups[name]
+                held = getattr(g, "_held_reduce", None) is not None
+                s["fu%d" % i] = ACTIVE if (g.stages or g.out is not None or held) else IDLE
+        else:
+            for i, lane in enumerate(vc.datapath.lanes):
+                s["lane%d" % i] = IDLE if lane.is_idle() else ACTIVE
+        # The sequencer, by what its tick did this cycle (as the perf
+        # monitor's "vloop"): ARM waiting or a held RUN cycle is stalled.
+        seq = getattr(vs, "vloop", None) if vs is not None else None
+        st = seq.stats if seq is not None else {}
+        now = tuple(st.get(k, 0) for k in ("arm_cycles", "run_cycles", "drain_cycles",
+                                           "stall_cycles"))
+        was = prev.get("vloop", (0, 0, 0, 0))
+        if sum(now[:3]) == sum(was[:3]):
+            s["vloop"] = IDLE
+        else:
+            s["vloop"] = STALLED if (now[0] > was[0] or now[3] > was[3]) else ACTIVE
+        prev["vloop"] = now
         g = vc.gsau
         s["gsau"] = (ACTIVE if g.has_pending() or not g.rd_queue.is_empty()
                      or not g.writebacks.is_empty() else IDLE)

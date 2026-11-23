@@ -13,7 +13,10 @@ A packet issues only as a whole, and only in a cycle where all three hold:
                          EX1..EX5, the vector ALU/MUL/reduction lanes, the
                          VLSU of each scratchpad it names, the GSAU, the
                          move-to-scalar unit, and the scratchpad an SDMA's rs3
-                         names (rs3[31:30], a register value, not a field)
+                         names (rs3[31:30], a register value, not a field);
+                         for a vloop, the sequencer and no SDMA running on
+                         its input or output scratchpad; and no VLSU op or
+                         SDMA on a scratchpad a running vloop holds
     register files ready the scalar, vector and mask register files have
                          each served every read: a file whose busiest bank
                          has k >= 2 reads takes k cycles while reggie
@@ -52,8 +55,23 @@ raise PacketContractError (or are counted, with strict=False):
     one instruction per scalar EX unit   EX1 is ALU *and* control
     4 scalar, 4 vector, 2 mask reads     the source register allocator's ports
     1 GSAU, 1 move-to-scalar, 2 lane ops scheduler_core's routing
+    1 vloop (CISC vector loop)           one sequencer
     1 VLSU op and 1 SDMA per scratchpad
     no vreg.st and SDMA on one rs1      no defined order between them
+    no VLSU op or SDMA on a vloop's      the sequencer owns those
+      scratchpads in its packet            scratchpads once it issues
+
+The vloop sequencer shares the vector core with ordinary packets:
+
+  * It holds its input and output scratchpads for the whole loop
+    (vloop_pads), so a VLSU op or SDMA naming one waits -- whole-pad
+    blocking, decode 2's existing VLSU-ready and SDMA-busy checks with the
+    sequencer's pads ORed in. It is also how a later instruction waits for
+    the loop's results: no completion register is needed.
+  * A vloop waits for any SDMA still running on either of its scratchpads,
+    so the rows a scpad.ld is bringing in have landed before it reads them.
+  * FU rows it uses in a cycle show up as that unit not ready in
+    vector_ready, so lane ops share the rows with no check of their own.
 
 Where the RTL is wrong this does what was meant (see also control.py):
 
@@ -71,8 +89,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from base.rtl_module import RTLModule
 from scheduler.control import (
-    SdmaOp, ScalarOp, VectorOp, V_EXP, V_GSAU, V_MUL, V_MVMT, V_TRANS, V_REDU, V_VLSU,
-    VECTOR_ALU_FUS, decode_scalar, decode_sdma, decode_vector)
+    SdmaOp, ScalarOp, VectorOp, V_CISC, V_EXP, V_GSAU, V_MUL, V_MVMT, V_TRANS, V_REDU,
+    V_VLSU, VECTOR_ALU_FUS, decode_scalar, decode_sdma, decode_vector)
 from scheduler.isa import PACKET_SIZE
 
 NUM_SCALAR_REGS = 256
@@ -164,7 +182,8 @@ def contract_violations(pkt: DecodedPacket, sdma_sids: Sequence[int] = ()) -> Li
                            ("mask", len(pkt.mask_reads()), MASK_READ_PORTS)):
         if n > limit:
             out.append("%d %s register reads, %d ports" % (n, what, limit))
-    for fu, name in ((V_GSAU, "GSAU"), (V_MVMT, "move-to-scalar"), (V_TRANS, "transpose")):
+    for fu, name in ((V_GSAU, "GSAU"), (V_MVMT, "move-to-scalar"), (V_TRANS, "transpose"),
+                     (V_CISC, "vloop")):
         if sum(o.fu == fu for o in v) > 1:
             out.append("more than one %s op" % name)
     lanes = sum(o.is_lane_op for o in v)
@@ -178,6 +197,11 @@ def contract_violations(pkt: DecodedPacket, sdma_sids: Sequence[int] = ()) -> Li
     shared = set(VstReservations.vst_regs(pkt)) & {o.rs1_rd for o in d}
     if shared:
         out.append("vreg.st and an SDMA on one rs1 (x%d)" % min(shared))
+    loop_pads = {sid for o in v if o.fu == V_CISC for sid in (o.sid, o.sid_out)}
+    if loop_pads & set(vlsu_sids):
+        out.append("a VLSU op on a vloop's scratchpad")
+    if loop_pads & set(sdma_sids):
+        out.append("an SDMA on a vloop's scratchpad")
     return out
 
 
@@ -433,6 +457,7 @@ class Decode2(RTLModule):
                sdma=[0] * PACKET_SIZE, valid=False, pc=0, pc_pred_addr=0,
                predict_taken=False, flush=False, halt=False,
                ex_ready=None, vector_ready=None, vlsu_ready=None, scpad_busy=None,
+               vloop_pads=None,
                wb_scalar=(), wb_vector=(), wb_mask=(), wb_sdma=(), wb_vst=())
     OUTS = dict(ready=False, issued=None)
     #: The EX/WB latch's writebacks hold for one cycle only.
@@ -469,28 +494,47 @@ class Decode2(RTLModule):
         vec = self.in_vector_ready or {}
         vlsu = self.in_vlsu_ready or [True] * 4
         busy = self.in_scpad_busy or [False] * 4
+        held = self.in_vloop_pads or [False] * 4   # scratchpads a running vloop holds
         s, v, d = pkt.valid_ops()
         self.blocked_by = None
         for o in s:
             if o.ex is not None and not ex_ready.get(o.ex, True):
                 self.blocked_by = "ex%d" % o.ex
                 return False
+        if not vec.get("rounds", True) and any(o.fu != V_CISC for o in v):
+            # M x N core: no room in its round queue for this packet's slot ops
+            self.blocked_by = "rounds"
+            return False
         for o in v:
             unit = ("alu" if o.fu in VECTOR_ALU_FUS else "mul" if o.fu == V_MUL
                     else "reduction" if o.fu == V_REDU else "gsau" if o.fu == V_GSAU
                     else "movement" if o.fu == V_MVMT
-                    else "transpose" if o.fu == V_TRANS else None)
+                    else "transpose" if o.fu == V_TRANS
+                    else "vloop" if o.fu == V_CISC else None)
             if o.fu == V_EXP:
                 continue                 # decode_2: EXP is always ready (TODO in RTL)
             if o.fu == V_VLSU and not vlsu[o.sid]:
                 self.blocked_by = "vlsu%d" % o.sid
                 return False
+            if o.fu == V_VLSU and held[o.sid]:
+                self.blocked_by = "vloop_pad%d" % o.sid
+                return False
+            if o.fu == V_CISC:
+                for sid in (o.sid, o.sid_out):
+                    if busy[sid]:
+                        self.blocked_by = "sdma%d" % sid
+                        return False
             if unit and not vec.get(unit, True):
-                self.blocked_by = unit
+                # "alu:vloop": the unit is free but the vloop sequencer fires
+                # into it next cycle (v1's lane side; core.py marks it).
+                self.blocked_by = unit + (":vloop" if vec.get(unit + ":vloop") else "")
                 return False
         for sid in sids.values():
             if busy[sid]:
                 self.blocked_by = "sdma%d" % sid
+                return False
+            if held[sid]:
+                self.blocked_by = "vloop_pad%d" % sid
                 return False
         return True
 
@@ -566,7 +610,8 @@ class Decode2(RTLModule):
                     "rs2": read(o.rs2) if o.use_rs2 else 0,
                     "vs1": self.vrf.read(o.vs1) if o.use_vs1 and at_issue else None,
                     "vs2": self.vrf.read(o.vs2) if o.use_vs2 and at_issue else None,
-                    "vms": self.mrf.read(o.vms) if o.use_vms and at_issue else MASK32}
+                    "vms": self.mrf.read(o.vms) if o.use_vms and at_issue else MASK32,
+                    "rs3": read(o.rs3) if o.use_rs3 else 0}
         for o in pkt.sdma:
             if o.valid:
                 out.operands[("sdma", o.slot)] = {"rs1": read(o.rs1_rd), "rs2": read(o.rs2),

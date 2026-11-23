@@ -40,10 +40,17 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from scheduler.isa import FIELDS, INST_BYTES, INST_W, OPCODES, PACKET_BYTE_W, PACKET_SIZE
+from scheduler.isa import (FIELDS, INST_BYTES, INST_W, OPCODES, PACKET_BYTE_W, PACKET_SIZE,
+                           VLOOP_FUNCT_BITS, VLOOP_FUNCTS, VLOOP_OPCODE)
 
 #: mnemonic -> (opcode, type)
 _BY_NAME = {name: (op, kind) for op, (name, kind) in OPCODES.items()}
+#: A vloop's mnemonic names its funct (relu.vl -> funct 0); bare "vloop" is
+#: not an instruction.
+_VLOOP_KIND = OPCODES[VLOOP_OPCODE][1]
+del _BY_NAME[OPCODES[VLOOP_OPCODE][0]]
+_BY_NAME.update({name: (VLOOP_OPCODE, _VLOOP_KIND) for name in VLOOP_FUNCTS.values()})
+_FUNCT_OF = {name: funct for funct, name in VLOOP_FUNCTS.items()}
 #: Lines that carry no instruction: section, alignment and symbol directives.
 _DIRECTIVES = ("global", "type")
 _REG = re.compile(r"^\$?[xvm]?(\d+)$")
@@ -219,6 +226,8 @@ def encode(ins: Instr, pc: int = 0, labels: Optional[Dict[str, int]] = None) -> 
         raise AssemblyError("line %d: unknown instruction %r" % (ins.line, ins.mnemonic))
     opcode, kind = _BY_NAME[ins.mnemonic]
     word = opcode
+    if ins.mnemonic in _FUNCT_OF:
+        word = _place(word, _FUNCT_OF[ins.mnemonic], *VLOOP_FUNCT_BITS, None, ins, "funct")
     ops = list(ins.ops)
 
     if kind == "BR":
@@ -249,7 +258,7 @@ def encode(ins: Instr, pc: int = 0, labels: Optional[Dict[str, int]] = None) -> 
                             % (ins.line, ins.mnemonic, len(layout),
                                ", ".join(f[0] for f in layout), len(ops)))
     for (name, high, low, signed), text in zip(layout, ops):
-        is_value = name.startswith("imm") or name in ("num_cols", "sid")
+        is_value = name.startswith(("imm", "sid")) or name == "num_cols"
         value = _int(text, ins) if is_value else _reg(text, ins)
         if ins.mnemonic == "lui.s":
             signed = None                    # rd = imm << 7: all 25 bits unsigned

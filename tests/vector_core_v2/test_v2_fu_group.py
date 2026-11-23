@@ -11,7 +11,7 @@ import pytest
 from base.dtype import DType, cast_scalar
 from vector_core.vector_lanes import GlobalReductionUnit, _op_lut
 from vector_core.v2.fu_group import (
-    ALUGroup, FUGroup, Token, compare_mask, elementwise, reduce_tree32, reduction_vector)
+    ALUGroup, FUGroup, Token, compare_mask, elementwise, reduce_tree32, reduction_vector, zeroed)
 
 
 def tok(i=0, kind="vreg"):
@@ -127,6 +127,13 @@ def test_element_values_match_v1(op):
 def test_compare_keeps_old_bits_where_masked():
     a, b = [1.0] * 32, [0.0] * 32
     assert compare_mask("gt", a, b, mask=0x0000FFFF, old=0xABCD0000) == 0xABCDFFFF
+
+
+def test_zeroed_writes_masked_off_elements_as_zero():
+    """zeroed() is the vloop kernel port's masking, not normal ops'."""
+    mask = [i % 2 == 0 for i in range(32)]
+    out = zeroed(elementwise("add", [1.0] * 32, [2.0] * 32, mask))
+    assert out == [3.0 if m else 0.0 for m in mask]
 
 
 @pytest.mark.parametrize("op", ["sum", "min", "max"])

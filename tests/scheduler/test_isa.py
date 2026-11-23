@@ -11,6 +11,7 @@ import pytest
 from scheduler import golden
 from scheduler.isa import (
     FIELDS, INST_W, OPCODES, OP_W, PACKET_BYTE_W, PACKET_SIZE, PACKET_W,
+    VLOOP_FUNCT_BITS, VLOOP_FUNCTS, VLOOP_OPCODE,
     decode_instruction, decode_packet, get_bits, sign_extend)
 
 
@@ -24,10 +25,13 @@ def test_packet_geometry_matches_the_rtl():
 
 #: tpop.vi, tpus.vi: from the spec sheet; the functional sim doesn't have them.
 TRANSPOSE = {0b1001110, 0b1001111}
+#: vloop, the CISC vector loop: ahead of the RTL and the spec sheet. (The
+#: functional sim has it.)
+AHEAD_OF_SHEET = {VLOOP_OPCODE}
 
 
 def test_the_table_covers_every_opcode_once():
-    assert len(OPCODES) == 79                 # the RTL's 77, and tpop.vi / tpus.vi
+    assert len(OPCODES) == 80                 # the RTL's 77, tpop.vi / tpus.vi, vloop
     mnemonics = [m for m, _ in OPCODES.values()]
     assert len(set(mnemonics)) == len(mnemonics), "duplicate mnemonic"
     assert all(0 <= op < (1 << OP_W) for op in OPCODES), "opcode wider than OP_W"
@@ -93,7 +97,8 @@ def test_get_bits_is_inclusive():
 
 @pytest.mark.golden
 def test_the_table_matches_the_functional_sim():
-    assert set(OPCODES) - TRANSPOSE == set(golden.GOLDEN_OPCODES), "opcode sets differ"
+    assert set(OPCODES) - TRANSPOSE == set(golden.GOLDEN_OPCODES), \
+        "opcode sets differ"
     for op, (mnemonic, ty) in OPCODES.items():
         if op in TRANSPOSE:
             continue
@@ -147,12 +152,14 @@ def _sheet():
 
 def test_the_table_matches_the_spec_sheet():
     sheet = _sheet()
-    assert set(OPCODES) <= set(sheet), "isa.py has opcodes the spec does not"
+    assert set(OPCODES) - AHEAD_OF_SHEET <= set(sheet), "isa.py has opcodes the spec does not"
     missing = {op: sheet[op]["Instruction Name"].strip()
                for op in set(sheet) - set(OPCODES)}
     assert missing == SPEC_AHEAD_OF_RTL, (
         "spec opcodes not in isa.py changed: %s" % missing)
     for op, (mnemonic, _) in OPCODES.items():
+        if op in AHEAD_OF_SHEET:
+            continue
         spec = sheet[op]["Instruction Name"].strip().lower()
         if op in SPEC_NAMES:
             assert (mnemonic, spec) == SPEC_NAMES[op]
@@ -169,3 +176,40 @@ def test_gemm_reads_one_vector_register():
     assert gemm == 54
     pseudo = sheet[gemm]["Pseudo-code"]
     assert "vs1" in pseudo and "vs2" not in pseudo
+
+
+# --- vloop: the CISC vector loop -------------------------------------------
+
+def _vloop(funct, rs1, rs2, rs3, sid_in, sid_out):
+    hi, lo = VLOOP_FUNCT_BITS
+    return (VLOOP_OPCODE | rs1 << 7 | rs2 << 15 | rs3 << 23 | sid_in << 31
+            | sid_out << 33 | funct << lo)
+
+
+def test_vloop_decodes_its_funct_as_the_mnemonic():
+    d = decode_instruction(_vloop(0, rs1=5, rs2=6, rs3=255, sid_in=1, sid_out=3))
+    assert d == {"opcode": VLOOP_OPCODE, "mnemonic": "relu.vl", "type": "VL",
+                 "funct": 0, "rs1": 5, "rs2": 6, "rs3": 255, "sid_in": 1, "sid_out": 3}
+
+
+def test_vloop_with_an_unassigned_funct_is_unknown():
+    unused = next(f for f in range(16) if f not in VLOOP_FUNCTS)
+    assert decode_instruction(_vloop(unused, 1, 2, 3, 0, 0))["mnemonic"] == "unknown"
+
+
+@pytest.mark.golden
+def test_vloop_decodes_as_the_functional_sim_does():
+    """Field for field over random VL words, every funct (assigned or not)."""
+    rng = random.Random(20261112)
+    for _ in range(500):
+        instr = VLOOP_OPCODE | (rng.getrandbits(INST_W - OP_W) << OP_W)
+        ours = decode_instruction(instr)
+        theirs = golden.golden_decode_instruction(instr)
+        assert ours == theirs, "instr 0x%010x\n ours   %s\n golden %s" % (instr, ours, theirs)
+
+
+def test_vloop_fields_fit_and_do_not_overlap():
+    hi, lo = VLOOP_FUNCT_BITS
+    spans = [(h, l) for _, h, l, _ in FIELDS["VL"]] + [(OP_W - 1, 0), (hi, lo)]
+    bits = [b for h, l in spans for b in range(l, h + 1)]
+    assert len(bits) == len(set(bits)) and max(bits) < INST_W

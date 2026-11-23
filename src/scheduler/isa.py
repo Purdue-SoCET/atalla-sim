@@ -22,6 +22,14 @@ instructions, tpop.vi (78) and tpus.vi (79), which neither RTL branch nor
 the functional sim decodes yet. The spreadsheet
 also names opcode 46 jalr.s; the RTL calls it jalr.
 
+One opcode is ahead of everything: vloop (80, type VL), the CISC vector
+loop for the hardware-pipelined loop sequencer. Its funct field [38:35]
+picks the loop (VLOOP_FUNCTS; relu.vl is funct 0), and it reads three
+scalar registers -- rs1 the input's first scratchpad row, rs2 the output's
+first row, rs3 the number of rows -- with the input and output scratchpads
+in sid_in [32:31] and sid_out [34:33]. Input and output rows must be the
+same rows or not overlap; the compiler guarantees it.
+
 The RTL computes `PACKET_W = INST_W * PACKET_SIZE` and then comments it as
 "192 bits". The arithmetic gives 160, PACKET_BYTE_W is therefore 20, and the
 functional simulator advances the PC by 20 bytes per packet. The comment is
@@ -141,7 +149,22 @@ OPCODES: Dict[int, tuple] = {
     # ---- SDMA ----
     0b1000110: ("scpad.ld", "SDMA"),      # SCPAD_LD
     0b1000111: ("scpad.st", "SDMA"),      # SCPAD_ST
+    # ---- VL (CISC) ----                 NOT IN RTL YET
+    0b1010000: ("vloop", "VL"),    
 }
+
+#: The CISC vector-loop instruction: one opcode, the loop it runs chosen by a
+#: 4-bit funct field. Each funct names the sequencer table it runs and is the
+#: instruction's assembly mnemonic. Planned, not here until their tables
+#: exist: gelu.vl, tanh.vl, sigmoid.vl.
+VLOOP_OPCODE = 0b1010000
+VLOOP_FUNCTS: Dict[int, str] = {
+    0: "relu.vl",
+    1: "gelu.vl",
+}
+#: funct's bits. It isn't in FIELDS: the mnemonic implies it, so it is not an
+#: assembly operand.
+VLOOP_FUNCT_BITS = (38, 35)
 
 #: Field layout per instruction type, as (name, high_bit, low_bit, signed_width).
 #: signed_width is None for unsigned fields; BR is special-cased below because
@@ -168,6 +191,11 @@ FIELDS: Dict[str, tuple] = {
     "STM":  (("vmd", 10, 7, None), ("rs1", 22, 15, None)),
     "SDMA": (("rs1/rd1", 14, 7, None), ("rs2", 22, 15, None),
              ("rs3", 30, 23, None)),
+    # rs1, rs2, rs3 are registers holding the input's first scratchpad row,
+    # the output's first row and the number of rows; in the same bit
+    # positions as SDMA's three registers.
+    "VL":   (("rs1", 14, 7, None), ("rs2", 22, 15, None), ("rs3", 30, 23, None),
+             ("sid_in", 32, 31, None), ("sid_out", 34, 33, None)),
 }
 
 
@@ -207,6 +235,15 @@ def decode_instruction(instr: int) -> Dict:
             "imm": sign_extend((imm1 << 9) | imm9, 10) * INST_BYTES,
         })
         return decoded
+
+    if instr_type == "VL":
+        # The funct field picks the loop; an unassigned funct is not an
+        # instruction.
+        funct = get_bits(instr, *VLOOP_FUNCT_BITS)
+        if funct not in VLOOP_FUNCTS:
+            return {"opcode": opcode, "mnemonic": "unknown", "type": "UNKNOWN",
+                    "raw": instr}
+        decoded["mnemonic"], decoded["funct"] = VLOOP_FUNCTS[funct], funct
 
     for name, high, low, signed in FIELDS.get(instr_type, ()):
         raw = get_bits(instr, high, low)

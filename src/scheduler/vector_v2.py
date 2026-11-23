@@ -19,18 +19,26 @@ scalar writeback (MoveToScalarV2), one cycle after the slot fires
 (worklog: Q19 says the same cycle).
 
 SDMA dispatch and the vreg.st reservation release are v1's (VectorSide).
+
+A vloop (relu.vl) goes to the vloop sequencer (vector_core/vloop.py), which
+fires straight into the FU groups through their kernel ports
+(vector_core/v2/kernel_port.py) and uses the VLSUs of the pads it holds. It
+acts before the vector core's step each cycle, so its tokens claim their
+groups' inputs ahead of the slots.
 """
 
 from collections import deque
 from typing import Callable, Dict, List, Optional, Sequence
 
 from scheduler.control import (
-    V_ALU_ADD, V_ALU_MEQ, V_ALU_MGT, V_ALU_MLT, V_ALU_MNEQ, V_ALU_SUB, V_EXP, V_GSAU, V_MUL,
-    V_MVMT, V_REDU, V_TRANS, V_VLSU, VectorOp)
+    V_ALU_ADD, V_ALU_MEQ, V_ALU_MGT, V_ALU_MLT, V_ALU_MNEQ, V_ALU_SUB, V_CISC, V_EXP, V_GSAU,
+    V_MUL, V_MVMT, V_REDU, V_TRANS, V_VLSU, VectorOp)
 from scheduler.execute import Result
 from scheduler.semantics import bits_fp32
 from scheduler.vector import REDUCE_OP, VectorSide
+from vector_core.v2.kernel_port import kernel_ports, normal_ops_in_groups
 from vector_core.v2.slots import SlotOp
+from vector_core.vloop import VLoopSequencer
 
 ELEM_OP = {V_ALU_ADD: "add", V_ALU_SUB: "sub", V_MUL: "mul", V_EXP: "exp"}
 COMPARE_OP = {V_ALU_MGT: "gt", V_ALU_MLT: "lt", V_ALU_MEQ: "eq", V_ALU_MNEQ: "ne"}
@@ -88,6 +96,8 @@ class VectorSideV2:
         self.blocked_mask_banks = set()
         vc.read_mask = read_mask
         vc.on_mask_write = lambda cycle, m, value: writeback_at(cycle + 1, mask=[(m, value)])
+        self.vloop = VLoopSequencer(vc.vls_units, lambda pad: self.sdma_busy[pad],
+                                    vector_len=self.n, fu_rows=kernel_ports(vc))
         self.stats = dict(lane_ops=0, gsau_ops=0, vlsu_loads=0, vlsu_stores=0,
                           transpose_pushes=0, transpose_pops=0, sdma_loads=0, sdma_stores=0,
                           vector_writes=0, mask_writes=0, wb_conflict_cycles=0, rounds=0)
@@ -95,7 +105,9 @@ class VectorSideV2:
     # -- what PerfMonitor reads ----------------------------------------------------
     @property
     def _lane_ops(self) -> bool:
-        return self.vc.fu_busy
+        # Slot ops only: a vloop's tokens in the groups show as the monitor's
+        # "vloop:<group>" instead. With no loop running this is vc.fu_busy.
+        return normal_ops_in_groups(self.vc)
 
     @property
     def _tp_reqs(self):
@@ -115,6 +127,10 @@ class VectorSideV2:
         ok = self._round_room()
         vec = {u: ok for u in ("alu", "mul", "exp", "reduction", "gsau", "movement",
                                "transpose")}
+        # Every slot op takes a place in the round queue, whatever its unit;
+        # decode 2 checks this for all of them, so units whose own readiness
+        # the core overrides (movement) or skips (EXP) can't overfill it.
+        vec["rounds"] = ok
         vlsu = [ok] * max(4, len(self.vc.vls_units))
         return vec, vlsu, list(self.sdma_busy[:4])
 
@@ -138,8 +154,14 @@ class VectorSideV2:
         pkt = issued.packet
         ops = []
         for o in pkt.vector:
-            if o.valid:
-                ops.append(self.slot_op(o, issued.operands.get(("vector", o.slot), {})))
+            if not o.valid:
+                continue
+            operands = issued.operands.get(("vector", o.slot), {})
+            if o.fu == V_CISC:
+                self.vloop.start(o.funct, in_row=operands["rs1"], out_row=operands["rs2"],
+                                 n=operands["rs3"], sid_in=o.sid, sid_out=o.sid_out)
+                continue
+            ops.append(self.slot_op(o, operands))
         if ops:
             self.vc.issue_round(ops)
             self.stats["rounds"] += 1
@@ -197,9 +219,10 @@ class VectorSideV2:
     # -- the edge ------------------------------------------------------------------------
     def tick(self, cycle: int) -> None:
         self.vc.blocked_mask_banks = frozenset(self.blocked_mask_banks)
+        self.vloop.tick(cycle)
         self.vc.step(cycle)
         self.vc.tick_units(float(cycle))
 
     @property
     def idle(self) -> bool:
-        return self.vc.idle and not any(self.sdma_busy)
+        return self.vc.idle and not any(self.sdma_busy) and self.vloop.idle
